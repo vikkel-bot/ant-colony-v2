@@ -7,15 +7,19 @@ De Queen en agents weten welk biome ze aanspreken, nooit welke exchange
 er achter zit. Adapters zijn verwisselbaar binnen een biome zonder dat de
 rest van het systeem dat merkt.
 
-Drie datastructuren:
+Vier datastructuren:
   MarketData    — snapshot van marktprijsdata voor één symbool/timeframe
   AccountState  — snapshot van de account bij de adapter
+  LivePosition  — snapshot van één open positie bij de exchange
   BiomeAdapter  — Protocol dat elke concrete adapter moet implementeren
 
 Regels:
   - Protocol is het enige contract — geen inheritance vereist (duck typing)
   - MarketData is stale als timestamp te oud is (fail-closed: P2)
   - AccountState equity = balance + positions_value (altijd berekend)
+  - place_order() gooit nooit — retourneert OrderResult of None bij falen
+  - get_positions() gooit nooit — retourneert lijst of None bij falen
+  - Adapters zijn stateless t.o.v. interne state — state leeft in de gate
   - Geen code wordt uitgevoerd bij import (P7)
 """
 
@@ -23,7 +27,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Protocol, runtime_checkable
+
+from ant_colony.schemas.order import LiveOrder, OrderResult
 
 
 # ---------------------------------------------------------------------------
@@ -108,6 +115,54 @@ class AccountState:
 
 
 # ---------------------------------------------------------------------------
+# Live positie snapshot
+# ---------------------------------------------------------------------------
+
+@dataclass
+class LivePosition:
+    """
+    Snapshot van één open positie bij de exchange.
+
+    Wordt opgehaald via BiomeAdapter.get_positions() en gebruikt door de
+    LiveExecutionGate om positiegrootte en blootstelling te bewaken.
+
+    position_id:    Exchange-ID van de positie.
+    symbol:         Markt-identifier (bijv. "BTC-EUR").
+    biome_id:       Biome waaruit de positie afkomstig is.
+    side:           "buy" of "sell".
+    quantity:       Hoeveelheid eenheden (> 0).
+    entry_price:    Gemiddelde openingsprijs.
+    current_price:  Huidige marktprijs (voor unrealized PnL).
+    timestamp:      Tijdstip van de snapshot — altijd timezone-aware UTC.
+    """
+    position_id:   str
+    symbol:        str
+    biome_id:      str
+    side:          str          # "buy" | "sell"
+    quantity:      float
+    entry_price:   float
+    current_price: float
+    timestamp:     datetime
+
+    @property
+    def unrealized_pnl(self) -> float:
+        """
+        Ongerealiseerde PnL op basis van huidige prijs.
+
+        LONG (buy):  (current - entry) * quantity
+        SHORT (sell): (entry - current) * quantity
+        """
+        if self.side == "buy":
+            return (self.current_price - self.entry_price) * self.quantity
+        return (self.entry_price - self.current_price) * self.quantity
+
+    @property
+    def market_value(self) -> float:
+        """Huidige marktwaarde van de positie: current_price * quantity."""
+        return self.current_price * self.quantity
+
+
+# ---------------------------------------------------------------------------
 # BiomeAdapter Protocol
 # ---------------------------------------------------------------------------
 
@@ -129,7 +184,9 @@ class BiomeAdapter(Protocol):
       - `is_available()` geeft False terug bij connectieproblemen (fail-closed)
       - `get_market_data()` gooit nooit — retourneert MarketData of None bij falen
       - `get_account_state()` gooit nooit — retourneert AccountState of None bij falen
-      - Adapters zijn stateless t.o.v. posities — state leeft in PaperLedger / live gate
+      - `place_order()` gooit nooit — retourneert OrderResult of None bij falen
+      - `get_positions()` gooit nooit — retourneert lijst of None bij falen
+      - Adapters zijn stateless t.o.v. interne state — state leeft in de gate
 
     Usage::
 
@@ -137,7 +194,7 @@ class BiomeAdapter(Protocol):
         if adapter.is_available():
             data = adapter.get_market_data("BTC-EUR", "1h")
             if data and not data.is_stale():
-                # gebruik data voor strategie
+                result = adapter.place_order(order)  # alleen via LiveExecutionGate
     """
 
     @property
@@ -172,5 +229,31 @@ class BiomeAdapter(Protocol):
 
         Returns:
             AccountState snapshot, of None bij een fout of onbeschikbaarheid.
+        """
+        ...
+
+    def place_order(self, order: LiveOrder) -> OrderResult | None:
+        """
+        Stuur een order naar de exchange.
+
+        Mag alleen worden aangeroepen via LiveExecutionGate — nooit direct
+        door een agent of de Queen.
+
+        Args:
+            order: Gevalideerd LiveOrder van de execution_ant.
+
+        Returns:
+            OrderResult bij succes of zakelijke weigering door de exchange.
+            None bij een onverwachte fout (adapter-probleem).
+        """
+        ...
+
+    def get_positions(self) -> list[LivePosition] | None:
+        """
+        Haal alle open posities op bij de exchange.
+
+        Returns:
+            Lijst van LivePosition snapshots, of None bij falen.
+            Lege lijst betekent geen open posities (niet None).
         """
         ...

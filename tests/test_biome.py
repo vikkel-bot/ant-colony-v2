@@ -141,6 +141,12 @@ class StubAdapter:
     def get_account_state(self) -> AccountState | None:
         return _make_account_state(biome_id=self._biome_id)
 
+    def place_order(self, order):
+        return None
+
+    def get_positions(self):
+        return []
+
 
 # ---------------------------------------------------------------------------
 # TestMarketData

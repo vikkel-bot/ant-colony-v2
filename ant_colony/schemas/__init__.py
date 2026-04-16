@@ -4,6 +4,13 @@ from ant_colony.schemas.biome import BiomeConfig, BiomeRiskProfile, ExecutionCon
 from ant_colony.schemas.node import Node, NodeStatus
 from ant_colony.schemas.heartbeat import Heartbeat
 from ant_colony.schemas.audit_event import AuditEvent
+from ant_colony.schemas.order import (
+    LiveOrder,
+    OrderResult,
+    OrderRejectionReason,
+    OrderSide,
+    OrderType,
+)
 from ant_colony.schemas.strategy_candidate import StrategyCandidate, CandidateStatus
 
 __all__ = [
@@ -20,6 +27,11 @@ __all__ = [
     "NodeStatus",
     "Heartbeat",
     "AuditEvent",
+    "LiveOrder",
+    "OrderResult",
+    "OrderRejectionReason",
+    "OrderSide",
+    "OrderType",
     "StrategyCandidate",
     "CandidateStatus",
 ]
