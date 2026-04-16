@@ -1,3 +1,4 @@
+from ant_colony.colony.node_registry import NodeRegistry
 from ant_colony.queen.allocator import (
     AllocationPlan,
     AllocationResult,
@@ -20,4 +21,5 @@ __all__ = [
     "MissionRejectionReason",
     "PromotionResult",
     "Queen",
+    "NodeRegistry",
 ]

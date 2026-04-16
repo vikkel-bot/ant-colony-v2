@@ -30,6 +30,7 @@ from ant_colony.schemas.mission import (
     RiskLimits,
     SuccessConditions,
 )
+from ant_colony.schemas.node import Node, NodeStatus, RuntimePaths
 
 
 # ---------------------------------------------------------------------------
@@ -80,7 +81,17 @@ def _make_scheduler(tmp_path: Path) -> ColonyScheduler:
 
 
 def _make_queen(scheduler: ColonyScheduler, capital: float = 50_000.0) -> Queen:
-    return Queen(capital_total=capital, scheduler=scheduler)
+    queen = Queen(capital_total=capital, scheduler=scheduler)
+    # Registreer standaard node die overeenkomt met _make_mission() defaults
+    queen.register_node(Node(
+        node_id="node-1",
+        hostname="host-node-1",
+        allowed_biomes=["crypto", "equities"],
+        allowed_ant_types=["research_ant"],
+        heartbeat_interval=60,
+        runtime_paths=RuntimePaths(output="/out", live="/live", logs="/logs"),
+    ))
+    return queen
 
 
 def _make_mission(

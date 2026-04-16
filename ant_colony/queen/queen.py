@@ -44,6 +44,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+from ant_colony.colony.node_registry import NodeRegistry
 from ant_colony.colony.scheduler.colony_scheduler import ColonyScheduler, KillLevel
 from ant_colony.lab.promotion_criteria import AssessmentResult, PromotionCriteria
 from ant_colony.queen.allocator import (
@@ -54,6 +55,7 @@ from ant_colony.queen.allocator import (
 )
 from ant_colony.schemas.audit_event import AuditEvent, AuditEventType
 from ant_colony.schemas.mission import Mission
+from ant_colony.schemas.node import Node
 from ant_colony.schemas.strategy_candidate import (
     CandidateStatus,
     ProvenanceEntry,
@@ -78,6 +80,9 @@ class MissionRejectionReason(str, Enum):
     CAPITAL_EXCEEDED = "capital_exceeded"
     DUPLICATE_MISSION_ID = "duplicate_mission_id"
     BIOME_CAPITAL_EXCEEDED = "biome_capital_exceeded"
+    NODE_NOT_TRUSTED = "node_not_trusted"
+    ANT_TYPE_NOT_ALLOWED = "ant_type_not_allowed"
+    BIOME_NOT_ALLOWED_ON_NODE = "biome_not_allowed_on_node"
 
 
 @dataclass
@@ -166,6 +171,7 @@ class Queen:
         self._logs_root = logs_root
         self._active_missions: dict[str, Mission] = {}
         self._biome_limits: dict[str, float] = {}
+        self._node_registry: NodeRegistry = NodeRegistry()
         self._log_sequence: int = 0
 
     # ------------------------------------------------------------------
@@ -244,6 +250,40 @@ class Queen:
         if limit is None:
             return None
         return max(0.0, limit - self.biome_capital_allocated(biome_id))
+
+    # ------------------------------------------------------------------
+    # Node-governance (P1: Queen is enige die nodes vertrouwt)
+    # ------------------------------------------------------------------
+
+    def register_node(self, node: Node) -> None:
+        """
+        Registreer een node als vertrouwd.
+
+        Delegeert naar NodeRegistry. Hot-swap is toegestaan — een bestaande
+        node met hetzelfde node_id wordt overschreven met een waarschuwing.
+
+        Args:
+            node: Volledig geconfigureerde Node met node_id, allowed_biomes,
+                  allowed_ant_types en heartbeat_interval.
+        """
+        self._node_registry.register(node)
+        logger.info(
+            "Node registered: node_id='%s' biomes=%s ant_types=%s",
+            node.node_id, node.allowed_biomes, node.allowed_ant_types,
+        )
+
+    def unregister_node(self, node_id: str) -> None:
+        """
+        Verwijder een node uit het vertrouwde register.
+
+        Idempotent: onbekend node_id wordt genegeerd.
+        """
+        self._node_registry.unregister(node_id)
+        logger.info("Node unregistered: node_id='%s'", node_id)
+
+    def trusted_nodes(self) -> list[str]:
+        """Gesorteerde lijst van actieve (vertrouwde) node_ids."""
+        return self._node_registry.list_trusted()
 
     def apply_allocation_plan(self, plan: AllocationPlan) -> AllocationResult:
         """
@@ -363,6 +403,59 @@ class Queen:
             )
             return result
 
+        # --- validatie: node vertrouwd ---
+        node_id = mission.allowed_node
+        if not self._node_registry.is_trusted(node_id):
+            detail = f"node='{node_id}' is not registered or not ACTIVE"
+            logger.warning("Mission rejected: %s", detail)
+            result = MissionIssueResult.rejected(
+                MissionRejectionReason.NODE_NOT_TRUSTED,
+                mission_id=mission.mission_id,
+                detail=detail,
+            )
+            self._log_mission_event(
+                AuditEventType.MISSION_REJECTED, mission,
+                extra={"rejection_reason": result.rejection_reason},
+            )
+            return result
+
+        # --- validatie: ant_type toegestaan op node ---
+        if not self._node_registry.can_run_ant(node_id, mission.ant_type):
+            detail = (
+                f"ant_type='{mission.ant_type}' not in allowed_ant_types "
+                f"for node='{node_id}'"
+            )
+            logger.warning("Mission rejected: %s", detail)
+            result = MissionIssueResult.rejected(
+                MissionRejectionReason.ANT_TYPE_NOT_ALLOWED,
+                mission_id=mission.mission_id,
+                detail=detail,
+            )
+            self._log_mission_event(
+                AuditEventType.MISSION_REJECTED, mission,
+                extra={"rejection_reason": result.rejection_reason},
+            )
+            return result
+
+        # --- validatie: biome toegestaan op node ---
+        biome_id = mission.market_scope.biome
+        if not self._node_registry.can_run_biome(node_id, biome_id):
+            detail = (
+                f"biome='{biome_id}' not in allowed_biomes "
+                f"for node='{node_id}'"
+            )
+            logger.warning("Mission rejected: %s", detail)
+            result = MissionIssueResult.rejected(
+                MissionRejectionReason.BIOME_NOT_ALLOWED_ON_NODE,
+                mission_id=mission.mission_id,
+                detail=detail,
+            )
+            self._log_mission_event(
+                AuditEventType.MISSION_REJECTED, mission,
+                extra={"rejection_reason": result.rejection_reason},
+            )
+            return result
+
         # --- validatie: kapitaal ---
         if mission.capital_limit > self.capital_available:
             detail = (
@@ -382,7 +475,6 @@ class Queen:
             return result
 
         # --- validatie: biome-kapitaal ---
-        biome_id = mission.market_scope.biome
         biome_avail = self.biome_capital_available(biome_id)
         if biome_avail is not None and mission.capital_limit > biome_avail:
             detail = (

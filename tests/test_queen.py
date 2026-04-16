@@ -30,6 +30,7 @@ from ant_colony.schemas.mission import (
     RiskLimits,
     SuccessConditions,
 )
+from ant_colony.schemas.node import Node, NodeStatus, RuntimePaths
 
 
 # ---------------------------------------------------------------------------
@@ -45,7 +46,17 @@ def make_queen(
     capital: float = 50_000.0,
     logs_root: Path | None = None,
 ) -> Queen:
-    return Queen(capital_total=capital, scheduler=scheduler, logs_root=logs_root)
+    queen = Queen(capital_total=capital, scheduler=scheduler, logs_root=logs_root)
+    # Registreer standaard node die overeenkomt met make_mission() defaults
+    queen.register_node(Node(
+        node_id="pc2-desktop",
+        hostname="DESKTOP",
+        allowed_biomes=["crypto"],
+        allowed_ant_types=["paper_ant", "research_ant"],
+        heartbeat_interval=60,
+        runtime_paths=RuntimePaths(output="/out", live="/live", logs="/logs"),
+    ))
+    return queen
 
 
 def make_mission(
