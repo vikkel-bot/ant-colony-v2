@@ -70,6 +70,7 @@ logger = logging.getLogger(__name__)
 class MissionRejectionReason(str, Enum):
     CAPITAL_EXCEEDED = "capital_exceeded"
     DUPLICATE_MISSION_ID = "duplicate_mission_id"
+    BIOME_CAPITAL_EXCEEDED = "biome_capital_exceeded"
 
 
 @dataclass
@@ -157,6 +158,7 @@ class Queen:
         self._scheduler = scheduler
         self._logs_root = logs_root
         self._active_missions: dict[str, Mission] = {}
+        self._biome_limits: dict[str, float] = {}
         self._log_sequence: int = 0
 
     # ------------------------------------------------------------------
@@ -177,6 +179,64 @@ class Queen:
     def capital_available(self) -> float:
         """Vrij te alloceren kapitaal."""
         return max(0.0, self._capital_total - self.capital_allocated)
+
+    # ------------------------------------------------------------------
+    # Per-biome kapitaal
+    # ------------------------------------------------------------------
+
+    def set_biome_capital(self, biome_id: str, capital_limit: float) -> None:
+        """
+        Stel een kapitaallimiet in voor één biome.
+
+        Validaties:
+          - capital_limit >= 0
+          - capital_limit <= colony capital_total (biome is een subset van de kolonie)
+
+        Args:
+            biome_id:      Biome-identifier (bijv. "crypto", "equities").
+            capital_limit: Maximaal te alloceren kapitaal binnen dit biome.
+        """
+        if capital_limit < 0:
+            raise ValueError(
+                f"capital_limit must be >= 0, got {capital_limit}"
+            )
+        if capital_limit > self._capital_total:
+            raise ValueError(
+                f"capital_limit={capital_limit:.2f} exceeds colony capital_total={self._capital_total:.2f}"
+            )
+        self._biome_limits[biome_id] = capital_limit
+        logger.debug(
+            "Biome capital set: biome_id='%s' limit=%.2f", biome_id, capital_limit
+        )
+
+    def biome_capital_limit(self, biome_id: str) -> float | None:
+        """
+        Geef de ingestelde limiet voor biome_id, of None als er geen limiet is.
+        """
+        return self._biome_limits.get(biome_id)
+
+    def biome_capital_allocated(self, biome_id: str) -> float:
+        """
+        Som van capital_limit over alle actieve missions in het opgegeven biome.
+        """
+        return sum(
+            m.capital_limit
+            for m in self._active_missions.values()
+            if m.market_scope.biome == biome_id
+        )
+
+    def biome_capital_available(self, biome_id: str) -> float | None:
+        """
+        Beschikbaar kapitaal voor biome_id.
+
+        Returns:
+            None  — geen biome-limiet ingesteld (onbeperkt op biome-niveau).
+            float — max(0, limit - allocated).
+        """
+        limit = self._biome_limits.get(biome_id)
+        if limit is None:
+            return None
+        return max(0.0, limit - self.biome_capital_allocated(biome_id))
 
     # ------------------------------------------------------------------
     # Missions
@@ -227,6 +287,26 @@ class Queen:
             logger.warning("Mission rejected: %s", detail)
             result = MissionIssueResult.rejected(
                 MissionRejectionReason.CAPITAL_EXCEEDED,
+                mission_id=mission.mission_id,
+                detail=detail,
+            )
+            self._log_mission_event(
+                AuditEventType.MISSION_REJECTED, mission,
+                extra={"rejection_reason": result.rejection_reason},
+            )
+            return result
+
+        # --- validatie: biome-kapitaal ---
+        biome_id = mission.market_scope.biome
+        biome_avail = self.biome_capital_available(biome_id)
+        if biome_avail is not None and mission.capital_limit > biome_avail:
+            detail = (
+                f"capital_limit={mission.capital_limit:.2f} "
+                f"> biome_capital_available[{biome_id}]={biome_avail:.2f}"
+            )
+            logger.warning("Mission rejected: %s", detail)
+            result = MissionIssueResult.rejected(
+                MissionRejectionReason.BIOME_CAPITAL_EXCEEDED,
                 mission_id=mission.mission_id,
                 detail=detail,
             )
