@@ -1,3 +1,9 @@
+from ant_colony.queen.allocator import (
+    AllocationPlan,
+    AllocationResult,
+    AllocationSnapshot,
+    BiomeAllocationState,
+)
 from ant_colony.queen.queen import (
     MissionIssueResult,
     MissionRejectionReason,
@@ -6,6 +12,10 @@ from ant_colony.queen.queen import (
 )
 
 __all__ = [
+    "AllocationPlan",
+    "AllocationResult",
+    "AllocationSnapshot",
+    "BiomeAllocationState",
     "MissionIssueResult",
     "MissionRejectionReason",
     "PromotionResult",

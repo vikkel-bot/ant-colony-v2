@@ -9,6 +9,7 @@ Verantwoordelijkheden:
   3. Kill-switch activeren op alle drie niveaus (via ColonyScheduler)
   4. Missions intrekken en kapitaal vrijgeven
   5. StrategyCandidate promoveren of afwijzen (enige autoriteit)
+  6. AllocationPlan toepassen en allocatiestaat inzichtelijk maken
 
 Kapitaalhiërarchie:
   capital_total     = vast bij instantiatie (door Operator)
@@ -45,6 +46,12 @@ from pathlib import Path
 
 from ant_colony.colony.scheduler.colony_scheduler import ColonyScheduler, KillLevel
 from ant_colony.lab.promotion_criteria import AssessmentResult, PromotionCriteria
+from ant_colony.queen.allocator import (
+    AllocationPlan,
+    AllocationResult,
+    AllocationSnapshot,
+    BiomeAllocationState,
+)
 from ant_colony.schemas.audit_event import AuditEvent, AuditEventType
 from ant_colony.schemas.mission import Mission
 from ant_colony.schemas.strategy_candidate import (
@@ -237,6 +244,84 @@ class Queen:
         if limit is None:
             return None
         return max(0.0, limit - self.biome_capital_allocated(biome_id))
+
+    def apply_allocation_plan(self, plan: AllocationPlan) -> AllocationResult:
+        """
+        Pas een AllocationPlan toe: vertaal fracties naar absolute biome-limieten.
+
+        Voor elke biome_id in het plan wordt fraction × capital_total berekend
+        en via set_biome_capital() ingesteld. Bestaande limieten voor biomes
+        die niet in het plan staan worden niet geraakt.
+
+        Fail-closed: als één biome-limiet de validatie van set_biome_capital()
+        niet doorstaat (bijv. negatief of > capital_total), wordt het plan
+        volledig afgewezen en wordt geen enkele limiet gewijzigd (atomair).
+
+        Args:
+            plan: AllocationPlan met fracties per biome.
+
+        Returns:
+            AllocationResult — nooit een exception voor zakelijke afwijzingen.
+        """
+        # Bereken absolute limieten vooraf — valideer alles vóór toepassen
+        computed: dict[str, float] = {}
+        for biome_id, fraction in plan.allocations.items():
+            limit = fraction * self._capital_total
+            if limit < 0 or limit > self._capital_total:
+                # Dit kan alleen bij float edge cases; defensieve check
+                reason = (
+                    f"computed limit={limit:.2f} for biome '{biome_id}' "
+                    f"out of range [0, {self._capital_total:.2f}]"
+                )
+                logger.warning("AllocationPlan rejected: %s", reason)
+                return AllocationResult.rejected(reason)
+            computed[biome_id] = limit
+
+        # Alles valide — pas toe
+        for biome_id, limit in computed.items():
+            self._biome_limits[biome_id] = limit
+            logger.debug(
+                "AllocationPlan: set biome_id='%s' limit=%.2f (fraction=%.4f)",
+                biome_id, limit, plan.allocations[biome_id],
+            )
+
+        logger.info(
+            "AllocationPlan applied: %d biomes, total_fraction=%.4f, unallocated=%.4f",
+            len(computed),
+            plan.total_fraction,
+            plan.unallocated_fraction,
+        )
+        return AllocationResult(applied=True, biome_limits=dict(computed))
+
+    def allocation_snapshot(self) -> AllocationSnapshot:
+        """
+        Geef een point-in-time weergave van de volledige kapitaalallocatie.
+
+        Bevat colony-totalen en de staat van alle biomes waarvoor een limiet
+        is ingesteld. Wordt altijd vers berekend — nooit gecached (P4).
+
+        Returns:
+            AllocationSnapshot met colony-totalen en per-biome staat.
+        """
+        biome_states: list[BiomeAllocationState] = []
+        for biome_id, limit in sorted(self._biome_limits.items()):
+            allocated = self.biome_capital_allocated(biome_id)
+            available = max(0.0, limit - allocated)
+            utilization_pct = (allocated / limit * 100.0) if limit > 0 else 0.0
+            biome_states.append(BiomeAllocationState(
+                biome_id=biome_id,
+                limit=limit,
+                allocated=allocated,
+                available=available,
+                utilization_pct=utilization_pct,
+            ))
+
+        return AllocationSnapshot(
+            colony_total=self._capital_total,
+            colony_allocated=self.capital_allocated,
+            colony_available=self.capital_available,
+            biomes=biome_states,
+        )
 
     # ------------------------------------------------------------------
     # Missions
