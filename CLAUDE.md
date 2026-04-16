@@ -184,35 +184,40 @@ Queen weet niet welke exchange — alleen welk biome en risicoprofiel.
 
 ## Faseoverzicht
 
-| Fase | Doel | Gate |
-|------|------|------|
-| 0 | Doctrine + schemas + scheduler skeleton | Doctrine goedgekeurd |
-| 1 | Exit-keten validatie harness | EXIT_KETEN_VOLLEDIG_CORRECT |
-| 2 | Entry + volledige loop, paper only | 50+ paper trades bewezen |
-| 3 | Queen governance + mission + kill-switch | Kill-switch bewezen in simulatie |
-| 4 | Strategy Lab (research only) | Na bewezen live loop |
-| 5 | Multi-biome scaffolding | Na single-market paper bewijs |
-| 6 | Queen allocator upgrade | Na multi-biome paper bewijs |
-| 7 | Paper-mode multi-node simulatie | Volledig bewezen paper kolonie |
-| 8 | Guarded live adapters | Alleen na volledige paper proof |
+| Fase | Doel | Tests | Status |
+|------|------|-------|--------|
+| 0 | Doctrine + schemas + scheduler skeleton | — | ✅ bewezen |
+| 1 | Exit-keten validatie harness | 147/147 | ✅ bewezen |
+| 2 | Entry + volledige loop, paper only | 210/210 | ✅ bewezen |
+| 3 | Queen governance + mission + kill-switch | 241/241 | ✅ bewezen |
+| 4 | Strategy Lab (research only) | 286/286 | ✅ bewezen |
+| 5 | Multi-biome scaffolding | 354/354 | ✅ bewezen |
+| 6 | Queen allocator upgrade | 403/403 | ✅ bewezen |
+| 7 | Paper-mode multi-node simulatie | 487/487 | ✅ bewezen |
+| 8 | Guarded live adapters | 543/543 | ✅ bewezen |
+| 9 | Colony Dashboard | 591/591 | ✅ bewezen |
+| 10 | Eerste echte Bitvavo adapter op PC2 | — | 🔄 actief |
 
 ---
 
 ## Huidige fase
 
-**FASE 0 — actief**
+**FASE 10 — actief**
 
-Deliverables:
-- [ ] `docs/ANT_COLONY_V2_DOCTRINE.md`
-- [ ] `docs/COLONY_OBJECT_MODEL.md`
-- [ ] `docs/COLONY_GOVERNANCE.md`
-- [ ] `ant_colony/schemas/` (alle schema bestanden)
-- [ ] `ant_colony/colony/scheduler/colony_scheduler.py` (skeleton)
-- [ ] `tests/test_schemas.py`
-- [ ] `tests/test_mission_validation.py`
-- [ ] `tests/test_scheduler_tick.py`
+Doel: eerste echte Bitvavo adapter draaien op PC2 tegen de live Bitvavo API.
+De volledige paper/simulatie stack is bewezen (fases 0–9, 591 tests groen).
+Dit is de eerste stap over de grens van simulatie naar echte marktdata en orders.
+
+Gate: Bitvavo adapter op PC2 draait stabiel, heartbeat groen, market data binnenkomend,
+execution gate blokkeert live orders tot Queen expliciete toestemming geeft.
+
+**Constraints voor fase 10:**
+- Adapter wraps de v1 `bitvavo_adapter.py` — niet herschrijven
+- Execution gate staat standaard op PAPER — live alleen na expliciete Queen promotie
+- Alle market data en orders loggen naar `C:\Trading\ANT_LOGS` (append-only)
+- Heartbeat vereist — stale heartbeat = adapter stopt zichzelf
 
 ---
 
 *Dit bestand bijhouden bij elke fase-overgang.*
-*Laatste update: Fase 0 start — infrastructuur PC1/PC2 toegevoegd*
+*Laatste update: 2026-04-16 — fases 0–9 afgesloten, fase 10 gestart*
