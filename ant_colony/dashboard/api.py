@@ -1,0 +1,526 @@
+"""
+ant_colony/dashboard/api.py
+
+Dashboard REST API — leest colony state en serveert JSON aan de frontend.
+
+Endpoints:
+  GET  /api/status      — colony status + laatste tick timestamp
+  GET  /api/metrics     — kapitaal totalen + actieve agents
+  GET  /api/performance — PnL dag/week/maand/jaar/alltime (uit trade logs)
+  GET  /api/biomes      — allocatie per biome
+  GET  /api/ants        — actieve agents met TTL countdown
+  GET  /api/brokers     — broker connecties en ingezet kapitaal
+  GET  /api/ticker      — laatste 20 audit log events
+  POST /api/killswitch  — level 1/2/3 + scope, vereist operator_confirm=true
+
+Regels:
+  - Dashboard leest — schrijft nooit (behalve killswitch via Queen)
+  - Alle endpoints gooien nooit — retourneren altijd geldig JSON
+  - Ticker leest JSONL append-only logs van disk (nooit schrijven)
+  - Geen code wordt uitgevoerd bij import (P7)
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+
+from ant_colony.colony.scheduler.colony_scheduler import ColonyScheduler
+from ant_colony.queen.queen import Queen
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Colony context — geïnjecteerd bij startup door server.py
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ColonyContext:
+    """
+    Houdt verwijzingen naar alle levende colony-objecten.
+
+    Wordt één keer aangemaakt door server.py en gedeeld door alle endpoints.
+    Alle velden zijn optioneel zodat het dashboard ook zonder volledige colony
+    kan starten (bijv. tijdens tests of vroege bootstrap).
+
+    queen:           Queen-instantie — kapitaal, missions, kill-switch.
+    scheduler:       ColonyScheduler — status, tick timestamp.
+    logs_root:       Root van ANT_LOGS — voor ticker en performance data.
+    broker_names:    Mapping biome_id → leesbare naam (bijv. "crypto" → "Bitvavo").
+    """
+    queen: Queen | None = None
+    scheduler: ColonyScheduler | None = None
+    logs_root: Path | None = None
+    broker_names: dict[str, str] = field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# Response models
+# ---------------------------------------------------------------------------
+
+class StatusResponse(BaseModel):
+    status: str
+    last_tick: str | None
+    seconds_ago: float | None
+    server_time: str
+
+
+class MetricsResponse(BaseModel):
+    capital_total: float
+    capital_allocated: float
+    capital_available: float
+    active_ants: int
+    utilization_pct: float
+
+
+class PerformanceResponse(BaseModel):
+    day: float
+    week: float
+    month: float
+    year: float
+    alltime: float
+
+
+class BiomeEntry(BaseModel):
+    biome_id: str
+    display_name: str
+    limit: float
+    allocated: float
+    available: float
+    fraction: float         # allocated / limit, 0–1
+
+
+class BiomesResponse(BaseModel):
+    biomes: list[BiomeEntry]
+
+
+class AntEntry(BaseModel):
+    ant_id: str
+    ant_type: str
+    mission_id: str
+    node_id: str
+    biome: str
+    capital_limit: float
+    ttl_remaining: int | None   # seconden; None als onbekend
+    is_live: bool               # True als ant_type == "execution_ant"
+
+
+class AntsResponse(BaseModel):
+    ants: list[AntEntry]
+
+
+class BrokerEntry(BaseModel):
+    name: str
+    biome_id: str
+    status: str          # "connected" | "standby" | "unknown"
+    capital_deployed: float
+
+
+class BrokersResponse(BaseModel):
+    brokers: list[BrokerEntry]
+
+
+class TickerEvent(BaseModel):
+    event_type: str
+    source: str
+    timestamp: str
+    mission_id: str | None
+    payload: dict[str, Any]
+
+
+class TickerResponse(BaseModel):
+    events: list[TickerEvent]
+
+
+class KillSwitchRequest(BaseModel):
+    level: int              # 1 = agent, 2 = node, 3 = colony
+    scope: str | None = None
+    operator_confirm: bool
+
+
+class KillSwitchResponse(BaseModel):
+    executed: bool
+    level: int
+    scope: str | None
+    message: str
+
+
+# ---------------------------------------------------------------------------
+# Router factory
+# ---------------------------------------------------------------------------
+
+def create_router(ctx: ColonyContext) -> APIRouter:
+    """
+    Maak een APIRouter met alle dashboard endpoints.
+
+    Args:
+        ctx: ColonyContext met verwijzingen naar Queen en Scheduler.
+
+    Returns:
+        Geconfigureerde APIRouter — te mounten in de FastAPI app.
+    """
+    router = APIRouter(prefix="/api")
+
+    # ------------------------------------------------------------------
+    # GET /api/status
+    # ------------------------------------------------------------------
+
+    @router.get("/status", response_model=StatusResponse)
+    def get_status() -> StatusResponse:
+        """Colony status en laatste tick timestamp."""
+        now = datetime.now(tz=timezone.utc)
+
+        if ctx.scheduler is None:
+            return StatusResponse(
+                status="UNKNOWN",
+                last_tick=None,
+                seconds_ago=None,
+                server_time=now.strftime("%H:%M:%S"),
+            )
+
+        status = ctx.scheduler.status.value.upper()
+        last_tick = _last_tick_from_logs(ctx.logs_root)
+
+        seconds_ago: float | None = None
+        last_tick_str: str | None = None
+        if last_tick is not None:
+            seconds_ago = round((now - last_tick).total_seconds(), 1)
+            last_tick_str = last_tick.strftime("%H:%M:%S")
+
+        return StatusResponse(
+            status=status,
+            last_tick=last_tick_str,
+            seconds_ago=seconds_ago,
+            server_time=now.strftime("%H:%M:%S"),
+        )
+
+    # ------------------------------------------------------------------
+    # GET /api/metrics
+    # ------------------------------------------------------------------
+
+    @router.get("/metrics", response_model=MetricsResponse)
+    def get_metrics() -> MetricsResponse:
+        """Kapitaal totalen en actief agent-aantal."""
+        if ctx.queen is None:
+            return MetricsResponse(
+                capital_total=0.0,
+                capital_allocated=0.0,
+                capital_available=0.0,
+                active_ants=0,
+                utilization_pct=0.0,
+            )
+
+        total = ctx.queen.capital_total
+        allocated = ctx.queen.capital_allocated
+        available = ctx.queen.capital_available
+        active = len(ctx.queen.active_missions)
+        util = round(allocated / total * 100.0, 1) if total > 0 else 0.0
+
+        return MetricsResponse(
+            capital_total=total,
+            capital_allocated=allocated,
+            capital_available=available,
+            active_ants=active,
+            utilization_pct=util,
+        )
+
+    # ------------------------------------------------------------------
+    # GET /api/performance
+    # ------------------------------------------------------------------
+
+    @router.get("/performance", response_model=PerformanceResponse)
+    def get_performance() -> PerformanceResponse:
+        """PnL dag/week/maand/jaar/alltime gelezen uit paper trade logs."""
+        if ctx.logs_root is None:
+            return PerformanceResponse(day=0.0, week=0.0, month=0.0, year=0.0, alltime=0.0)
+
+        now = datetime.now(tz=timezone.utc)
+        trades = _read_all_trades(ctx.logs_root)
+
+        def pnl_since(cutoff: datetime) -> float:
+            return round(sum(
+                t.get("realized_pnl") or 0.0
+                for t in trades
+                if _parse_ts(t.get("closed_at")) is not None
+                and _parse_ts(t.get("closed_at")) >= cutoff
+            ), 2)
+
+        return PerformanceResponse(
+            day=pnl_since(now - timedelta(days=1)),
+            week=pnl_since(now - timedelta(weeks=1)),
+            month=pnl_since(now - timedelta(days=30)),
+            year=pnl_since(now - timedelta(days=365)),
+            alltime=round(sum(t.get("realized_pnl") or 0.0 for t in trades), 2),
+        )
+
+    # ------------------------------------------------------------------
+    # GET /api/biomes
+    # ------------------------------------------------------------------
+
+    @router.get("/biomes", response_model=BiomesResponse)
+    def get_biomes() -> BiomesResponse:
+        """Allocatie per biome."""
+        if ctx.queen is None:
+            return BiomesResponse(biomes=[])
+
+        snapshot = ctx.queen.allocation_snapshot()
+        _DISPLAY = {"crypto": "Crypto", "equities": "Equities", "commodities": "Commodities"}
+
+        entries = []
+        for b in snapshot.biomes:
+            fraction = round(b.allocated / b.limit, 4) if b.limit and b.limit > 0 else 0.0
+            entries.append(BiomeEntry(
+                biome_id=b.biome_id,
+                display_name=_DISPLAY.get(b.biome_id, b.biome_id.capitalize()),
+                limit=b.limit or 0.0,
+                allocated=b.allocated or 0.0,
+                available=b.available or 0.0,
+                fraction=fraction,
+            ))
+
+        return BiomesResponse(biomes=entries)
+
+    # ------------------------------------------------------------------
+    # GET /api/ants
+    # ------------------------------------------------------------------
+
+    @router.get("/ants", response_model=AntsResponse)
+    def get_ants() -> AntsResponse:
+        """Actieve agents met TTL countdown."""
+        if ctx.queen is None:
+            return AntsResponse(ants=[])
+
+        now = datetime.now(tz=timezone.utc)
+        ants = []
+        for mission in ctx.queen.active_missions.values():
+            issued_at = mission.issued_at
+            ttl_remaining: int | None = None
+            if issued_at is not None:
+                elapsed = int((now - issued_at).total_seconds())
+                ttl_remaining = max(0, mission.ttl - elapsed)
+
+            ants.append(AntEntry(
+                ant_id=f"{mission.ant_type}_{mission.mission_id[:8]}",
+                ant_type=mission.ant_type,
+                mission_id=mission.mission_id,
+                node_id=mission.allowed_node,
+                biome=mission.market_scope.biome,
+                capital_limit=mission.capital_limit,
+                ttl_remaining=ttl_remaining,
+                is_live=(mission.ant_type == "execution_ant"),
+            ))
+
+        return AntsResponse(ants=ants)
+
+    # ------------------------------------------------------------------
+    # GET /api/brokers
+    # ------------------------------------------------------------------
+
+    @router.get("/brokers", response_model=BrokersResponse)
+    def get_brokers() -> BrokersResponse:
+        """Broker connecties en ingezet kapitaal per biome."""
+        if ctx.queen is None:
+            return BrokersResponse(brokers=[])
+
+        snapshot = ctx.queen.allocation_snapshot()
+        _DEFAULT_BROKERS = {
+            "crypto": "Bitvavo",
+            "equities": "Interactive Brokers",
+            "commodities": "Saxo Bank",
+        }
+
+        brokers = []
+        for b in snapshot.biomes:
+            name = ctx.broker_names.get(b.biome_id) or _DEFAULT_BROKERS.get(b.biome_id, b.biome_id)
+            # Broker status: als er allocated kapitaal is, "connected"; anders "standby"
+            status = "connected" if (b.allocated or 0.0) > 0 else "standby"
+            brokers.append(BrokerEntry(
+                name=name,
+                biome_id=b.biome_id,
+                status=status,
+                capital_deployed=b.allocated or 0.0,
+            ))
+
+        return BrokersResponse(brokers=brokers)
+
+    # ------------------------------------------------------------------
+    # GET /api/ticker
+    # ------------------------------------------------------------------
+
+    @router.get("/ticker", response_model=TickerResponse)
+    def get_ticker() -> TickerResponse:
+        """Laatste 20 audit log events van disk."""
+        if ctx.logs_root is None:
+            return TickerResponse(events=[])
+
+        events = _read_recent_events(ctx.logs_root, limit=20)
+        return TickerResponse(events=events)
+
+    # ------------------------------------------------------------------
+    # POST /api/killswitch
+    # ------------------------------------------------------------------
+
+    @router.post("/killswitch", response_model=KillSwitchResponse)
+    def post_killswitch(req: KillSwitchRequest) -> KillSwitchResponse:
+        """
+        Activeer de kill-switch.
+
+        Vereist operator_confirm=true — zonder die vlag wordt het verzoek
+        geweigerd zonder actie.
+        """
+        if not req.operator_confirm:
+            raise HTTPException(
+                status_code=400,
+                detail="operator_confirm must be true to activate kill-switch",
+            )
+
+        if req.level not in (1, 2, 3):
+            raise HTTPException(
+                status_code=400,
+                detail=f"level must be 1, 2 or 3 — got {req.level}",
+            )
+
+        if ctx.queen is None or ctx.scheduler is None:
+            raise HTTPException(
+                status_code=503,
+                detail="colony not initialised — queen or scheduler unavailable",
+            )
+
+        from ant_colony.colony.scheduler.colony_scheduler import KillLevel
+        level_map = {1: KillLevel.AGENT, 2: KillLevel.NODE, 3: KillLevel.COLONY}
+        kill_level = level_map[req.level]
+
+        try:
+            ctx.queen.kill_switch(level=kill_level, scope=req.scope)
+        except Exception:
+            logger.exception("Kill-switch failed")
+            raise HTTPException(status_code=500, detail="kill-switch execution failed")
+
+        level_names = {1: "AGENT", 2: "NODE", 3: "COLONY"}
+        msg = f"Kill-switch level {level_names[req.level]} activated"
+        if req.scope:
+            msg += f" (scope={req.scope})"
+
+        logger.warning("Dashboard kill-switch: %s", msg)
+        return KillSwitchResponse(
+            executed=True,
+            level=req.level,
+            scope=req.scope,
+            message=msg,
+        )
+
+    return router
+
+
+# ---------------------------------------------------------------------------
+# Intern — log helpers
+# ---------------------------------------------------------------------------
+
+def _last_tick_from_logs(logs_root: Path | None) -> datetime | None:
+    """Lees de timestamp van het laatste scheduler-tick event uit disk."""
+    if logs_root is None:
+        return None
+    log_file = logs_root / "colony" / "scheduler.jsonl"
+    return _last_timestamp_in_file(log_file)
+
+
+def _last_timestamp_in_file(path: Path) -> datetime | None:
+    """Lees de laatste niet-lege regel van een JSONL bestand en parseer timestamp."""
+    if not path.exists():
+        return None
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            last_line = None
+            for line in fh:
+                line = line.strip()
+                if line:
+                    last_line = line
+        if last_line is None:
+            return None
+        record = json.loads(last_line)
+        return _parse_ts(record.get("timestamp"))
+    except (OSError, json.JSONDecodeError, KeyError):
+        return None
+
+
+def _read_all_trades(logs_root: Path) -> list[dict]:
+    """Lees alle gesloten paper trades uit ANT_LOGS/paper/*_trades.jsonl."""
+    trades: list[dict] = []
+    paper_dir = logs_root / "paper"
+    if not paper_dir.exists():
+        return trades
+    for path in paper_dir.glob("*_trades.jsonl"):
+        try:
+            with path.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if line:
+                        try:
+                            trades.append(json.loads(line))
+                        except json.JSONDecodeError:
+                            pass
+        except OSError:
+            pass
+    return trades
+
+
+def _read_recent_events(logs_root: Path, limit: int = 20) -> list[TickerEvent]:
+    """
+    Lees de meest recente audit events uit alle JSONL logs.
+
+    Scant recursief alle *.jsonl bestanden in logs_root, verzamelt alle
+    events, sorteert op timestamp en retourneert de laatste `limit` events.
+    """
+    records: list[tuple[datetime, dict]] = []
+
+    for path in logs_root.rglob("*.jsonl"):
+        try:
+            with path.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                        ts = _parse_ts(record.get("timestamp"))
+                        if ts is not None:
+                            records.append((ts, record))
+                    except json.JSONDecodeError:
+                        pass
+        except OSError:
+            pass
+
+    records.sort(key=lambda x: x[0])
+    recent = records[-limit:]
+
+    events = []
+    for ts, rec in recent:
+        events.append(TickerEvent(
+            event_type=rec.get("event_type", "unknown"),
+            source=rec.get("source", "unknown"),
+            timestamp=ts.strftime("%H:%M:%S"),
+            mission_id=rec.get("mission_id"),
+            payload=rec.get("payload", {}),
+        ))
+    return events
+
+
+def _parse_ts(value: str | None) -> datetime | None:
+    """Parseer een ISO-8601 timestamp string naar een timezone-aware datetime."""
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except (ValueError, TypeError):
+        return None

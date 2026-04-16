@@ -1,0 +1,948 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ANT COLONY v2 · Queen Dashboard</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:             #F1EFE8;
+      --card:           #ffffff;
+      --border:         rgba(0,0,0,0.07);
+      --border-soft:    #f0ede6;
+      --shadow:         rgba(0,0,0,0.04);
+      --text:           #111827;
+      --muted:          #6b7280;
+      --faint:          #9ca3af;
+
+      --crypto:         #1D9E75;
+      --equities:       #378ADD;
+      --commodities:    #EF9F27;
+
+      --pnl-pos:        #166534;
+      --pnl-pos-bg:     #f0fdf4;
+      --pnl-neg:        #991b1b;
+      --pnl-neg-bg:     #fef2f2;
+
+      --danger:         #E24B4A;
+      --danger-h:       #c53737;
+
+      --queen:          #7C3AED;
+      --queen-glow:     rgba(124,58,237,0.25);
+
+      --top-bg:         #16213e;
+      --top-text:       #e8e6df;
+      --top-muted:      #8b93a8;
+
+      --tick-bg:        #0f172a;
+      --tick-green:     #4ade80;
+
+      --badge-live-bg:   #fce7f3;
+      --badge-live-txt:  #9d174d;
+      --badge-ok-bg:     #d1fae5;
+      --badge-ok-txt:    #065f46;
+      --badge-warn-bg:   #fef3c7;
+      --badge-warn-txt:  #92400e;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      font-size: 13px;
+      line-height: 1.5;
+      min-height: 100vh;
+    }
+
+    /* ──────────────────────────────────────────────
+       TOPBAR
+    ────────────────────────────────────────────── */
+
+    #topbar {
+      background: var(--top-bg);
+      color: var(--top-text);
+      display: flex;
+      align-items: center;
+      padding: 0 20px;
+      height: 54px;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      box-shadow: 0 2px 12px rgba(0,0,0,0.35);
+      gap: 0;
+    }
+
+    .tb-brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 230px;
+    }
+
+    .queen-orb {
+      width: 34px; height: 34px;
+      border-radius: 50%;
+      background: var(--queen);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 17px;
+      flex-shrink: 0;
+      box-shadow: 0 0 0 3px var(--queen-glow);
+    }
+
+    .brand-lines { display: flex; flex-direction: column; }
+    .brand-name  { font-size: 13px; font-weight: 700; letter-spacing: 0.4px; color: #f0ede6; }
+    .brand-sub   { font-size: 10px; color: var(--top-muted); letter-spacing: 0.2px; }
+
+    /* Heartbeat */
+    .tb-heartbeat {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 9px;
+    }
+
+    .hb-ecg {
+      color: #4ade80;
+      display: flex;
+      align-items: center;
+      animation: ecgpulse 2.2s ease-in-out infinite;
+    }
+    @keyframes ecgpulse {
+      0%,100% { opacity:1; }
+      50%      { opacity:.35; }
+    }
+
+    .hb-label { font-size: 9px; text-transform: uppercase; letter-spacing: .5px; color: var(--top-muted); }
+    .hb-time  { font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; color: #f0ede6; }
+    .hb-ago   { font-size: 11px; color: var(--top-muted); min-width: 70px; }
+
+    /* Status + clock */
+    .tb-status {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+    }
+
+    .pill {
+      display: inline-flex; align-items: center; gap: 5px;
+      padding: 3px 11px;
+      border-radius: 20px;
+      font-size: 11px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: .5px;
+    }
+    .pill-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+    .pill.running { background: rgba(22,163,74,.18); color: #4ade80; }
+    .pill.running .pill-dot { animation: pdot 2s ease-in-out infinite; }
+    .pill.halted  { background: rgba(220,38,38,.18);  color: #f87171; }
+    .pill.paused  { background: rgba(217,119,6,.18);  color: #fbbf24; }
+    .pill.unknown { background: rgba(156,163,175,.15); color: #9ca3af; }
+    @keyframes pdot { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.4;transform:scale(.75)} }
+
+    .live-clock {
+      font-size: 15px; font-weight: 700;
+      font-variant-numeric: tabular-nums;
+      letter-spacing: 1.5px;
+      color: #f0ede6;
+    }
+
+    /* NOODSTOP */
+    .tb-actions { min-width: 130px; display: flex; justify-content: flex-end; }
+
+    .btn-noodstop {
+      background: var(--danger);
+      color: #fff;
+      border: none;
+      padding: 7px 15px;
+      border-radius: 6px;
+      font-size: 11px; font-weight: 800;
+      letter-spacing: .4px;
+      text-transform: uppercase;
+      cursor: pointer;
+      transition: background .15s, transform .1s;
+    }
+    .btn-noodstop:hover  { background: var(--danger-h); }
+    .btn-noodstop:active { transform: scale(.97); }
+
+    /* ──────────────────────────────────────────────
+       LIVE TICKER
+    ────────────────────────────────────────────── */
+
+    #ticker {
+      background: var(--tick-bg);
+      padding: 7px 20px;
+      display: flex;
+      align-items: center;
+      gap: 11px;
+      border-bottom: 1px solid rgba(255,255,255,.04);
+    }
+
+    .tick-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: var(--tick-green);
+      flex-shrink: 0;
+      animation: tickpulse 1.6s ease-in-out infinite;
+    }
+    @keyframes tickpulse {
+      0%,100% { box-shadow: 0 0 0 0 rgba(74,222,128,.5); opacity:1; }
+      50%      { box-shadow: 0 0 0 5px rgba(74,222,128,0); opacity:.7; }
+    }
+
+    .tick-text {
+      font-family: 'SF Mono','Cascadia Code','Consolas',monospace;
+      font-size: 12px;
+      color: var(--tick-green);
+      flex: 1;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      transition: opacity .25s;
+    }
+
+    .tick-badge {
+      font-size: 9px;
+      text-transform: uppercase;
+      letter-spacing: .5px;
+      color: rgba(255,255,255,.18);
+      flex-shrink: 0;
+    }
+
+    /* ──────────────────────────────────────────────
+       MAIN
+    ────────────────────────────────────────────── */
+
+    #main {
+      padding: 16px 20px 28px;
+      max-width: 1640px;
+      margin: 0 auto;
+    }
+
+    /* 4 metric cards */
+    .metrics-row {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+
+    /* two-column */
+    .cols {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      align-items: start;
+    }
+    .col { display: flex; flex-direction: column; gap: 12px; }
+
+    /* ──────────────────────────────────────────────
+       CARDS
+    ────────────────────────────────────────────── */
+
+    .card {
+      background: var(--card);
+      border: .5px solid var(--border);
+      border-radius: 9px;
+      padding: 16px;
+      box-shadow: 0 1px 5px var(--shadow);
+    }
+
+    .card-title {
+      font-size: 10px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: .7px;
+      color: var(--muted);
+      margin-bottom: 13px;
+    }
+
+    /* metric card */
+    .mc { padding: 14px 16px; }
+    .mc-label {
+      font-size: 10px; font-weight: 600;
+      text-transform: uppercase; letter-spacing: .5px;
+      color: var(--muted); margin-bottom: 4px;
+    }
+    .mc-value {
+      font-size: 22px; font-weight: 700;
+      font-variant-numeric: tabular-nums;
+      line-height: 1.15;
+    }
+    .mc-sub { font-size: 10px; color: var(--faint); margin-top: 2px; }
+
+    /* ──────────────────────────────────────────────
+       PERFORMANCE
+    ────────────────────────────────────────────── */
+
+    .perf-grid {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 8px;
+    }
+
+    .perf-item {
+      display: flex; flex-direction: column; gap: 4px;
+      padding: 9px 10px;
+      border-radius: 6px;
+      background: #faf9f5;
+      border: .5px solid var(--border);
+    }
+
+    .perf-period {
+      font-size: 9px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: .5px;
+      color: var(--faint);
+    }
+
+    .perf-val {
+      font-size: 14px; font-weight: 700;
+      font-variant-numeric: tabular-nums;
+    }
+    .perf-val.pos  { color: var(--pnl-pos); }
+    .perf-val.neg  { color: var(--pnl-neg); }
+    .perf-val.zero { color: var(--muted); }
+
+    /* ──────────────────────────────────────────────
+       BIOME BARS
+    ────────────────────────────────────────────── */
+
+    .biome-list { display: flex; flex-direction: column; gap: 13px; }
+
+    .biome-hdr {
+      display: flex; align-items: center;
+      justify-content: space-between;
+      margin-bottom: 5px;
+    }
+
+    .biome-name-row { display: flex; align-items: center; gap: 7px; }
+    .biome-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+    .biome-name { font-size: 13px; font-weight: 600; }
+
+    .biome-nums {
+      display: flex; align-items: center; gap: 7px;
+      font-size: 11px; color: var(--muted);
+    }
+    .biome-pct { font-weight: 700; color: var(--text); font-size: 12px; }
+
+    .bar-track {
+      height: 7px; border-radius: 4px;
+      background: #ede9e0; overflow: hidden;
+    }
+    .bar-fill {
+      height: 100%; border-radius: 4px;
+      transition: width .45s ease;
+      min-width: 2px;
+    }
+
+    /* ──────────────────────────────────────────────
+       ANTS TABLE
+    ────────────────────────────────────────────── */
+
+    .ants-tbl {
+      width: 100%; border-collapse: collapse;
+      font-size: 12px;
+    }
+    .ants-tbl th {
+      text-align: left;
+      font-size: 9px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: .4px;
+      color: var(--faint);
+      padding: 0 8px 9px 0;
+      border-bottom: .5px solid var(--border);
+    }
+    .ants-tbl td {
+      padding: 9px 8px 9px 0;
+      border-bottom: .5px solid var(--border-soft);
+      vertical-align: middle;
+    }
+    .ants-tbl tr:last-child td { border-bottom: none; }
+
+    .ant-cell  { display: flex; align-items: center; gap: 7px; }
+    .ant-dot   { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    .ant-name  { font-size: 12px; font-weight: 500; }
+
+    .ttl {
+      font-family: 'SF Mono','Cascadia Code','Consolas',monospace;
+      font-size: 11px; font-variant-numeric: tabular-nums;
+      color: var(--muted);
+    }
+    .ttl.low { color: var(--danger); font-weight: 700; }
+
+    /* ──────────────────────────────────────────────
+       BADGES
+    ────────────────────────────────────────────── */
+
+    .badge {
+      display: inline-flex; align-items: center;
+      padding: 2px 8px; border-radius: 20px;
+      font-size: 9px; font-weight: 800;
+      letter-spacing: .3px; text-transform: uppercase;
+    }
+    .b-live     { background: var(--badge-live-bg); color: var(--badge-live-txt); }
+    .b-active   { background: var(--badge-ok-bg);   color: var(--badge-ok-txt); }
+    .b-conn     { background: var(--badge-ok-bg);   color: var(--badge-ok-txt); }
+    .b-standby  { background: var(--badge-warn-bg); color: var(--badge-warn-txt); }
+
+    /* ──────────────────────────────────────────────
+       BROKERS
+    ────────────────────────────────────────────── */
+
+    .broker-row {
+      display: flex; align-items: center;
+      justify-content: space-between;
+      padding: 9px 0;
+      border-bottom: .5px solid var(--border-soft);
+    }
+    .broker-row:last-child { border-bottom: none; }
+
+    .broker-lhs { display: flex; flex-direction: column; gap: 1px; }
+    .broker-nm  { font-size: 13px; font-weight: 500; display: flex; align-items: center; gap: 6px; }
+    .broker-bio { font-size: 10px; color: var(--muted); }
+    .broker-rhs { display: flex; align-items: center; gap: 10px; }
+    .broker-amt { font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
+
+    /* ──────────────────────────────────────────────
+       KILL-SWITCH
+    ────────────────────────────────────────────── */
+
+    .ks-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+
+    .btn-ks {
+      display: flex; flex-direction: column;
+      align-items: center; gap: 5px;
+      padding: 11px 8px;
+      border: 1px solid rgba(226,75,74,.25);
+      border-radius: 7px;
+      background: #fff7f7;
+      color: var(--danger);
+      cursor: pointer;
+      font-size: 11px; font-weight: 700;
+      text-align: center;
+      transition: all .15s;
+    }
+    .btn-ks:hover  { background: var(--danger); color: #fff; border-color: var(--danger); }
+    .btn-ks:active { transform: scale(.97); }
+
+    .ks-icon  { font-size: 18px; }
+    .ks-label { font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: .3px; }
+    .ks-lvl   { font-size: 9px; opacity: .65; }
+
+    .ks-warn {
+      padding: 7px 10px;
+      background: #fffbeb;
+      border: .5px solid #fde68a;
+      border-radius: 5px;
+      font-size: 10px; color: #92400e;
+      line-height: 1.4;
+    }
+
+    /* ──────────────────────────────────────────────
+       UTILITY
+    ────────────────────────────────────────────── */
+
+    .empty {
+      text-align: center; padding: 18px;
+      color: var(--faint); font-size: 12px;
+    }
+
+  </style>
+</head>
+<body>
+
+<!-- ══════════════════════════════════════════════
+     TOPBAR
+══════════════════════════════════════════════ -->
+<div id="topbar">
+
+  <div class="tb-brand">
+    <div class="queen-orb">♛</div>
+    <div class="brand-lines">
+      <span class="brand-name">ANT COLONY v2</span>
+      <span class="brand-sub">Queen dashboard · PC2 live</span>
+    </div>
+  </div>
+
+  <div class="tb-heartbeat">
+    <span class="hb-ecg">
+      <svg viewBox="0 0 64 24" width="52" height="20" fill="none"
+           stroke="currentColor" stroke-width="1.8"
+           stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="0,12 10,12 15,3 20,21 25,12 36,12 40,7 44,17 48,12 64,12"/>
+      </svg>
+    </span>
+    <span class="hb-label">laatste tick</span>
+    <span class="hb-time" id="hb-time">—:—:—</span>
+    <span class="hb-ago"  id="hb-ago"></span>
+  </div>
+
+  <div class="tb-status">
+    <div class="pill unknown" id="status-pill">
+      <span class="pill-dot"></span>
+      <span id="status-txt">LADEN</span>
+    </div>
+    <span class="live-clock" id="live-clock">00:00:00</span>
+  </div>
+
+  <div class="tb-actions">
+    <button class="btn-noodstop" onclick="noodstop()">⛔&nbsp;NOODSTOP</button>
+  </div>
+
+</div>
+
+<!-- ══════════════════════════════════════════════
+     LIVE TICKER
+══════════════════════════════════════════════ -->
+<div id="ticker">
+  <div class="tick-dot"></div>
+  <span class="tick-text" id="tick-text">verbinding maken met colony...</span>
+  <span class="tick-badge">audit log</span>
+</div>
+
+<!-- ══════════════════════════════════════════════
+     MAIN
+══════════════════════════════════════════════ -->
+<div id="main">
+
+  <!-- 4 metric cards -->
+  <div class="metrics-row">
+    <div class="card mc">
+      <div class="mc-label">Totaal kapitaal</div>
+      <div class="mc-value" id="m-total">€ —</div>
+      <div class="mc-sub"  id="m-util">—% ingezet</div>
+    </div>
+    <div class="card mc">
+      <div class="mc-label">Ingezet</div>
+      <div class="mc-value" id="m-alloc">€ —</div>
+      <div class="mc-sub">actief in missions</div>
+    </div>
+    <div class="card mc">
+      <div class="mc-label">Beschikbaar</div>
+      <div class="mc-value" id="m-avail">€ —</div>
+      <div class="mc-sub">vrij te alloceren</div>
+    </div>
+    <div class="card mc">
+      <div class="mc-label">Actieve mieren</div>
+      <div class="mc-value" id="m-ants">—</div>
+      <div class="mc-sub">missions actief</div>
+    </div>
+  </div>
+
+  <!-- two columns -->
+  <div class="cols">
+
+    <!-- ── LEFT ── -->
+    <div class="col">
+
+      <!-- Performance -->
+      <div class="card">
+        <div class="card-title">Performance</div>
+        <div class="perf-grid">
+          <div class="perf-item">
+            <span class="perf-period">Dag</span>
+            <span class="perf-val zero" id="p-day">€ 0</span>
+          </div>
+          <div class="perf-item">
+            <span class="perf-period">Week</span>
+            <span class="perf-val zero" id="p-week">€ 0</span>
+          </div>
+          <div class="perf-item">
+            <span class="perf-period">Maand</span>
+            <span class="perf-val zero" id="p-month">€ 0</span>
+          </div>
+          <div class="perf-item">
+            <span class="perf-period">Jaar</span>
+            <span class="perf-val zero" id="p-year">€ 0</span>
+          </div>
+          <div class="perf-item">
+            <span class="perf-period">All time</span>
+            <span class="perf-val zero" id="p-all">€ 0</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Biome allocatie -->
+      <div class="card">
+        <div class="card-title">Biome allocatie</div>
+        <div class="biome-list" id="biome-list">
+          <div class="empty">Geen biomes geconfigureerd</div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- ── RIGHT ── -->
+    <div class="col">
+
+      <!-- Actieve mieren -->
+      <div class="card">
+        <div class="card-title">Actieve mieren</div>
+        <table class="ants-tbl">
+          <thead>
+            <tr>
+              <th>Agent</th>
+              <th>Node</th>
+              <th>TTL</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="ants-body">
+            <tr><td colspan="4" class="empty">Geen actieve agents</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Brokers -->
+      <div class="card">
+        <div class="card-title">Brokers</div>
+        <div id="broker-list">
+          <div class="empty">Geen brokers geconfigureerd</div>
+        </div>
+      </div>
+
+      <!-- Queen kill-switch -->
+      <div class="card">
+        <div class="card-title">Queen kill-switch</div>
+        <div class="ks-grid">
+          <button class="btn-ks" onclick="doKill(1)">
+            <span class="ks-icon">🐜</span>
+            <span class="ks-label">Stop agent</span>
+            <span class="ks-lvl">Level 1</span>
+          </button>
+          <button class="btn-ks" onclick="doKill(2)">
+            <span class="ks-icon">🖥️</span>
+            <span class="ks-label">Stop node</span>
+            <span class="ks-lvl">Level 2</span>
+          </button>
+          <button class="btn-ks" onclick="doKill(3)">
+            <span class="ks-icon">🔴</span>
+            <span class="ks-label">Stop colony</span>
+            <span class="ks-lvl">Level 3</span>
+          </button>
+        </div>
+        <div class="ks-warn">
+          ⚠️ Kill-switch acties zijn onomkeerbaar. Level 3 stopt de volledige colony
+          en vereist handmatige herstart door de operator.
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════
+     JAVASCRIPT
+══════════════════════════════════════════════ -->
+<script>
+'use strict';
+
+// ── State ──────────────────────────────────────
+
+const S = {
+  status:      { status:'UNKNOWN', last_tick:null, seconds_ago:null },
+  metrics:     { capital_total:0, capital_allocated:0, capital_available:0, active_ants:0, utilization_pct:0 },
+  performance: { day:0, week:0, month:0, year:0, alltime:0 },
+  biomes:      { biomes:[] },
+  ants:        { ants:[] },
+  brokers:     { brokers:[] },
+  ticker:      { events:[] },
+  tickerIdx:   0,
+  // heartbeat live-counter
+  hbBase:      null,
+  hbAt:        null,
+};
+
+const BIOME_COLOR = { crypto:'#1D9E75', equities:'#378ADD', commodities:'#EF9F27' };
+function bcolor(id) { return BIOME_COLOR[id] || '#9ca3af'; }
+
+// ── Formatters ─────────────────────────────────
+
+function fEUR(v) {
+  if (v == null) return '—';
+  return '€\u202f' + Number(v).toLocaleString('nl-NL', {minimumFractionDigits:0, maximumFractionDigits:0});
+}
+
+function fPnL(v) {
+  if (v == null) return '€\u202f0';
+  const abs = '€\u202f' + Math.abs(v).toLocaleString('nl-NL', {minimumFractionDigits:2, maximumFractionDigits:2});
+  return (v >= 0 ? '+' : '−') + abs;
+}
+
+function fTTL(s) {
+  if (s == null) return '—';
+  if (s <= 0) return '00:00';
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  if (h > 0) return `${h}:${pad(m)}:${pad(sec)}`;
+  return `${pad(m)}:${pad(sec)}`;
+}
+
+function pad(n) { return String(n).padStart(2,'0'); }
+
+function fType(t) {
+  return (t||'').replace(/_/g,' ').replace(/\b\w/g, c => c.toUpperCase());
+}
+
+function pnlCls(v) { return v > 0 ? 'pos' : v < 0 ? 'neg' : 'zero'; }
+
+// ── Fetch ──────────────────────────────────────
+
+async function fetchAll() {
+  const get = url => fetch(url).then(r => r.json()).catch(() => null);
+  const [st, me, pe, bi, an, br, ti] = await Promise.all([
+    get('/api/status'), get('/api/metrics'), get('/api/performance'),
+    get('/api/biomes'), get('/api/ants'),    get('/api/brokers'), get('/api/ticker'),
+  ]);
+
+  if (st) {
+    S.status = st;
+    if (st.seconds_ago != null) { S.hbBase = st.seconds_ago; S.hbAt = Date.now(); }
+  }
+  if (me) S.metrics     = me;
+  if (pe) S.performance = pe;
+  if (bi) S.biomes      = bi;
+  if (an) S.ants        = an;
+  if (br) S.brokers     = br;
+  if (ti) S.ticker      = ti;
+
+  render();
+}
+
+// ── Render ─────────────────────────────────────
+
+function render() {
+  renderStatus();
+  renderMetrics();
+  renderPerf();
+  renderBiomes();
+  renderAnts();
+  renderBrokers();
+}
+
+function renderStatus() {
+  const raw = (S.status.status || 'UNKNOWN').toLowerCase();
+  const lbl = raw.toUpperCase();
+  const pill = document.getElementById('status-pill');
+  pill.className = 'pill ' + raw;
+  document.getElementById('status-txt').textContent = lbl;
+  document.getElementById('hb-time').textContent = S.status.last_tick || '—:—:—';
+}
+
+function renderMetrics() {
+  const m = S.metrics;
+  document.getElementById('m-total').textContent = fEUR(m.capital_total);
+  document.getElementById('m-alloc').textContent = fEUR(m.capital_allocated);
+  document.getElementById('m-avail').textContent = fEUR(m.capital_available);
+  document.getElementById('m-ants').textContent  = m.active_ants ?? '—';
+  document.getElementById('m-util').textContent  = (m.utilization_pct ?? 0).toFixed(1) + '% ingezet';
+}
+
+function renderPerf() {
+  const p = S.performance;
+  setPnL('p-day',   p.day);
+  setPnL('p-week',  p.week);
+  setPnL('p-month', p.month);
+  setPnL('p-year',  p.year);
+  setPnL('p-all',   p.alltime);
+}
+
+function setPnL(id, v) {
+  const el = document.getElementById(id);
+  el.textContent = fPnL(v);
+  el.className = 'perf-val ' + pnlCls(v);
+}
+
+function renderBiomes() {
+  const el = document.getElementById('biome-list');
+  const list = S.biomes.biomes || [];
+  if (!list.length) { el.innerHTML = '<div class="empty">Geen biomes geconfigureerd</div>'; return; }
+
+  el.innerHTML = list.map(b => {
+    const c   = bcolor(b.biome_id);
+    const pct = Math.min(100, Math.round((b.fraction || 0) * 100));
+    return `
+      <div>
+        <div class="biome-hdr">
+          <div class="biome-name-row">
+            <div class="biome-dot" style="background:${c}"></div>
+            <span class="biome-name">${b.display_name}</span>
+          </div>
+          <div class="biome-nums">
+            <span>${fEUR(b.allocated)}</span>
+            <span style="color:#d1d5db">/</span>
+            <span>${fEUR(b.limit)}</span>
+            <span class="biome-pct">${pct}%</span>
+          </div>
+        </div>
+        <div class="bar-track">
+          <div class="bar-fill" style="width:${pct}%;background:${c}"></div>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+function renderAnts() {
+  const tbody = document.getElementById('ants-body');
+  const ants  = S.ants.ants || [];
+  if (!ants.length) {
+    tbody.innerHTML = '<tr><td colspan="4" class="empty">Geen actieve agents</td></tr>';
+    return;
+  }
+  tbody.innerHTML = ants.map(a => {
+    const c     = bcolor(a.biome);
+    const badge = a.is_live
+      ? '<span class="badge b-live">live</span>'
+      : '<span class="badge b-active">actief</span>';
+    const low   = a.ttl_remaining != null && a.ttl_remaining < 300;
+    const ttlD  = a.ttl_remaining != null
+      ? `data-ttl="${a.ttl_remaining}" data-ttl-at="${Date.now()}"`
+      : '';
+    return `<tr>
+      <td><div class="ant-cell">
+        <div class="ant-dot" style="background:${c}"></div>
+        <span class="ant-name">${fType(a.ant_type)}</span>
+      </div></td>
+      <td style="color:var(--muted);font-size:11px">${a.node_id}</td>
+      <td><span class="ttl${low?' low':''}" ${ttlD}>${fTTL(a.ttl_remaining)}</span></td>
+      <td>${badge}</td>
+    </tr>`;
+  }).join('');
+}
+
+function renderBrokers() {
+  const el   = document.getElementById('broker-list');
+  const list = S.brokers.brokers || [];
+  if (!list.length) { el.innerHTML = '<div class="empty">Geen brokers geconfigureerd</div>'; return; }
+
+  el.innerHTML = list.map(b => {
+    const c     = bcolor(b.biome_id);
+    const badge = b.status === 'connected'
+      ? '<span class="badge b-conn">verbonden</span>'
+      : '<span class="badge b-standby">standby</span>';
+    return `<div class="broker-row">
+      <div class="broker-lhs">
+        <div class="broker-nm">
+          <div style="width:8px;height:8px;border-radius:50%;background:${c};flex-shrink:0"></div>
+          ${b.name}
+        </div>
+        <div class="broker-bio">${b.biome_id}</div>
+      </div>
+      <div class="broker-rhs">
+        <span class="broker-amt">${fEUR(b.capital_deployed)}</span>
+        ${badge}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+// ── Ticker rotation ────────────────────────────
+
+function fmtEvent(ev) {
+  if (!ev) return 'verbinding maken...';
+  const p     = ev.payload || {};
+  const parts = [ev.timestamp];
+  if (p.symbol)  parts.push(p.symbol);
+  if (p.ant_id)  parts.push(p.ant_id);
+  else           parts.push(ev.source);
+  if (p.outcome) parts.push(p.outcome);
+  else           parts.push((ev.event_type || '').replace(/_/g,' '));
+  if (ev.mission_id) parts.push('mission:' + ev.mission_id.slice(0,8));
+  return parts.join(' · ');
+}
+
+function rotateTicker() {
+  const events = S.ticker.events || [];
+  if (!events.length) return;
+  const el = document.getElementById('tick-text');
+  el.style.opacity = '0';
+  setTimeout(() => {
+    S.tickerIdx = (S.tickerIdx + 1) % events.length;
+    el.textContent = fmtEvent(events[S.tickerIdx]);
+    el.style.opacity = '1';
+  }, 280);
+}
+
+// ── Per-second tick ────────────────────────────
+
+function perSecond() {
+  // Live clock
+  const now = new Date();
+  document.getElementById('live-clock').textContent =
+    `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+
+  // Heartbeat countdown
+  if (S.hbBase != null && S.hbAt != null) {
+    const elapsed = (Date.now() - S.hbAt) / 1000;
+    const total   = Math.round(S.hbBase + elapsed);
+    document.getElementById('hb-ago').textContent = total + 's geleden';
+  }
+
+  // TTL countdown in ants table
+  document.querySelectorAll('[data-ttl]').forEach(el => {
+    const base    = parseInt(el.dataset.ttl || '0');
+    const setAt   = parseInt(el.dataset.ttlAt || '0');
+    const elapsed = Math.floor((Date.now() - setAt) / 1000);
+    const rem     = Math.max(0, base - elapsed);
+    el.textContent = fTTL(rem);
+    el.className   = 'ttl' + (rem < 300 ? ' low' : '');
+  });
+}
+
+// ── Kill-switch ────────────────────────────────
+
+async function sendKill(level, scope) {
+  try {
+    const r = await fetch('/api/killswitch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ level, scope: scope || null, operator_confirm: true }),
+    });
+    const d = await r.json();
+    if (r.ok && d.executed) {
+      alert('✓ ' + d.message);
+      fetchAll();
+    } else {
+      alert('Fout: ' + (d.detail || JSON.stringify(d)));
+    }
+  } catch (e) {
+    alert('Verbindingsfout: ' + e.message);
+  }
+}
+
+function doKill(level) {
+  let scope = null;
+  if (level === 1) {
+    scope = prompt('Agent ID om te stoppen:');
+    if (!scope) return;
+  } else if (level === 2) {
+    scope = prompt('Node ID om te stoppen:');
+    if (!scope) return;
+  }
+  const labels = {1:'AGENT', 2:'NODE', 3:'COLONY'};
+  const extra  = level === 3
+    ? '\n\n⚠️ Dit stopt de VOLLEDIGE colony en vereist handmatige herstart.'
+    : '';
+  if (!confirm(`Kill-switch Level ${level} (${labels[level]}) activeren${scope ? ' op "' + scope + '"' : ''}?${extra}`)) return;
+  sendKill(level, scope);
+}
+
+function noodstop() {
+  if (!confirm('⛔  NOODSTOP\n\nLevel 3 Colony kill-switch — stopt ALLE agents.\nVereist handmatige herstart.\n\nActiveren?')) return;
+  sendKill(3, null);
+}
+
+// ── Bootstrap ─────────────────────────────────
+
+fetchAll();
+setInterval(fetchAll,     5000);
+setInterval(perSecond,    1000);
+setInterval(rotateTicker, 4000);
+perSecond();
+
+</script>
+</body>
+</html>
