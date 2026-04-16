@@ -8,22 +8,31 @@ Verantwoordelijkheden:
   2. Kolonie-niveau kapitaalhiërarchie handhaven
   3. Kill-switch activeren op alle drie niveaus (via ColonyScheduler)
   4. Missions intrekken en kapitaal vrijgeven
+  5. StrategyCandidate promoveren of afwijzen (enige autoriteit)
 
 Kapitaalhiërarchie:
   capital_total     = vast bij instantiatie (door Operator)
   capital_allocated = som(mission.capital_limit) over actieve missions
   capital_available = max(0, capital_total - capital_allocated)
 
+Promotieketen (COLONY_GOVERNANCE.md §4):
+  RESEARCH → PAPER    (backtest criteria)
+  PAPER    → APPROVED (paper criteria, approved_by="queen" gezet)
+  APPROVED → LIVE     (approved_by="queen" vereist)
+  Elk stadium → REJECTED (Queen kan altijd afwijzen)
+
 Regels:
   - Queen is de enige autoriteit die missions mag uitgeven (P1)
-  - Mission met capital_limit > capital_available wordt geweigerd
+  - Queen is de enige die StrategyCandidate mag promoveren (P1)
+  - Promotie gaat alleen vooruit — nooit terugzetten zonder Queen actie
   - Kill-switch delegeert naar ColonyScheduler, gevolgd door audit log
   - Alle acties worden append-only gelogd naar ANT_LOGS
   - Geen code wordt uitgevoerd bij import (P7)
 
 Audit logs:
-  - Mission issued/rejected/aborted → ANT_LOGS/missions/{mission_id}.jsonl
-  - Kill-switch activated           → ANT_LOGS/colony/kill_switch.jsonl
+  - Mission issued/rejected/aborted  → ANT_LOGS/missions/{mission_id}.jsonl
+  - Kill-switch activated            → ANT_LOGS/colony/kill_switch.jsonl
+  - Candidate promoted/rejected      → ANT_LOGS/strategy/{candidate_id}.jsonl
 """
 
 from __future__ import annotations
@@ -35,8 +44,21 @@ from enum import Enum
 from pathlib import Path
 
 from ant_colony.colony.scheduler.colony_scheduler import ColonyScheduler, KillLevel
+from ant_colony.lab.promotion_criteria import AssessmentResult, PromotionCriteria
 from ant_colony.schemas.audit_event import AuditEvent, AuditEventType
 from ant_colony.schemas.mission import Mission
+from ant_colony.schemas.strategy_candidate import (
+    CandidateStatus,
+    ProvenanceEntry,
+    StrategyCandidate,
+)
+
+# Geldige voorwaartse promotie-stappen (COLONY_GOVERNANCE.md §4)
+_VALID_PROMOTIONS: dict[CandidateStatus, CandidateStatus] = {
+    CandidateStatus.RESEARCH: CandidateStatus.PAPER,
+    CandidateStatus.PAPER:    CandidateStatus.APPROVED,
+    CandidateStatus.APPROVED: CandidateStatus.LIVE,
+}
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +100,25 @@ class MissionIssueResult:
             rejection_reason=reason,
             rejection_detail=detail,
         )
+
+
+# ---------------------------------------------------------------------------
+# Promotie resultaat
+# ---------------------------------------------------------------------------
+
+@dataclass
+class PromotionResult:
+    """
+    Resultaat van een promote_candidate()-aanroep.
+
+    accepted:          True als de promotie is doorgevoerd.
+    candidate:         Nieuw StrategyCandidate met bijgewerkte status en provenance.
+                       None bij afwijzing.
+    rejection_reason:  Mensleesbare reden bij afwijzing.
+    """
+    accepted: bool
+    candidate: StrategyCandidate | None = None
+    rejection_reason: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -226,6 +267,131 @@ class Queen:
         self._log_mission_event(AuditEventType.MISSION_ABORTED, mission)
 
     # ------------------------------------------------------------------
+    # StrategyCandidate promotie
+    # ------------------------------------------------------------------
+
+    def promote_candidate(
+        self,
+        candidate: StrategyCandidate,
+        to_status: CandidateStatus,
+        criteria: PromotionCriteria | None = None,
+    ) -> PromotionResult:
+        """
+        Promoveer een StrategyCandidate naar de volgende status in de keten.
+
+        Valideert:
+          1. Huidige status is niet terminaal (REJECTED of LIVE)
+          2. Transitie is geldig en voorwaarts (RESEARCH→PAPER, PAPER→APPROVED, APPROVED→LIVE)
+          3. Criteria.assess() slaagt als criteria zijn meegegeven
+
+        Bij acceptatie:
+          - Nieuwe ProvenanceEntry toegevoegd (actor="queen")
+          - approved_by="queen" gezet bij APPROVED of LIVE
+          - Audit event gelogd naar ANT_LOGS/strategy/{candidate_id}.jsonl
+
+        Args:
+            candidate:  Te promoveren StrategyCandidate (origineel ongewijzigd).
+            to_status:  Doelstatus.
+            criteria:   Optionele PromotionCriteria — als None: alleen transitiecheck.
+
+        Returns:
+            PromotionResult — nooit een exception voor zakelijke afwijzingen.
+        """
+        # --- terminale status ---
+        if candidate.status in (CandidateStatus.REJECTED, CandidateStatus.LIVE):
+            reason = f"cannot promote from terminal status '{candidate.status.value}'"
+            logger.warning("Promotion rejected: %s (%s)", candidate.candidate_id, reason)
+            return PromotionResult(accepted=False, rejection_reason=reason)
+
+        # --- geldige transitie ---
+        expected = _VALID_PROMOTIONS.get(candidate.status)
+        if expected != to_status:
+            reason = (
+                f"invalid promotion {candidate.status.value} → {to_status.value} "
+                f"(expected → {expected.value if expected else 'none'})"
+            )
+            logger.warning("Promotion rejected: %s (%s)", candidate.candidate_id, reason)
+            return PromotionResult(accepted=False, rejection_reason=reason)
+
+        # --- criteria ---
+        if criteria is not None:
+            assessment = criteria.assess(candidate)
+            if not assessment.passed:
+                reason = f"criteria not met: {assessment.reason}"
+                logger.info("Promotion rejected by criteria: %s (%s)", candidate.candidate_id, reason)
+                return PromotionResult(accepted=False, rejection_reason=reason)
+
+        # --- bouw nieuwe candidate ---
+        new_entry = ProvenanceEntry(
+            actor="queen",
+            action=f"promoted_to_{to_status.value}",
+            details={
+                "from_status": candidate.status.value,
+                "criteria_applied": criteria is not None,
+            },
+        )
+        updates: dict = {
+            "status": to_status,
+            "provenance": list(candidate.provenance) + [new_entry],
+        }
+        if to_status in (CandidateStatus.APPROVED, CandidateStatus.LIVE):
+            updates["approved_by"] = "queen"
+
+        promoted = candidate.model_copy(update=updates)
+        logger.info(
+            "Candidate promoted: %s %s → %s",
+            promoted.candidate_id, candidate.status.value, to_status.value,
+        )
+        self._log_candidate_event(
+            AuditEventType.STRATEGY_CANDIDATE_PROMOTED, promoted,
+            extra={"from_status": candidate.status.value, "to_status": to_status.value},
+        )
+        return PromotionResult(accepted=True, candidate=promoted)
+
+    def reject_candidate(
+        self,
+        candidate: StrategyCandidate,
+        reason: str = "",
+    ) -> StrategyCandidate:
+        """
+        Wijs een StrategyCandidate af op elk moment in de keten.
+
+        Idempotent: als de candidate al REJECTED is, wordt hij ongewijzigd teruggegeven.
+        ProvenanceEntry met reden wordt toegevoegd (append-only).
+
+        Args:
+            candidate:  Te verwerpen StrategyCandidate (origineel ongewijzigd).
+            reason:     Mensleesbare reden van afwijzing.
+
+        Returns:
+            Nieuw StrategyCandidate met status=REJECTED en bijgewerkte provenance.
+        """
+        if candidate.status == CandidateStatus.REJECTED:
+            logger.warning(
+                "reject_candidate: %s already rejected — ignoring", candidate.candidate_id
+            )
+            return candidate
+
+        new_entry = ProvenanceEntry(
+            actor="queen",
+            action="rejected",
+            details={"reason": reason, "from_status": candidate.status.value},
+        )
+        rejected = candidate.model_copy(update={
+            "status": CandidateStatus.REJECTED,
+            "provenance": list(candidate.provenance) + [new_entry],
+        })
+        logger.info(
+            "Candidate rejected: %s (from=%s reason=%s)",
+            rejected.candidate_id, candidate.status.value, reason,
+        )
+        self._log_candidate_event(
+            AuditEventType.STRATEGY_CANDIDATE_REJECTED, rejected,
+            extra={"reason": reason, "from_status": candidate.status.value},
+        )
+        return rejected
+
+    # ------------------------------------------------------------------
     # Kill-switch
     # ------------------------------------------------------------------
 
@@ -290,6 +456,30 @@ class Queen:
             sequence=self._next_sequence(),
         )
         log_path = self._logs_root / "colony" / "kill_switch.jsonl"
+        self._append_to_log(log_path, event.model_dump(mode="json"))
+
+    def _log_candidate_event(
+        self,
+        event_type: AuditEventType,
+        candidate: StrategyCandidate,
+        extra: dict | None = None,
+    ) -> None:
+        if self._logs_root is None:
+            return
+        payload = {
+            "candidate_id": candidate.candidate_id,
+            "name": candidate.name,
+            "status": candidate.status.value,
+            "biome": candidate.biome,
+            **(extra or {}),
+        }
+        event = AuditEvent(
+            event_type=event_type,
+            source="queen",
+            payload=payload,
+            sequence=self._next_sequence(),
+        )
+        log_path = self._logs_root / "strategy" / f"{candidate.candidate_id}.jsonl"
         self._append_to_log(log_path, event.model_dump(mode="json"))
 
     def _append_to_log(self, path: Path, record: dict) -> None:
