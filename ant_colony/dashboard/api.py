@@ -406,7 +406,10 @@ def create_router(ctx: ColonyContext) -> APIRouter:
         for b in snapshot.biomes:
             name = ctx.broker_names.get(b.biome_id) or _DEFAULT_BROKERS.get(b.biome_id, b.biome_id)
 
-            status = "standby"
+            # Standaard: status volgt kapitaal-inzet als er geen adapter beschikbaar is.
+            # Met adapter overschrijft de werkelijke connectiviteit dit oordeel.
+            deployed = b.allocated or 0.0
+            status = "connected" if deployed > 0 else "standby"
             balance_available: float | None = None
             balance_in_orders: float | None = None
 
