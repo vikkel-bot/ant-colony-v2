@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import json
 import logging
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -197,10 +199,56 @@ class V1PositionEntry(BaseModel):
     side: str
     entry_price: float
     quantity: float
+    current_price: float | None
+    unrealized_pnl: float | None
+    pnl_pct: float | None
+    trigger_high: float | None
+    trigger_low: float | None
 
 
 class V1PositionsResponse(BaseModel):
     positions: list[V1PositionEntry]
+    scanned_at: str
+
+
+# ---------------------------------------------------------------------------
+# Colony v1 — scan helpers
+# ---------------------------------------------------------------------------
+
+_ANT_LIVE_ROOT = Path(r"C:\Trading\ANT_LIVE")
+_BITVAVO_TICKER = "https://api.bitvavo.com/v2/{market}/ticker/price"
+
+
+def _scan_open_positions(live_root: Path) -> list[dict]:
+    """Scan ANT_LIVE/live_test/**/*.json voor OPEN_POSITION records."""
+    records: list[dict] = []
+    scan_root = live_root / "live_test"
+    if not scan_root.exists():
+        return records
+    for path in scan_root.rglob("*.json"):
+        try:
+            with path.open("r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            items = data if isinstance(data, list) else [data]
+            for item in items:
+                if isinstance(item, dict) and item.get("position_state") == "OPEN_POSITION":
+                    records.append(item)
+        except (OSError, json.JSONDecodeError):
+            pass
+    return records
+
+
+def _get_live_price(market: str) -> float | None:
+    """Haal live tickerprijs op via Bitvavo public API (geen auth vereist)."""
+    try:
+        url = _BITVAVO_TICKER.format(market=market)
+        req = urllib.request.Request(url, headers={"User-Agent": "ant-colony-dashboard/2"})
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read())
+        price = data.get("price")
+        return float(price) if price is not None else None
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -501,29 +549,48 @@ def create_router(ctx: ColonyContext) -> APIRouter:
 
     @router.get("/v1positions", response_model=V1PositionsResponse)
     def get_v1positions() -> V1PositionsResponse:
-        """Open posities van Colony v1 — scant ANT_LIVE/live_test/*.json."""
-        live_root  = ctx.v1_live_root or Path(r"C:\Trading\ANT_LIVE")
-        scan_dir   = live_root / "live_test"
-        positions: list[V1PositionEntry] = []
+        """Open posities van Colony v1 — scant ANT_LIVE/live_test/**/*.json met live prijzen."""
+        now_str   = datetime.now(tz=timezone.utc).strftime("%H:%M:%S")
+        live_root = ctx.v1_live_root or _ANT_LIVE_ROOT
+        raw       = _scan_open_positions(live_root)
 
-        if not scan_dir.exists():
-            return V1PositionsResponse(positions=[])
+        entries: list[V1PositionEntry] = []
+        for pos in raw:
+            symbol      = str(pos.get("market") or pos.get("symbol") or "")
+            side        = str(pos.get("position_side") or pos.get("side") or "unknown")
+            entry_price = float(pos.get("entry_price") or 0)
+            quantity    = float(pos.get("qty") or pos.get("quantity") or 0)
 
-        for path in sorted(scan_dir.glob("*.json")):
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-                if not all(k in data for k in ("symbol", "side", "entry_price", "quantity")):
-                    continue
-                positions.append(V1PositionEntry(
-                    symbol=str(data["symbol"]),
-                    side=str(data["side"]),
-                    entry_price=float(data["entry_price"]),
-                    quantity=float(data["quantity"]),
-                ))
-            except (json.JSONDecodeError, ValueError, OSError):
-                logger.debug("/api/v1positions: fout bij lezen %s", path.name)
+            trigger_high_raw = pos.get("trigger_high")
+            trigger_low_raw  = pos.get("trigger_low")
+            trigger_high = float(trigger_high_raw) if trigger_high_raw is not None else None
+            trigger_low  = float(trigger_low_raw)  if trigger_low_raw  is not None else None
 
-        return V1PositionsResponse(positions=positions)
+            current_price = _get_live_price(symbol) if symbol else None
+
+            unrealized_pnl: float | None = None
+            pnl_pct:        float | None = None
+            if current_price is not None and entry_price > 0 and quantity > 0:
+                if side == "long":
+                    unrealized_pnl = round((current_price - entry_price) * quantity, 2)
+                elif side == "short":
+                    unrealized_pnl = round((entry_price - current_price) * quantity, 2)
+                if unrealized_pnl is not None:
+                    pnl_pct = round(unrealized_pnl / (entry_price * quantity) * 100, 2)
+
+            entries.append(V1PositionEntry(
+                symbol=symbol,
+                side=side,
+                entry_price=entry_price,
+                quantity=quantity,
+                current_price=current_price,
+                unrealized_pnl=unrealized_pnl,
+                pnl_pct=pnl_pct,
+                trigger_high=trigger_high,
+                trigger_low=trigger_low,
+            ))
+
+        return V1PositionsResponse(positions=entries, scanned_at=now_str)
 
     # ------------------------------------------------------------------
     # GET /api/ticker

@@ -507,6 +507,39 @@
     }
 
     /* ──────────────────────────────────────────────
+       COLONY v1 POSITIES
+    ────────────────────────────────────────────── */
+
+    .pos-tbl {
+      width: 100%; border-collapse: collapse;
+      font-size: 12px;
+    }
+    .pos-tbl th {
+      text-align: left;
+      font-size: 9px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: .4px;
+      color: var(--faint);
+      padding: 0 10px 9px 0;
+      border-bottom: .5px solid var(--border);
+      white-space: nowrap;
+    }
+    .pos-tbl td {
+      padding: 9px 10px 9px 0;
+      border-bottom: .5px solid var(--border-soft);
+      vertical-align: middle;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+    .pos-tbl tr:last-child td { border-bottom: none; }
+    .pos-tbl .pnl-pos { color: var(--pnl-pos); font-weight: 600; }
+    .pos-tbl .pnl-neg { color: var(--pnl-neg); font-weight: 600; }
+    .pos-tbl .trigger-warn {
+      background: #fffbeb; color: #92400e; font-weight: 700;
+      border-radius: 4px; padding: 2px 6px;
+    }
+    .v1-card { margin-top: 14px; }
+
+    /* ──────────────────────────────────────────────
        UTILITY
     ────────────────────────────────────────────── */
 
@@ -757,6 +790,29 @@
 
     </div>
   </div>
+
+  <!-- Colony v1 open posities -->
+  <div class="card v1-card">
+    <div class="card-title">Colony v1 — Open posities</div>
+    <table class="pos-tbl">
+      <thead>
+        <tr>
+          <th>Symbol</th>
+          <th>Side</th>
+          <th>Entry</th>
+          <th>Huidig</th>
+          <th>PnL €</th>
+          <th>PnL %</th>
+          <th>Trigger ▲</th>
+          <th>Trigger ▼</th>
+        </tr>
+      </thead>
+      <tbody id="v1pos-body">
+        <tr><td colspan="8" class="empty">Laden...</td></tr>
+      </tbody>
+    </table>
+  </div>
+
 </div>
 
 <!-- ══════════════════════════════════════════════
@@ -775,6 +831,7 @@ const S = {
   ants:        { ants:[] },
   brokers:     { brokers:[] },
   ticker:      { events:[] },
+  v1positions: { positions:[], scanned_at:null },
   tickerIdx:   0,
   v1status:    null,
   v1positions: { positions:[] },
@@ -787,6 +844,14 @@ const BIOME_COLOR = { crypto:'#1D9E75', equities:'#378ADD', commodities:'#EF9F27
 function bcolor(id) { return BIOME_COLOR[id] || '#9ca3af'; }
 
 // ── Formatters ─────────────────────────────────
+
+function fPrice(v) {
+  if (v == null) return '—';
+  const n = Number(v);
+  // Auto-decimals: large prices fewer decimals
+  const decimals = n >= 1000 ? 2 : n >= 1 ? 4 : 6;
+  return '€\u202f' + n.toLocaleString('nl-NL', {minimumFractionDigits: decimals, maximumFractionDigits: decimals});
+}
 
 function fEUR(v) {
   if (v == null) return '—';
@@ -1055,55 +1120,67 @@ function renderV1() {
   const st  = S.v1status;
   const pos = (S.v1positions && S.v1positions.positions) || [];
 
-  if (!st) {
-    el.innerHTML = '<div class="empty">Geen verbinding met Colony v1</div>';
-    return;
+  // Status header
+  let hdrHtml = '';
+  if (st) {
+    const dotCls    = st.ok ? 'ok' : 'err';
+    const component = st.component || 'Colony v1';
+    const hbTime    = st.last_heartbeat
+      ? st.last_heartbeat.replace('T', ' ').slice(0, 19) : '—';
+    const badge     = st.last_status
+      ? `<span class="badge ${st.ok ? 'b-conn' : 'b-standby'}">${st.last_status}</span>` : '';
+    const lane      = st.lane ? ` · ${st.lane}` : '';
+    hdrHtml = `
+      <div class="v1-status-row">
+        <div class="v1-dot ${dotCls}"></div>
+        <div class="v1-meta">
+          <span class="v1-component">${component}${lane} ${badge}</span>
+          <span class="v1-hb-time">Heartbeat: ${hbTime}</span>
+        </div>
+      </div>`;
   }
 
-  const dotCls   = st.ok ? 'ok' : 'err';
-  const component = st.component || 'Colony v1';
-  const hbTime   = st.last_heartbeat
-    ? st.last_heartbeat.replace('T', ' ').slice(0, 19)
-    : '—';
-
-  const statusBadge = st.last_status
-    ? `<span class="badge ${st.ok ? 'b-conn' : 'b-disconn'}">${st.last_status}</span>`
-    : '';
-
-  const laneTxt = st.lane ? ` · ${st.lane}` : '';
-
+  // Positions table
   let posHtml = '';
-  if (pos.length > 0) {
+  if (!pos.length) {
+    posHtml = '<div class="empty">Geen open posities — wacht op signaal</div>';
+  } else {
     const rows = pos.map(p => {
-      const sideCls = p.side === 'buy' ? 'v1-side-buy' : 'v1-side-sell';
-      return `<div class="v1-pos-row">
-        <span class="v1-sym">${p.symbol}</span>
-        <span class="${sideCls}">${p.side}</span>
-        <span class="v1-price">${fEUR2(p.entry_price)}</span>
-        <span>${fQty(p.quantity)}</span>
-      </div>`;
+      const pCls = p.unrealized_pnl > 0 ? 'pnl-pos' : p.unrealized_pnl < 0 ? 'pnl-neg' : '';
+      const sign = v => v >= 0 ? '+' : '−';
+      const pnlTxt = p.unrealized_pnl != null
+        ? sign(p.unrealized_pnl) + '€\u202f' + Math.abs(p.unrealized_pnl).toFixed(2) : '—';
+      const pctTxt = p.pnl_pct != null
+        ? (p.pnl_pct >= 0 ? '+' : '') + p.pnl_pct.toFixed(2) + '%' : '—';
+
+      const trigCell = trig => {
+        if (trig == null) return '<td style="color:var(--faint)">—</td>';
+        const warn = p.current_price != null && Math.abs(p.current_price - trig) / trig < 0.02;
+        return `<td ${warn ? 'class="trigger-warn"' : ''}>${warn ? '⚠ ' : ''}${fPrice(trig)}</td>`;
+      };
+
+      return `<tr>
+        <td style="font-weight:600">${p.symbol}</td>
+        <td style="text-transform:uppercase;font-size:11px;color:var(--muted)">${p.side}</td>
+        <td>${fPrice(p.entry_price)}</td>
+        <td>${fPrice(p.current_price)}</td>
+        <td class="${pCls}">${pnlTxt}</td>
+        <td class="${pCls}">${pctTxt}</td>
+        ${trigCell(p.trigger_high)}
+        ${trigCell(p.trigger_low)}
+      </tr>`;
     }).join('');
 
-    posHtml = `
-      <div class="v1-positions">
-        <div class="v1-pos-hdr">
-          <span>Symbool</span><span>Side</span><span>Entry</span><span>Qty</span>
-        </div>
-        ${rows}
-      </div>`;
-  } else {
-    posHtml = `<div style="font-size:11px;color:var(--faint);padding:6px 0">Geen open posities</div>`;
+    posHtml = `<table class="pos-tbl">
+      <thead><tr>
+        <th>Symbol</th><th>Side</th><th>Entry</th><th>Huidig</th>
+        <th>PnL €</th><th>PnL %</th><th>Trigger ▲</th><th>Trigger ▼</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
   }
 
-  el.innerHTML = `
-    <div class="v1-status-row">
-      <div class="v1-dot ${dotCls}"></div>
-      <div class="v1-meta">
-        <span class="v1-component">${component}${laneTxt} ${statusBadge}</span>
-        <span class="v1-hb-time">Heartbeat: ${hbTime}</span>
-      </div>
-    </div>
-    ${posHtml}`;
+  el.innerHTML = hdrHtml + posHtml;
 }
 
 // ── Ticker rotation ────────────────────────────

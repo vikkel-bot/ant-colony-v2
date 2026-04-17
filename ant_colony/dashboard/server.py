@@ -109,6 +109,7 @@ def run(
     host: str = "0.0.0.0",
     port: int = 8000,
     log_level: str = "warning",
+    reload: bool = False,
 ) -> None:
     """
     Start de dashboard server met uvicorn.
@@ -122,14 +123,36 @@ def run(
         port:      Poort. Standaard 8000.
         log_level: uvicorn log level. Standaard "warning" om kolonie-logs
                    niet te vervuilen.
+        reload:    True = herlaad bij wijziging van api.py of index.html (dev mode).
+                   Vereist dat de app als string-importpad wordt opgegeven.
     """
     import uvicorn
 
-    app = create_app(ctx)
     logger.warning(
-        "Dashboard starting on http://%s:%d — accessible from network", host, port
+        "Dashboard starting on http://%s:%d — accessible from network%s",
+        host, port, " (reload=ON)" if reload else "",
     )
-    uvicorn.run(app, host=host, port=port, log_level=log_level)
+
+    if reload:
+        # --reload vereist app als import-string, niet als object.
+        # _standalone_app() maakt een lege ColonyContext — alleen voor dev.
+        uvicorn.run(
+            "ant_colony.dashboard.server:_standalone_app",
+            host=host,
+            port=port,
+            log_level=log_level,
+            reload=True,
+            reload_dirs=[str(Path(__file__).parent)],
+            factory=True,
+        )
+    else:
+        app = create_app(ctx)
+        uvicorn.run(app, host=host, port=port, log_level=log_level)
+
+
+def _standalone_app() -> "FastAPI":
+    """Factory voor uvicorn --reload mode (lege ColonyContext)."""
+    return create_app()
 
 
 # ---------------------------------------------------------------------------
@@ -143,14 +166,13 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
 
     # Standalone start: geen echte Queen/Scheduler beschikbaar.
-    # Dashboard start met lege context — endpoints retourneren nuldata.
-    # Bedoeld voor: testen van de UI zonder draaiende colony.
-    logger.info("Starting dashboard in standalone mode (no colony context)")
+    # Start altijd met --reload zodat wijzigingen in api.py en index.html
+    # direct zichtbaar zijn zonder handmatige herstart.
+    logger.info("Starting dashboard in standalone mode (reload=ON)")
 
     logs_root_env = None
     if len(sys.argv) > 1:
         logs_root_env = _Path(sys.argv[1])
         logger.info("Logs root: %s", logs_root_env)
 
-    context = ColonyContext(logs_root=logs_root_env)
-    run(context)
+    run(reload=True)
