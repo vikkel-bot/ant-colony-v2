@@ -11,10 +11,11 @@ Endpoints:
   GET  /api/ants        — actieve agents met TTL countdown
   GET  /api/brokers     — broker connecties en ingezet kapitaal
   GET  /api/ticker      — laatste 20 audit log events
+  POST /api/missions    — geef een mission uit via de echte colony Queen
   POST /api/killswitch  — level 1/2/3 + scope, vereist operator_confirm=true
 
 Regels:
-  - Dashboard leest — schrijft nooit (behalve killswitch via Queen)
+  - Dashboard leest — schrijft nooit (behalve missions/killswitch via Queen)
   - Alle endpoints gooien nooit — retourneren altijd geldig JSON
   - Ticker leest JSONL append-only logs van disk (nooit schrijven)
   - Geen code wordt uitgevoerd bij import (P7)
@@ -32,8 +33,15 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from ant_colony.biome.biome_registry import BiomeRegistry
 from ant_colony.colony.scheduler.colony_scheduler import ColonyScheduler
 from ant_colony.queen.queen import Queen
+from ant_colony.schemas.mission import Mission
+
+# Referentie-markt per biome voor live prijsweergave in het dashboard
+_BIOME_REFERENCE_MARKET: dict[str, str] = {
+    "crypto": "BTC-EUR",
+}
 
 logger = logging.getLogger(__name__)
 
@@ -55,11 +63,13 @@ class ColonyContext:
     scheduler:       ColonyScheduler — status, tick timestamp.
     logs_root:       Root van ANT_LOGS — voor ticker en performance data.
     broker_names:    Mapping biome_id → leesbare naam (bijv. "crypto" → "Bitvavo").
+    biome_registry:  BiomeRegistry met live adapters voor echte balans/posities.
     """
     queen: Queen | None = None
     scheduler: ColonyScheduler | None = None
     logs_root: Path | None = None
     broker_names: dict[str, str] = field(default_factory=dict)
+    biome_registry: BiomeRegistry | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -89,13 +99,22 @@ class PerformanceResponse(BaseModel):
     alltime: float
 
 
+class PositionEntry(BaseModel):
+    symbol: str
+    quantity: float
+    current_price: float
+    market_value: float
+
+
 class BiomeEntry(BaseModel):
     biome_id: str
     display_name: str
     limit: float
     allocated: float
     available: float
-    fraction: float         # allocated / limit, 0–1
+    fraction: float             # allocated / limit, 0–1
+    positions: list[PositionEntry] = []
+    reference_price: float | None = None   # bijv. BTC-EUR slotkoers
 
 
 class BiomesResponse(BaseModel):
@@ -120,8 +139,10 @@ class AntsResponse(BaseModel):
 class BrokerEntry(BaseModel):
     name: str
     biome_id: str
-    status: str          # "connected" | "standby" | "unknown"
+    status: str                         # "connected" | "disconnected" | "standby"
     capital_deployed: float
+    balance_available: float | None = None   # vrij beschikbaar saldo bij exchange
+    balance_in_orders: float | None = None   # vergrendeld in open orders
 
 
 class BrokersResponse(BaseModel):
@@ -138,6 +159,13 @@ class TickerEvent(BaseModel):
 
 class TickerResponse(BaseModel):
     events: list[TickerEvent]
+
+
+class MissionResponse(BaseModel):
+    accepted: bool
+    mission_id: str
+    rejection_reason: str | None = None
+    rejection_detail: str = ""
 
 
 class KillSwitchRequest(BaseModel):
@@ -218,11 +246,15 @@ def create_router(ctx: ColonyContext) -> APIRouter:
                 utilization_pct=0.0,
             )
 
-        total = ctx.queen.capital_total
+        # Reëel totaal = live broker-saldi + marktwaarde holdings.
+        # Valt terug op queen.capital_total als adapters niet beschikbaar zijn.
+        live_total = _real_equity(ctx.biome_registry)
+        total = live_total if live_total is not None else ctx.queen.capital_total
+
         allocated = ctx.queen.capital_allocated
-        available = ctx.queen.capital_available
-        active = len(ctx.queen.active_missions)
-        util = round(allocated / total * 100.0, 1) if total > 0 else 0.0
+        available = max(0.0, total - allocated)
+        active    = len(ctx.queen.active_missions)
+        util      = round(allocated / total * 100.0, 1) if total > 0 else 0.0
 
         return MetricsResponse(
             capital_total=total,
@@ -267,7 +299,7 @@ def create_router(ctx: ColonyContext) -> APIRouter:
 
     @router.get("/biomes", response_model=BiomesResponse)
     def get_biomes() -> BiomesResponse:
-        """Allocatie per biome."""
+        """Allocatie per biome, aangevuld met live posities en referentieprijs."""
         if ctx.queen is None:
             return BiomesResponse(biomes=[])
 
@@ -277,6 +309,37 @@ def create_router(ctx: ColonyContext) -> APIRouter:
         entries = []
         for b in snapshot.biomes:
             fraction = round(b.allocated / b.limit, 4) if b.limit and b.limit > 0 else 0.0
+
+            positions: list[PositionEntry] = []
+            reference_price: float | None = None
+
+            if ctx.biome_registry is not None:
+                adapter = ctx.biome_registry.get(b.biome_id)
+                if adapter is not None:
+                    try:
+                        live_positions = adapter.get_positions()
+                        if live_positions:
+                            positions = [
+                                PositionEntry(
+                                    symbol=p.symbol,
+                                    quantity=p.quantity,
+                                    current_price=p.current_price,
+                                    market_value=p.market_value,
+                                )
+                                for p in live_positions
+                            ]
+                    except Exception:
+                        logger.exception("/api/biomes: get_positions() mislukt voor %s", b.biome_id)
+
+                    try:
+                        ref_market = _BIOME_REFERENCE_MARKET.get(b.biome_id)
+                        if ref_market:
+                            md = adapter.get_market_data(ref_market, "1m")
+                            if md and md.is_valid_price:
+                                reference_price = md.close
+                    except Exception:
+                        logger.exception("/api/biomes: get_market_data() mislukt voor %s", b.biome_id)
+
             entries.append(BiomeEntry(
                 biome_id=b.biome_id,
                 display_name=_DISPLAY.get(b.biome_id, b.biome_id.capitalize()),
@@ -284,6 +347,8 @@ def create_router(ctx: ColonyContext) -> APIRouter:
                 allocated=b.allocated or 0.0,
                 available=b.available or 0.0,
                 fraction=fraction,
+                positions=positions,
+                reference_price=reference_price,
             ))
 
         return BiomesResponse(biomes=entries)
@@ -326,7 +391,7 @@ def create_router(ctx: ColonyContext) -> APIRouter:
 
     @router.get("/brokers", response_model=BrokersResponse)
     def get_brokers() -> BrokersResponse:
-        """Broker connecties en ingezet kapitaal per biome."""
+        """Broker connecties, live saldo en ingezet kapitaal per biome."""
         if ctx.queen is None:
             return BrokersResponse(brokers=[])
 
@@ -340,13 +405,38 @@ def create_router(ctx: ColonyContext) -> APIRouter:
         brokers = []
         for b in snapshot.biomes:
             name = ctx.broker_names.get(b.biome_id) or _DEFAULT_BROKERS.get(b.biome_id, b.biome_id)
-            # Broker status: als er allocated kapitaal is, "connected"; anders "standby"
-            status = "connected" if (b.allocated or 0.0) > 0 else "standby"
+
+            status = "standby"
+            balance_available: float | None = None
+            balance_in_orders: float | None = None
+
+            if ctx.biome_registry is not None:
+                adapter = ctx.biome_registry.get(b.biome_id)
+                if adapter is not None:
+                    try:
+                        connected = adapter.is_available()
+                        if connected:
+                            account = adapter.get_account_state()
+                            if account is not None:
+                                balance_available = account.balance
+                                balance_in_orders = account.positions_value
+                                status = "connected"
+                            else:
+                                # API bereikbaar maar auth mislukt (geen keys)
+                                status = "connected"
+                        else:
+                            status = "disconnected"
+                    except Exception:
+                        logger.exception("/api/brokers: adapter check mislukt voor %s", b.biome_id)
+                        status = "disconnected"
+
             brokers.append(BrokerEntry(
                 name=name,
                 biome_id=b.biome_id,
                 status=status,
                 capital_deployed=b.allocated or 0.0,
+                balance_available=balance_available,
+                balance_in_orders=balance_in_orders,
             ))
 
         return BrokersResponse(brokers=brokers)
@@ -363,6 +453,52 @@ def create_router(ctx: ColonyContext) -> APIRouter:
 
         events = _read_recent_events(ctx.logs_root, limit=20)
         return TickerResponse(events=events)
+
+    # ------------------------------------------------------------------
+    # POST /api/missions
+    # ------------------------------------------------------------------
+
+    @router.post("/missions", response_model=MissionResponse)
+    def post_mission(mission: Mission) -> MissionResponse:
+        """
+        Geef een mission uit via de echte colony Queen.
+
+        De Mission wordt volledig gevalideerd door Pydantic (422 bij ongeldig
+        schema) en daarna beoordeeld door de Queen (kapitaal, node, biome).
+
+        Response:
+          accepted=True  → mission actief, verschijnt direct op het dashboard.
+          accepted=False → zakelijke afwijzing; rejection_reason bevat de reden.
+          503            → colony niet geïnitialiseerd.
+        """
+        if ctx.queen is None:
+            raise HTTPException(
+                status_code=503,
+                detail="colony not initialised — queen unavailable",
+            )
+
+        try:
+            result = ctx.queen.issue_mission(mission)
+        except Exception:
+            logger.exception("POST /api/missions: onverwachte fout bij uitgifte %s", mission.mission_id)
+            raise HTTPException(status_code=500, detail="mission issuance failed unexpectedly")
+
+        if result.accepted:
+            logger.info("POST /api/missions: accepted mission_id=%s ant_type=%s", mission.mission_id, mission.ant_type)
+        else:
+            logger.warning(
+                "POST /api/missions: rejected mission_id=%s reason=%s detail=%s",
+                mission.mission_id,
+                result.rejection_reason,
+                result.rejection_detail,
+            )
+
+        return MissionResponse(
+            accepted=result.accepted,
+            mission_id=mission.mission_id,
+            rejection_reason=result.rejection_reason.value if result.rejection_reason else None,
+            rejection_detail=result.rejection_detail,
+        )
 
     # ------------------------------------------------------------------
     # POST /api/killswitch
@@ -418,6 +554,47 @@ def create_router(ctx: ColonyContext) -> APIRouter:
         )
 
     return router
+
+
+# ---------------------------------------------------------------------------
+# Intern — reële equity berekening
+# ---------------------------------------------------------------------------
+
+def _real_equity(registry: BiomeRegistry | None) -> float | None:
+    """
+    Som van echte broker-equity over alle geregistreerde adapters.
+
+    equity per adapter = EUR beschikbaar  +  marktwaarde crypto holdings
+
+    Returns None als registry leeg is of alle adapters falen, zodat de
+    aanroeper kan terugvallen op queen.capital_total.
+    """
+    if registry is None:
+        return None
+
+    total = 0.0
+    found = False
+
+    for biome_id in registry.list_biomes():
+        adapter = registry.get(biome_id)
+        if adapter is None:
+            continue
+        try:
+            state = adapter.get_account_state()
+            if state is None:
+                continue
+
+            holdings_value = 0.0
+            positions = adapter.get_positions()
+            if positions:
+                holdings_value = sum(p.market_value for p in positions)
+
+            total += state.balance + holdings_value
+            found = True
+        except Exception:
+            logger.exception("_real_equity: fout voor biome_id=%s", biome_id)
+
+    return total if found else None
 
 
 # ---------------------------------------------------------------------------

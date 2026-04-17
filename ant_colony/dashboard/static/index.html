@@ -383,6 +383,65 @@
     .b-active   { background: var(--badge-ok-bg);   color: var(--badge-ok-txt); }
     .b-conn     { background: var(--badge-ok-bg);   color: var(--badge-ok-txt); }
     .b-standby  { background: var(--badge-warn-bg); color: var(--badge-warn-txt); }
+    .b-disconn  { background: #fee2e2; color: #991b1b; }
+
+    /* ──────────────────────────────────────────────
+       HOLDINGS PANEL  (uitklapbaar per biome)
+    ────────────────────────────────────────────── */
+
+    .holdings-panel { margin-top: 10px; }
+
+    .holdings-panel > summary {
+      cursor: pointer;
+      list-style: none;
+      display: flex; align-items: center; gap: 6px;
+      font-size: 11px; font-weight: 600;
+      color: var(--muted);
+      padding: 5px 0;
+      user-select: none;
+    }
+    .holdings-panel > summary::-webkit-details-marker { display: none; }
+    .holdings-panel > summary .toggle-arrow {
+      font-size: 8px; display: inline-block;
+      transition: transform .15s; color: var(--faint);
+    }
+    .holdings-panel[open] > summary .toggle-arrow { transform: rotate(90deg); }
+
+    .ref-price {
+      margin-left: auto;
+      font-size: 11px; font-weight: 700;
+      color: var(--text);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .holdings-tbl {
+      width: 100%; border-collapse: collapse;
+      margin-top: 6px; font-size: 11px;
+    }
+    .holdings-tbl th {
+      text-align: left;
+      font-size: 9px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: .4px;
+      color: var(--faint);
+      padding: 0 4px 6px 0;
+      border-bottom: .5px solid var(--border);
+    }
+    .holdings-tbl td {
+      padding: 5px 4px 5px 0;
+      border-bottom: .5px solid var(--border-soft);
+      font-variant-numeric: tabular-nums;
+    }
+    .holdings-tbl tr:last-child td { border-bottom: none; }
+    .holdings-tbl td:not(:first-child),
+    .holdings-tbl th:not(:first-child) { text-align: right; }
+    .h-asset { font-weight: 600; font-size: 12px; }
+
+    .holdings-total {
+      display: flex; justify-content: space-between; align-items: center;
+      margin-top: 8px; padding-top: 8px;
+      border-top: .5px solid var(--border);
+      font-size: 12px; font-weight: 700;
+    }
 
     /* ──────────────────────────────────────────────
        BROKERS
@@ -396,9 +455,14 @@
     }
     .broker-row:last-child { border-bottom: none; }
 
-    .broker-lhs { display: flex; flex-direction: column; gap: 1px; }
+    .broker-lhs { display: flex; flex-direction: column; gap: 2px; }
     .broker-nm  { font-size: 13px; font-weight: 500; display: flex; align-items: center; gap: 6px; }
     .broker-bio { font-size: 10px; color: var(--muted); }
+    .broker-balance {
+      font-size: 11px; color: var(--muted);
+      font-variant-numeric: tabular-nums;
+      margin-top: 1px;
+    }
     .broker-rhs { display: flex; align-items: center; gap: 10px; }
     .broker-amt { font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
 
@@ -667,6 +731,20 @@ function fEUR(v) {
   return '€\u202f' + Number(v).toLocaleString('nl-NL', {minimumFractionDigits:0, maximumFractionDigits:0});
 }
 
+function fEUR2(v) {
+  if (v == null) return '—';
+  return '€\u202f' + Number(v).toLocaleString('nl-NL', {minimumFractionDigits:2, maximumFractionDigits:2});
+}
+
+function fQty(v) {
+  if (v == null) return '—';
+  const n = Number(v);
+  if (n === 0) return '0';
+  if (n >= 1000) return n.toLocaleString('nl-NL', {maximumFractionDigits:2});
+  if (n >= 1)    return n.toLocaleString('nl-NL', {minimumFractionDigits:2, maximumFractionDigits:4});
+  return n.toLocaleString('nl-NL', {minimumFractionDigits:4, maximumFractionDigits:6});
+}
+
 function fPnL(v) {
   if (v == null) return '€\u202f0';
   const abs = '€\u202f' + Math.abs(v).toLocaleString('nl-NL', {minimumFractionDigits:2, maximumFractionDigits:2});
@@ -764,6 +842,51 @@ function renderBiomes() {
   el.innerHTML = list.map(b => {
     const c   = bcolor(b.biome_id);
     const pct = Math.min(100, Math.round((b.fraction || 0) * 100));
+
+    const positions = b.positions || [];
+    const portfolioTotal = positions.reduce((sum, p) => sum + (p.market_value || 0), 0);
+
+    // Referentieprijs (BTC-EUR) rechts in de summary
+    const refHtml = b.reference_price
+      ? `<span class="ref-price">BTC ${fEUR2(b.reference_price)}</span>`
+      : '';
+
+    // Holdings tabel
+    let holdingsHtml = '';
+    if (positions.length > 0) {
+      const rows = positions.map(p => {
+        const asset = p.symbol.replace('-EUR', '');
+        return `<tr>
+          <td class="h-asset">${asset}</td>
+          <td>${fQty(p.quantity)}</td>
+          <td>${fEUR2(p.current_price)}</td>
+          <td>${fEUR2(p.market_value)}</td>
+        </tr>`;
+      }).join('');
+
+      holdingsHtml = `
+        <details class="holdings-panel">
+          <summary>
+            <span class="toggle-arrow">▶</span>
+            ${positions.length} holding${positions.length !== 1 ? 's' : ''}
+            ${refHtml}
+          </summary>
+          <table class="holdings-tbl">
+            <thead><tr>
+              <th>Asset</th><th>Qty</th><th>Prijs</th><th>Waarde</th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+          <div class="holdings-total">
+            <span>Portfolio totaal</span>
+            <span>${fEUR2(portfolioTotal)}</span>
+          </div>
+        </details>`;
+    } else if (b.reference_price) {
+      holdingsHtml = `<div style="font-size:11px;color:var(--muted);margin-top:8px;font-variant-numeric:tabular-nums">
+        BTC ${fEUR2(b.reference_price)} · geen holdings</div>`;
+    }
+
     return `
       <div>
         <div class="biome-hdr">
@@ -781,6 +904,7 @@ function renderBiomes() {
         <div class="bar-track">
           <div class="bar-fill" style="width:${pct}%;background:${c}"></div>
         </div>
+        ${holdingsHtml}
       </div>`;
   }).join('');
 }
@@ -819,21 +943,42 @@ function renderBrokers() {
   if (!list.length) { el.innerHTML = '<div class="empty">Geen brokers geconfigureerd</div>'; return; }
 
   el.innerHTML = list.map(b => {
-    const c     = bcolor(b.biome_id);
+    const c = bcolor(b.biome_id);
+
     const badge = b.status === 'connected'
       ? '<span class="badge b-conn">verbonden</span>'
-      : '<span class="badge b-standby">standby</span>';
+      : b.status === 'disconnected'
+        ? '<span class="badge b-disconn">offline</span>'
+        : '<span class="badge b-standby">standby</span>';
+
+    // Portfolio totaal: som van holdings in bijbehorende biome
+    const biomeData = (S.biomes.biomes || []).find(bm => bm.biome_id === b.biome_id);
+    const positions  = (biomeData && biomeData.positions) || [];
+    const portfolioTotal = positions.reduce((sum, p) => sum + (p.market_value || 0), 0);
+
+    // Balance-regel: beschikbaar saldo + portfolio waarde
+    let balanceHtml = '';
+    if (b.balance_available != null) {
+      const parts = [`${fEUR2(b.balance_available)} beschikbaar`];
+      if (b.balance_in_orders != null && b.balance_in_orders > 0)
+        parts.push(`${fEUR2(b.balance_in_orders)} in orders`);
+      if (portfolioTotal > 0)
+        parts.push(`portfolio ${fEUR2(portfolioTotal)}`);
+      balanceHtml = `<div class="broker-balance">${parts.join(' · ')}</div>`;
+    }
+
     return `<div class="broker-row">
       <div class="broker-lhs">
         <div class="broker-nm">
           <div style="width:8px;height:8px;border-radius:50%;background:${c};flex-shrink:0"></div>
           ${b.name}
+          ${badge}
         </div>
         <div class="broker-bio">${b.biome_id}</div>
+        ${balanceHtml}
       </div>
       <div class="broker-rhs">
-        <span class="broker-amt">${fEUR(b.capital_deployed)}</span>
-        ${badge}
+        <span class="broker-amt">${fEUR(b.capital_deployed)} ingezet</span>
       </div>
     </div>`;
   }).join('');
