@@ -8,3 +8,4 @@ venv/
 dist/
 build/
 .env
+.claude/settings.local.json
