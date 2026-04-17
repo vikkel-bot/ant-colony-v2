@@ -20,6 +20,8 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import threading
+import uuid
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -51,6 +53,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help="Valideer missions lokaal maar stuur niets naar de colony",
+    )
+    p.add_argument(
+        "--logs-root",
+        type=Path,
+        default=Path(r"C:\Trading\ANT_LOGS"),
+        metavar="PATH",
+        help="Root-map voor ANT_LOGS (scout-signalen worden hier geschreven)",
     )
     p.add_argument(
         "--log-level",
@@ -214,6 +223,73 @@ def _post_mission(colony_url: str, mission, log: logging.Logger) -> tuple[bool, 
 
 
 # ---------------------------------------------------------------------------
+# ScoutAnt thread
+# ---------------------------------------------------------------------------
+
+def _build_local_registry(log: logging.Logger):
+    """Bouw een BiomeRegistry met een BitvavoAdapter voor standalone gebruik."""
+    import os
+    from ant_colony.biome.adapters.bitvavo_adapter import BitvavoAdapter
+    from ant_colony.biome.biome_registry import BiomeRegistry
+
+    api_key    = os.getenv("BITVAVO_API_KEY", "")
+    api_secret = os.getenv("BITVAVO_API_SECRET", "")
+    if not api_key or not api_secret:
+        log.warning(
+            "BITVAVO_API_KEY / BITVAVO_API_SECRET niet gezet — "
+            "adapter draait in paper-only modus"
+        )
+
+    adapter  = BitvavoAdapter()
+    registry = BiomeRegistry()
+    registry.register(adapter)
+    return registry
+
+
+def _start_scout_thread(
+    mission,
+    scheduler,
+    biome_registry,
+    logs_root: Path,
+    log: logging.Logger,
+) -> threading.Thread:
+    """
+    Maak een ScoutAnt aan en start hem in een daemon thread.
+
+    De thread logt OpportunitySignals naar logs_root/scouts/{ant_id}.jsonl.
+    De dashboard-tikker pikt deze JSONL-bestanden automatisch op via rglob.
+
+    Returns:
+        De gestarte Thread (daemon=True).
+    """
+    from ant_colony.ants.scout_ant import ScoutAnt
+
+    ant_id = f"scout-{uuid.uuid4().hex[:12]}"
+    scout  = ScoutAnt(
+        ant_id=ant_id,
+        mission=mission,
+        scheduler=scheduler,
+        biome_registry=biome_registry,
+        logs_root=logs_root,
+    )
+
+    t = threading.Thread(
+        target=scout.run,
+        name=f"scout-{ant_id[:16]}",
+        daemon=True,
+    )
+    t.start()
+    log.info(
+        "ScoutAnt gestart | ant_id=%s  symbols=%s  ttl=%ds  logs=%s/scouts/",
+        ant_id,
+        mission.market_scope.symbols,
+        mission.ttl,
+        logs_root,
+    )
+    return t
+
+
+# ---------------------------------------------------------------------------
 # Uitgifte + rapportage
 # ---------------------------------------------------------------------------
 
@@ -266,8 +342,9 @@ def main() -> None:
     log.info("%d missions aangemaakt — uitgifte starten …", len(missions))
 
     # --- Uitgifte ---
-    accepted = 0
-    rejected = 0
+    accepted   = 0
+    rejected   = 0
+    scout_thread: threading.Thread | None = None
 
     for mission in missions:
         print()
@@ -276,7 +353,6 @@ def main() -> None:
         print(_SEPARATOR)
 
         if args.dry_run:
-            # Pydantic-validatie is al geslaagd bij constructie hierboven
             _print_accepted(mission, prefix="[DRY-RUN] ")
             accepted += 1
             continue
@@ -286,11 +362,28 @@ def main() -> None:
         if ok:
             _print_accepted(mission)
             accepted += 1
+
+            # Na succesvolle uitgifte van de scout-missie: start lokale ScoutAnt thread.
+            # De thread logt signals naar ANT_LOGS/scouts/ — de dashboard-tikker
+            # pikt ze automatisch op via rglob("*.jsonl").
+            if mission.ant_type == "scout_ant" and scout_thread is None:
+                from ant_colony.colony.scheduler.colony_scheduler import ColonyScheduler
+                local_scheduler = ColonyScheduler(
+                    logs_root=args.logs_root,
+                    tick_interval=5,
+                )
+                local_registry = _build_local_registry(log)
+                scout_thread = _start_scout_thread(
+                    mission=mission,
+                    scheduler=local_scheduler,
+                    biome_registry=local_registry,
+                    logs_root=args.logs_root,
+                    log=log,
+                )
         else:
             _print_rejected(mission, reason, detail)
             rejected += 1
 
-            # Verbindingsfout: stop direct — volgende missions zullen ook falen
             if reason in ("CONNECTION_ERROR", "TIMEOUT", "COLONY_UNAVAILABLE"):
                 print()
                 print(f"  Uitgifte gestaakt — colony niet bereikbaar op {args.colony_url}")
@@ -308,6 +401,15 @@ def main() -> None:
 
     if rejected > 0:
         sys.exit(1)
+
+    # Als een ScoutAnt thread gestart is, blijf actief zodat de daemon thread
+    # blijft draaien. Ctrl+C stopt het proces netjes.
+    if scout_thread is not None:
+        log.info("ScoutAnt draait — Ctrl+C om te stoppen.")
+        try:
+            scout_thread.join()
+        except KeyboardInterrupt:
+            log.info("launch_ants gestopt door operator.")
 
 
 if __name__ == "__main__":

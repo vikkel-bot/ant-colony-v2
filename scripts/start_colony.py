@@ -28,6 +28,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -376,6 +377,87 @@ def main() -> None:
         daemon=True,
     )
     scheduler_thread.start()
+
+    # --- Stap 8b: bootstrap ScoutAnt --- #
+    # Bouw de scout-missie, geef hem uit via de Queen en start een daemon thread.
+    # De thread logt OpportunitySignals naar ANT_LOGS/scouts/{ant_id}.jsonl.
+    # De dashboard-tikker pikt ze automatisch op via rglob("*.jsonl").
+    try:
+        from ant_colony.ants.scout_ant import ScoutAnt
+        from ant_colony.schemas.mission import (
+            AbortConditions,
+            MarketScope,
+            Mission,
+            RiskLimits,
+            SuccessConditions,
+        )
+
+        _obs_risk = RiskLimits(
+            max_drawdown_pct=0.01,
+            max_position_size=1.0,
+            daily_loss_limit=1.0,
+            stop_loss_required=False,
+        )
+        scout_mission = Mission(
+            mission_id="scout-crypto-001",
+            ant_type="scout_ant",
+            allowed_node=args.node_id,
+            allowed_actions=["read_data", "detect_opportunity"],
+            market_scope=MarketScope(
+                biome="crypto",
+                symbols=["BTC-EUR", "ETH-EUR", "SOL-EUR"],
+                timeframes=["1h", "4h", "1d"],
+            ),
+            capital_limit=0.0,
+            risk_limits=_obs_risk,
+            ttl=3600,
+            heartbeat_interval=60,
+            success_conditions=SuccessConditions(
+                description="Detecteer en rapporteer minstens één kansrijke marktstructuur.",
+                criteria={"min_opportunities_detected": 1},
+            ),
+            abort_conditions=AbortConditions(
+                stale_heartbeat=True,
+                capital_limit_breach=False,
+                risk_limit_breach=False,
+                ttl_expired=True,
+                stale_market_data=True,
+            ),
+        )
+
+        mission_result = queen.issue_mission(scout_mission)
+        if mission_result.accepted:
+            log.info("Scout-missie geaccepteerd — mission_id=%s", scout_mission.mission_id)
+        else:
+            log.warning(
+                "Scout-missie geweigerd: %s — %s",
+                mission_result.rejection_reason,
+                mission_result.rejection_detail,
+            )
+
+        scout_ant_id = f"scout-{uuid.uuid4().hex[:12]}"
+        scout = ScoutAnt(
+            ant_id=scout_ant_id,
+            mission=scout_mission,
+            scheduler=scheduler,
+            biome_registry=biome_registry,
+            logs_root=logs_root,
+        )
+        scout_thread = threading.Thread(
+            target=scout.run,
+            name=f"scout-{scout_ant_id[:16]}",
+            daemon=True,
+        )
+        scout_thread.start()
+        log.info(
+            "ScoutAnt gestart | ant_id=%s  ttl=%ds  symbols=%s",
+            scout_ant_id,
+            scout_mission.ttl,
+            scout_mission.market_scope.symbols,
+        )
+
+    except Exception:
+        log.exception("ScoutAnt bootstrap mislukt — colony start toch door.")
 
     # --- Stap 9: bouw ColonyContext en start dashboard (blocking) ---
     context = ColonyContext(

@@ -11,6 +11,8 @@ Endpoints:
   GET  /api/ants        — actieve agents met TTL countdown
   GET  /api/brokers     — broker connecties en ingezet kapitaal
   GET  /api/ticker      — laatste 20 audit log events
+  GET  /api/v1status    — heartbeat van Colony v1 (ANT_LIVE/heartbeat.json)
+  GET  /api/v1positions — open posities van Colony v1 (ANT_LIVE/live_test/*.json)
   POST /api/missions    — geef een mission uit via de echte colony Queen
   POST /api/killswitch  — level 1/2/3 + scope, vereist operator_confirm=true
 
@@ -70,6 +72,7 @@ class ColonyContext:
     logs_root: Path | None = None
     broker_names: dict[str, str] = field(default_factory=dict)
     biome_registry: BiomeRegistry | None = None
+    v1_live_root: Path | None = None   # ANT_LIVE root van Colony v1
 
 
 # ---------------------------------------------------------------------------
@@ -179,6 +182,25 @@ class KillSwitchResponse(BaseModel):
     level: int
     scope: str | None
     message: str
+
+
+class V1StatusResponse(BaseModel):
+    ok: bool
+    component: str | None = None
+    last_heartbeat: str | None = None
+    last_status: str | None = None
+    lane: str | None = None
+
+
+class V1PositionEntry(BaseModel):
+    symbol: str
+    side: str
+    entry_price: float
+    quantity: float
+
+
+class V1PositionsResponse(BaseModel):
+    positions: list[V1PositionEntry]
 
 
 # ---------------------------------------------------------------------------
@@ -445,6 +467,65 @@ def create_router(ctx: ColonyContext) -> APIRouter:
         return BrokersResponse(brokers=brokers)
 
     # ------------------------------------------------------------------
+    # GET /api/v1status
+    # ------------------------------------------------------------------
+
+    @router.get("/v1status", response_model=V1StatusResponse)
+    def get_v1status() -> V1StatusResponse:
+        """Heartbeat van Colony v1 — leest ANT_LIVE/heartbeat.json."""
+        live_root = ctx.v1_live_root or Path(r"C:\Trading\ANT_LIVE")
+        hb_path   = live_root / "heartbeat.json"
+
+        if not hb_path.exists():
+            return V1StatusResponse(ok=False)
+
+        try:
+            data = json.loads(hb_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return V1StatusResponse(ok=False)
+
+        last_hb_str: str | None = data.get("last_heartbeat")
+        ok = _v1_heartbeat_ok(last_hb_str)
+
+        return V1StatusResponse(
+            ok=ok,
+            component=data.get("component"),
+            last_heartbeat=last_hb_str,
+            last_status=data.get("last_status"),
+            lane=data.get("lane"),
+        )
+
+    # ------------------------------------------------------------------
+    # GET /api/v1positions
+    # ------------------------------------------------------------------
+
+    @router.get("/v1positions", response_model=V1PositionsResponse)
+    def get_v1positions() -> V1PositionsResponse:
+        """Open posities van Colony v1 — scant ANT_LIVE/live_test/*.json."""
+        live_root  = ctx.v1_live_root or Path(r"C:\Trading\ANT_LIVE")
+        scan_dir   = live_root / "live_test"
+        positions: list[V1PositionEntry] = []
+
+        if not scan_dir.exists():
+            return V1PositionsResponse(positions=[])
+
+        for path in sorted(scan_dir.glob("*.json")):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if not all(k in data for k in ("symbol", "side", "entry_price", "quantity")):
+                    continue
+                positions.append(V1PositionEntry(
+                    symbol=str(data["symbol"]),
+                    side=str(data["side"]),
+                    entry_price=float(data["entry_price"]),
+                    quantity=float(data["quantity"]),
+                ))
+            except (json.JSONDecodeError, ValueError, OSError):
+                logger.debug("/api/v1positions: fout bij lezen %s", path.name)
+
+        return V1PositionsResponse(positions=positions)
+
+    # ------------------------------------------------------------------
     # GET /api/ticker
     # ------------------------------------------------------------------
 
@@ -691,6 +772,19 @@ def _read_recent_events(logs_root: Path, limit: int = 20) -> list[TickerEvent]:
             payload=rec.get("payload", {}),
         ))
     return events
+
+
+def _v1_heartbeat_ok(last_heartbeat_str: str | None, max_age_seconds: float = 300.0) -> bool:
+    """True als heartbeat bestaat en niet ouder is dan max_age_seconds (standaard 5 min)."""
+    if not last_heartbeat_str:
+        return False
+    try:
+        dt = datetime.fromisoformat(last_heartbeat_str)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return (datetime.now(tz=timezone.utc) - dt).total_seconds() <= max_age_seconds
+    except (ValueError, TypeError):
+        return False
 
 
 def _parse_ts(value: str | None) -> datetime | None:

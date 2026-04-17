@@ -515,6 +515,58 @@
       color: var(--faint); font-size: 12px;
     }
 
+    /* ──────────────────────────────────────────────
+       COLONY V1
+    ────────────────────────────────────────────── */
+
+    .v1-status-row {
+      display: flex; align-items: center; gap: 9px;
+      padding: 4px 0 10px;
+    }
+
+    .v1-dot {
+      width: 10px; height: 10px; border-radius: 50%;
+      flex-shrink: 0; transition: background .3s;
+    }
+    .v1-dot.ok  { background: #1D9E75; box-shadow: 0 0 0 3px rgba(29,158,117,.18); }
+    .v1-dot.err { background: #E24B4A; box-shadow: 0 0 0 3px rgba(226,75,74,.18); }
+
+    .v1-meta { display: flex; flex-direction: column; gap: 1px; flex: 1; }
+    .v1-component { font-size: 12px; font-weight: 600; }
+    .v1-hb-time {
+      font-size: 10px; color: var(--muted);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .v1-positions { margin-top: 4px; }
+
+    .v1-pos-hdr {
+      font-size: 9px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: .4px; color: var(--faint);
+      padding-bottom: 6px;
+      border-bottom: .5px solid var(--border);
+      display: grid;
+      grid-template-columns: 1fr auto auto auto;
+      gap: 8px;
+    }
+
+    .v1-pos-row {
+      display: grid;
+      grid-template-columns: 1fr auto auto auto;
+      gap: 8px;
+      padding: 6px 0;
+      border-bottom: .5px solid var(--border-soft);
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+      align-items: center;
+    }
+    .v1-pos-row:last-child { border-bottom: none; }
+
+    .v1-sym { font-weight: 600; }
+    .v1-side-buy  { color: #1D9E75; font-weight: 700; font-size: 10px; text-transform: uppercase; }
+    .v1-side-sell { color: #E24B4A; font-weight: 700; font-size: 10px; text-transform: uppercase; }
+    .v1-price { color: var(--muted); }
+
   </style>
 </head>
 <body>
@@ -669,6 +721,14 @@
         </div>
       </div>
 
+      <!-- Colony v1 -->
+      <div class="card">
+        <div class="card-title">Colony v1</div>
+        <div id="v1-content">
+          <div class="empty">Heartbeat laden…</div>
+        </div>
+      </div>
+
       <!-- Queen kill-switch -->
       <div class="card">
         <div class="card-title">Queen kill-switch</div>
@@ -716,6 +776,8 @@ const S = {
   brokers:     { brokers:[] },
   ticker:      { events:[] },
   tickerIdx:   0,
+  v1status:    null,
+  v1positions: { positions:[] },
   // heartbeat live-counter
   hbBase:      null,
   hbAt:        null,
@@ -771,21 +833,24 @@ function pnlCls(v) { return v > 0 ? 'pos' : v < 0 ? 'neg' : 'zero'; }
 
 async function fetchAll() {
   const get = url => fetch(url).then(r => r.json()).catch(() => null);
-  const [st, me, pe, bi, an, br, ti] = await Promise.all([
+  const [st, me, pe, bi, an, br, ti, v1s, v1p] = await Promise.all([
     get('/api/status'), get('/api/metrics'), get('/api/performance'),
     get('/api/biomes'), get('/api/ants'),    get('/api/brokers'), get('/api/ticker'),
+    get('/api/v1status'), get('/api/v1positions'),
   ]);
 
   if (st) {
     S.status = st;
     if (st.seconds_ago != null) { S.hbBase = st.seconds_ago; S.hbAt = Date.now(); }
   }
-  if (me) S.metrics     = me;
-  if (pe) S.performance = pe;
-  if (bi) S.biomes      = bi;
-  if (an) S.ants        = an;
-  if (br) S.brokers     = br;
-  if (ti) S.ticker      = ti;
+  if (me)  S.metrics     = me;
+  if (pe)  S.performance = pe;
+  if (bi)  S.biomes      = bi;
+  if (an)  S.ants        = an;
+  if (br)  S.brokers     = br;
+  if (ti)  S.ticker      = ti;
+  if (v1s) S.v1status    = v1s;
+  if (v1p) S.v1positions = v1p;
 
   render();
 }
@@ -799,6 +864,7 @@ function render() {
   renderBiomes();
   renderAnts();
   renderBrokers();
+  renderV1();
 }
 
 function renderStatus() {
@@ -982,6 +1048,62 @@ function renderBrokers() {
       </div>
     </div>`;
   }).join('');
+}
+
+function renderV1() {
+  const el  = document.getElementById('v1-content');
+  const st  = S.v1status;
+  const pos = (S.v1positions && S.v1positions.positions) || [];
+
+  if (!st) {
+    el.innerHTML = '<div class="empty">Geen verbinding met Colony v1</div>';
+    return;
+  }
+
+  const dotCls   = st.ok ? 'ok' : 'err';
+  const component = st.component || 'Colony v1';
+  const hbTime   = st.last_heartbeat
+    ? st.last_heartbeat.replace('T', ' ').slice(0, 19)
+    : '—';
+
+  const statusBadge = st.last_status
+    ? `<span class="badge ${st.ok ? 'b-conn' : 'b-disconn'}">${st.last_status}</span>`
+    : '';
+
+  const laneTxt = st.lane ? ` · ${st.lane}` : '';
+
+  let posHtml = '';
+  if (pos.length > 0) {
+    const rows = pos.map(p => {
+      const sideCls = p.side === 'buy' ? 'v1-side-buy' : 'v1-side-sell';
+      return `<div class="v1-pos-row">
+        <span class="v1-sym">${p.symbol}</span>
+        <span class="${sideCls}">${p.side}</span>
+        <span class="v1-price">${fEUR2(p.entry_price)}</span>
+        <span>${fQty(p.quantity)}</span>
+      </div>`;
+    }).join('');
+
+    posHtml = `
+      <div class="v1-positions">
+        <div class="v1-pos-hdr">
+          <span>Symbool</span><span>Side</span><span>Entry</span><span>Qty</span>
+        </div>
+        ${rows}
+      </div>`;
+  } else {
+    posHtml = `<div style="font-size:11px;color:var(--faint);padding:6px 0">Geen open posities</div>`;
+  }
+
+  el.innerHTML = `
+    <div class="v1-status-row">
+      <div class="v1-dot ${dotCls}"></div>
+      <div class="v1-meta">
+        <span class="v1-component">${component}${laneTxt} ${statusBadge}</span>
+        <span class="v1-hb-time">Heartbeat: ${hbTime}</span>
+      </div>
+    </div>
+    ${posHtml}`;
 }
 
 // ── Ticker rotation ────────────────────────────
