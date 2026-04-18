@@ -87,6 +87,7 @@ class ResearchAnt:
         # Deduplicatie: sla de laatste geëmitteerde candidate_id op per (symbol, signal_type).
         # Voorkomt dat dezelfde kandidaat meerdere ticks achtereen gelogd wordt.
         self._last_emitted: dict[tuple[str, str], str] = {}
+        self._seen_ingestion_ids: set[str] = set()
 
         self._backtester = Backtester()
         self._log = logging.getLogger(f"ant.research.{ant_id[:8]}")
@@ -175,6 +176,7 @@ class ResearchAnt:
             self._check_rsi(symbol, candles, closes)
             self._check_bollinger(symbol, candles, closes)
 
+        self._process_ingestion_candidates()
         self._last_action = "tick"
 
     # ------------------------------------------------------------------
@@ -317,6 +319,94 @@ class ResearchAnt:
             logic_summary=(
                 f"Prijs raakt {'bovenste' if direction == 'short' else 'onderste'} "
                 f"Bollinger band op {symbol}"
+            ),
+        )
+
+    # ------------------------------------------------------------------
+    # Ingestion-gekoppelde kandidaten
+    # ------------------------------------------------------------------
+
+    def _process_ingestion_candidates(self) -> None:
+        """Lees ANT_LOGS/ingestion/*.jsonl en backtest nieuwe ingested candidates."""
+        if self.logs_root is None:
+            return
+        ingestion_dir = self.logs_root / "ingestion"
+        if not ingestion_dir.exists():
+            return
+
+        biome_id  = self.mission.market_scope.biome
+        timeframe = (
+            self.mission.market_scope.timeframes[0]
+            if self.mission.market_scope.timeframes
+            else "1h"
+        )
+
+        for path in sorted(ingestion_dir.glob("*.jsonl")):
+            try:
+                for line in path.read_text(encoding="utf-8").splitlines():
+                    if not line.strip():
+                        continue
+                    try:
+                        record  = json.loads(line)
+                        payload = record.get("payload") or {}
+                    except json.JSONDecodeError:
+                        continue
+
+                    if payload.get("action") != "candidate_ingested":
+                        continue
+
+                    candidate_id = str(payload.get("candidate_id") or "")
+                    if not candidate_id or candidate_id in self._seen_ingestion_ids:
+                        continue
+                    self._seen_ingestion_ids.add(candidate_id)
+                    self._backtest_ingested_candidate(candidate_id, payload, biome_id, timeframe)
+            except OSError:
+                self._log.warning("Kan ingestion-log niet lezen: %s", path)
+
+    def _backtest_ingested_candidate(
+        self,
+        candidate_id: str,
+        payload: dict,
+        biome_id: str,
+        timeframe: str,
+    ) -> None:
+        """Haal candles op voor een ingested candidate en emit als backtest slaagt."""
+        symbol    = str(payload.get("market_scope", {}).get("symbol") or "")
+        direction = str(
+            payload.get("entry_conditions", {}).get("direction")
+            or payload.get("parameters", {}).get("direction")
+            or "long"
+        )
+        if not symbol:
+            self._log.debug("Ingested candidate %s heeft geen symbool — overgeslagen", candidate_id)
+            return
+
+        candles = self._fetch_candles(symbol, timeframe, biome_id)
+        if len(candles) < _MIN_CANDLES:
+            self._log.debug(
+                "Te weinig candles voor ingested %s/%s (%d/%d)",
+                candidate_id, symbol, len(candles), _MIN_CANDLES,
+            )
+            return
+
+        tp_pct = float(payload.get("parameters", {}).get("take_profit_pct") or _TP_PCT)
+        sl_pct = float(payload.get("parameters", {}).get("stop_loss_pct") or _SL_PCT)
+
+        self._evaluate_and_emit(
+            symbol=symbol,
+            candles=candles,
+            signal_type=f"ingested_{candidate_id[:8]}",
+            direction=direction,
+            parameters={
+                **payload.get("parameters", {}),
+                "source_candidate_id": candidate_id,
+                "tp_pct": tp_pct,
+                "sl_pct": sl_pct,
+            },
+            entry_conditions=payload.get("entry_conditions", {}),
+            logic_summary=(
+                payload.get("logic_summary")
+                or f"Ingested candidate {candidate_id[:8]} gevalideerd door ResearchAnt"
             ),
         )
 

@@ -96,6 +96,7 @@ class PaperAnt:
         ])
 
         self._processed_signals: set[str] = set()
+        self._seen_approved_ids: set[str] = set()
 
         self._status: AntStatus = AntStatus.IDLE
         self._budget_used: float = 0.0
@@ -177,6 +178,7 @@ class PaperAnt:
         """
         self._process_exits()
         self._process_new_signals()
+        self._process_approved_candidates()
         self._last_action = "tick"
 
     # ------------------------------------------------------------------
@@ -292,6 +294,80 @@ class PaperAnt:
                 "Positie geweigerd voor %s — %s: %s",
                 symbol, result.rejection_reason, result.rejection_detail,
             )
+
+    # ------------------------------------------------------------------
+    # Approved-kandidaten verwerken
+    # ------------------------------------------------------------------
+
+    def _process_approved_candidates(self) -> None:
+        """Verwerk APPROVED StrategyCandidate records uit ANT_LOGS/approved/*.jsonl."""
+        if self.logs_root is None:
+            return
+
+        approved_dir = self.logs_root / "approved"
+        if not approved_dir.exists():
+            return
+
+        for jsonl_path in sorted(approved_dir.glob("*.jsonl")):
+            try:
+                for line in jsonl_path.read_text(encoding="utf-8").splitlines():
+                    if not line.strip():
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+
+                    candidate_id = str(record.get("candidate_id") or "")
+                    if not candidate_id or candidate_id in self._seen_approved_ids:
+                        continue
+                    self._seen_approved_ids.add(candidate_id)
+
+                    self._open_from_candidate(record)
+
+            except OSError:
+                self._log.warning("Kan approved-log niet lezen: %s", jsonl_path)
+
+    def _open_from_candidate(self, record: dict) -> None:
+        """Open een paper positie op basis van een APPROVED StrategyCandidate record."""
+        market_scope     = record.get("market_scope") or {}
+        symbol           = str(market_scope.get("symbol") or "")
+        if not symbol:
+            return
+
+        parameters  = record.get("parameters") or {}
+        entry_cond  = record.get("entry_conditions") or {}
+        direction   = str(
+            entry_cond.get("direction")
+            or parameters.get("direction")
+            or "long"
+        )
+
+        # Alleen long-posities (consistent met bestaande PaperAnt doctrine)
+        if direction != "long":
+            self._log.debug(
+                "Approved candidate %s heeft direction=%s — overgeslagen",
+                record.get("candidate_id"), direction,
+            )
+            return
+
+        price = self._fetch_price(symbol)
+        if price is None or price <= 0:
+            self._log.debug("Geen prijs beschikbaar voor approved candidate %s", symbol)
+            return
+
+        # Sla over als er al een open positie is voor dit symbool
+        if any(p.symbol == symbol for p in self._ledger.open_positions):
+            self._log.debug("Al een open positie voor %s — approved candidate overgeslagen", symbol)
+            return
+
+        sig = {
+            "symbol":        symbol,
+            "current_price": price,
+            "confidence":    float(record.get("fitness_score") or 0.7),
+            "biome":         str(record.get("biome") or self.mission.market_scope.biome),
+        }
+        self._try_open_position(sig)
 
     # ------------------------------------------------------------------
     # Scout-signalen lezen
