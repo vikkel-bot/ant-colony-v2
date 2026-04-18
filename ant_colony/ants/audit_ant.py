@@ -95,6 +95,7 @@ class AuditAnt:
         self._budget_used: float = 0.0
         self._last_action: str = "init"
         self._log_seq: int = 0
+        self._reported_gaps: set[str] = set()
 
         self._log = logging.getLogger(f"ant.audit.{ant_id[:8]}")
 
@@ -268,6 +269,10 @@ class AuditAnt:
 
                 gaps = _find_sequence_gaps(jsonl_path)
                 for gap_start, gap_end in gaps:
+                    gap_key = f"{jsonl_path}:{gap_start}:{gap_end}"
+                    if gap_key in self._reported_gaps:
+                        continue
+                    self._reported_gaps.add(gap_key)
                     findings.append(AuditFinding(
                         severity="ANOMALY",
                         component="audit_trail",
@@ -523,6 +528,6 @@ def _find_sequence_gaps(path: Path) -> list[tuple[int, int]]:
     sequences.sort()
     gaps: list[tuple[int, int]] = []
     for i in range(len(sequences) - 1):
-        if sequences[i + 1] != sequences[i] + 1:
+        if sequences[i + 1] > sequences[i] + 1:
             gaps.append((sequences[i], sequences[i + 1]))
     return gaps
