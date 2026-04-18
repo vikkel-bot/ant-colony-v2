@@ -391,6 +391,7 @@ def main() -> None:
         from ant_colony.ants.research_ant import ResearchAnt
         from ant_colony.ants.scout_ant import ScoutAnt
         from ant_colony.ants.strategy_ant import StrategyAnt
+        from ant_colony.colony.scheduler.colony_scheduler import AgentRecord
         from ant_colony.schemas.mission import (
             AbortConditions,
             MarketScope,
@@ -645,6 +646,14 @@ def main() -> None:
                 name=f"scout-{scout_ant_id[:16]}",
                 daemon=True,
             ).start()
+            scheduler.register_agent(AgentRecord(
+                ant_id=scout_ant_id,
+                mission_id=scout_mission.mission_id,
+                node_id=args.node_id,
+                ant_type="scout_ant",
+                ttl=scout_mission.ttl,
+                heartbeat_interval=scout_mission.heartbeat_interval,
+            ))
             log.info(
                 "ScoutAnt gestart | ant_id=%s  ttl=%ds  symbols=%s",
                 scout_ant_id,
@@ -668,6 +677,14 @@ def main() -> None:
                 name=f"research-{research_ant_id[:16]}",
                 daemon=True,
             ).start()
+            scheduler.register_agent(AgentRecord(
+                ant_id=research_ant_id,
+                mission_id=research_mission.mission_id,
+                node_id=args.node_id,
+                ant_type="research_ant",
+                ttl=research_mission.ttl,
+                heartbeat_interval=research_mission.heartbeat_interval,
+            ))
             log.info(
                 "ResearchAnt gestart | ant_id=%s  ttl=%ds  symbols=%s",
                 research_ant_id,
@@ -691,6 +708,14 @@ def main() -> None:
                 name=f"paper-{paper_ant_id[:16]}",
                 daemon=True,
             ).start()
+            scheduler.register_agent(AgentRecord(
+                ant_id=paper_ant_id,
+                mission_id=paper_mission.mission_id,
+                node_id=args.node_id,
+                ant_type="paper_ant",
+                ttl=paper_mission.ttl,
+                heartbeat_interval=paper_mission.heartbeat_interval,
+            ))
             log.info(
                 "PaperAnt gestart | ant_id=%s  capital=€%.2f  ttl=%ds  symbols=%s",
                 paper_ant_id,
@@ -716,6 +741,14 @@ def main() -> None:
                 name=f"audit-{audit_ant_id[:16]}",
                 daemon=True,
             ).start()
+            scheduler.register_agent(AgentRecord(
+                ant_id=audit_ant_id,
+                mission_id=audit_mission.mission_id,
+                node_id=args.node_id,
+                ant_type="audit_ant",
+                ttl=audit_mission.ttl,
+                heartbeat_interval=audit_mission.heartbeat_interval,
+            ))
             log.info(
                 "AuditAnt gestart | ant_id=%s  ttl=%ds",
                 audit_ant_id,
@@ -737,6 +770,14 @@ def main() -> None:
                 name=f"ingestion-{ingestion_ant_id[:16]}",
                 daemon=True,
             ).start()
+            scheduler.register_agent(AgentRecord(
+                ant_id=ingestion_ant_id,
+                mission_id=ingestion_mission.mission_id,
+                node_id=args.node_id,
+                ant_type="ingestion_ant",
+                ttl=ingestion_mission.ttl,
+                heartbeat_interval=ingestion_mission.heartbeat_interval,
+            ))
             log.info(
                 "IngestionAnt gestart | ant_id=%s  ttl=%ds",
                 ingestion_ant_id,
@@ -759,6 +800,14 @@ def main() -> None:
                 name=f"strategy-{strategy_ant_id[:16]}",
                 daemon=True,
             ).start()
+            scheduler.register_agent(AgentRecord(
+                ant_id=strategy_ant_id,
+                mission_id=strategy_mission.mission_id,
+                node_id=args.node_id,
+                ant_type="strategy_ant",
+                ttl=strategy_mission.ttl,
+                heartbeat_interval=strategy_mission.heartbeat_interval,
+            ))
             log.info(
                 "StrategyAnt gestart | ant_id=%s  ttl=%ds  symbols=%s",
                 strategy_ant_id,
@@ -790,6 +839,14 @@ def main() -> None:
                 name=f"execution-{execution_ant_id[:16]}",
                 daemon=True,
             ).start()
+            scheduler.register_agent(AgentRecord(
+                ant_id=execution_ant_id,
+                mission_id=execution_mission.mission_id,
+                node_id=args.node_id,
+                ant_type="execution_ant",
+                ttl=execution_mission.ttl,
+                heartbeat_interval=execution_mission.heartbeat_interval,
+            ))
             log.info(
                 "ExecutionAnt gestart | ant_id=%s  capital=€%.2f  ttl=%ds  paper_mode=%s",
                 execution_ant_id,
