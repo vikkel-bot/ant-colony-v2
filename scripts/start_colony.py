@@ -385,6 +385,7 @@ def main() -> None:
     # krijgen geen thread — ResearchAnt en AuditAnt klassen bestaan nog niet.
     try:
         from ant_colony.ants.audit_ant import AuditAnt
+        from ant_colony.ants.paper_ant import PaperAnt
         from ant_colony.ants.research_ant import ResearchAnt
         from ant_colony.ants.scout_ant import ScoutAnt
         from ant_colony.schemas.mission import (
@@ -457,6 +458,37 @@ def main() -> None:
                 ),
             ),
             Mission(
+                mission_id=f"paper-crypto-{_ts}",
+                ant_type="paper_ant",
+                allowed_node=args.node_id,
+                allowed_actions=["open_position", "close_position"],
+                market_scope=MarketScope(
+                    biome="crypto",
+                    symbols=["BTC-EUR", "ETH-EUR", "SOL-EUR"],
+                ),
+                capital_limit=500.0,
+                risk_limits=RiskLimits(
+                    max_drawdown_pct=0.10,
+                    max_position_size=500.0,
+                    daily_loss_limit=50.0,
+                    stop_loss_required=True,
+                ),
+                ttl=86400,
+                heartbeat_interval=60,
+                success_conditions=SuccessConditions(
+                    description="Valideer paper trades op BTC-EUR, ETH-EUR en SOL-EUR "
+                                "op basis van ScoutAnt-signalen.",
+                    criteria={"min_trades": 1},
+                ),
+                abort_conditions=AbortConditions(
+                    stale_heartbeat=True,
+                    capital_limit_breach=True,
+                    risk_limit_breach=True,
+                    ttl_expired=True,
+                    stale_market_data=True,
+                ),
+            ),
+            Mission(
                 mission_id=f"audit-crypto-{_ts}",
                 ant_type="audit_ant",
                 allowed_node=args.node_id,
@@ -483,6 +515,7 @@ def main() -> None:
 
         scout_mission    = None
         research_mission = None
+        paper_mission    = None
         audit_mission    = None
 
         for mission in _bootstrap_missions:
@@ -500,6 +533,8 @@ def main() -> None:
                 scout_mission = mission
             elif mission.ant_type == "research_ant" and result.accepted:
                 research_mission = mission
+            elif mission.ant_type == "paper_ant" and result.accepted:
+                paper_mission = mission
             elif mission.ant_type == "audit_ant" and result.accepted:
                 audit_mission = mission
 
@@ -548,6 +583,30 @@ def main() -> None:
             )
         else:
             log.warning("Research-missie niet geaccepteerd — geen ResearchAnt thread gestart.")
+
+        if paper_mission is not None:
+            paper_ant_id = f"paper-{uuid.uuid4().hex[:12]}"
+            paper = PaperAnt(
+                ant_id=paper_ant_id,
+                mission=paper_mission,
+                scheduler=scheduler,
+                biome_registry=biome_registry,
+                logs_root=logs_root,
+            )
+            threading.Thread(
+                target=paper.run,
+                name=f"paper-{paper_ant_id[:16]}",
+                daemon=True,
+            ).start()
+            log.info(
+                "PaperAnt gestart | ant_id=%s  capital=€%.2f  ttl=%ds  symbols=%s",
+                paper_ant_id,
+                paper_mission.capital_limit,
+                paper_mission.ttl,
+                paper_mission.market_scope.symbols,
+            )
+        else:
+            log.warning("Paper-missie niet geaccepteerd — geen PaperAnt thread gestart.")
 
         if audit_mission is not None:
             audit_ant_id = f"audit-{uuid.uuid4().hex[:12]}"
