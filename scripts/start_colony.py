@@ -29,6 +29,7 @@ import sys
 import threading
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -383,8 +384,6 @@ def main() -> None:
     # Research en audit missions worden uitgegeven (zichtbaar op dashboard) maar
     # krijgen geen thread — ResearchAnt en AuditAnt klassen bestaan nog niet.
     try:
-        from datetime import timezone as _tz
-
         from ant_colony.ants.scout_ant import ScoutAnt
         from ant_colony.schemas.mission import (
             AbortConditions,
@@ -394,7 +393,7 @@ def main() -> None:
             SuccessConditions,
         )
 
-        _ts = datetime.now(tz=_tz.utc).strftime("%Y%m%d-%H%M%S")
+        _ts = datetime.now(tz=timezone.utc).strftime("%Y%m%d-%H%M%S")
 
         _obs_risk = RiskLimits(
             max_drawdown_pct=0.01,
