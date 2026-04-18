@@ -807,9 +807,7 @@
           <th>Trigger ▼</th>
         </tr>
       </thead>
-      <tbody id="v1pos-body">
-        <tr><td colspan="8" class="empty">Laden...</td></tr>
-      </tbody>
+      <tbody id="v1pos-body"></tbody>
     </table>
   </div>
 
@@ -833,6 +831,7 @@ const S = {
   ticker:      { events:[] },
   v1status:    null,
   v1positions: { positions:[], scanned_at:null },
+  v1loaded:    false,
   tickerIdx:   0,
   // heartbeat live-counter
   hbBase:      null,
@@ -914,7 +913,7 @@ async function fetchAll() {
   if (br)  S.brokers     = br;
   if (ti)  S.ticker      = ti;
   if (v1s) S.v1status    = v1s;
-  if (v1p) S.v1positions = v1p;
+  if (v1p) { S.v1positions = v1p; S.v1loaded = true; }
 
   render();
 }
@@ -1141,7 +1140,9 @@ function renderV1() {
 
   // Positions table
   let posHtml = '';
-  if (!pos.length) {
+  if (!S.v1loaded) {
+    posHtml = '<div class="empty">Laden...</div>';
+  } else if (!pos.length) {
     posHtml = '<div class="empty">Geen open posities — wacht op signaal</div>';
   } else {
     const rows = pos.map(p => {
