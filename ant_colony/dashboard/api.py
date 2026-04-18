@@ -211,6 +211,32 @@ class V1PositionsResponse(BaseModel):
     scanned_at: str
 
 
+class AntStatsEntry(BaseModel):
+    signals_found:              int   | None = None
+    candidates_above_threshold: int   | None = None
+    open_trades:                int   | None = None
+    total_pnl:                  float | None = None
+    win_rate:                   float | None = None
+    warnings_today:             int   | None = None
+    anomalies_today:            int   | None = None
+    repos_ingested:             int   | None = None
+    variants_generated:         int   | None = None
+    orders_placed:              int   | None = None
+    orders_rejected:            int   | None = None
+
+
+class AntActivityEntry(BaseModel):
+    ant_type:      str
+    last_seen:     str | None
+    summary:       str
+    recent_events: list[str]
+    stats:         AntStatsEntry
+
+
+class AntActivityResponse(BaseModel):
+    ants: list[AntActivityEntry]
+
+
 # ---------------------------------------------------------------------------
 # Colony v1 — scan helpers
 # ---------------------------------------------------------------------------
@@ -833,6 +859,48 @@ def create_router(ctx: ColonyContext) -> APIRouter:
             message=msg,
         )
 
+    # ------------------------------------------------------------------
+    # GET /api/ants/activity
+    # ------------------------------------------------------------------
+
+    @router.get("/ants/activity", response_model=AntActivityResponse)
+    def get_ant_activity() -> AntActivityResponse:
+        """Activiteitsoverzicht per mier — gelezen uit ANT_LOGS subdirs."""
+        if ctx.logs_root is None:
+            return AntActivityResponse(ants=[])
+
+        today  = _today_cutoff()
+        result: list[AntActivityEntry] = []
+
+        for ant_type, subdir in _ANT_LOG_DIRS.items():
+            records = _read_ant_dir(ctx.logs_root, subdir)
+            if not records:
+                continue
+
+            last_rec  = records[-1]
+            last_ts   = _parse_ts(last_rec.get("timestamp"))
+            last_seen = last_ts.strftime("%H:%M:%S") if last_ts else None
+
+            recent_events = [_event_short(r) for r in records[-3:]]
+
+            today_recs = [
+                r for r in records
+                if (_parse_ts(r.get("timestamp")) or datetime.min.replace(tzinfo=timezone.utc)) >= today
+            ]
+
+            stats   = _build_ant_stats(ant_type, today_recs)
+            summary = _build_ant_summary(ant_type, records, stats)
+
+            result.append(AntActivityEntry(
+                ant_type=ant_type,
+                last_seen=last_seen,
+                summary=summary,
+                recent_events=recent_events,
+                stats=stats,
+            ))
+
+        return AntActivityResponse(ants=result)
+
     return router
 
 
@@ -994,3 +1062,140 @@ def _parse_ts(value: str | None) -> datetime | None:
         return dt
     except (ValueError, TypeError):
         return None
+
+
+# ---------------------------------------------------------------------------
+# Intern — mieren activiteit helpers
+# ---------------------------------------------------------------------------
+
+_ANT_LOG_DIRS: dict[str, str] = {
+    "scout_ant":     "scouts",
+    "research_ant":  "research",
+    "paper_ant":     "paper",
+    "audit_ant":     "audit",
+    "ingestion_ant": "ingestion",
+    "strategy_ant":  "strategy",
+    "execution_ant": "execution",
+}
+
+
+def _today_cutoff() -> datetime:
+    now = datetime.now(tz=timezone.utc)
+    return now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def _read_ant_dir(logs_root: Path, subdir: str) -> list[dict]:
+    """Lees alle niet-trades JSONL records uit een ant-subdir, gesorteerd op timestamp."""
+    ant_dir = logs_root / subdir
+    if not ant_dir.exists():
+        return []
+    records: list[dict] = []
+    for path in ant_dir.glob("*.jsonl"):
+        if "_trades" in path.name:
+            continue
+        try:
+            with path.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if line:
+                        try:
+                            records.append(json.loads(line))
+                        except json.JSONDecodeError:
+                            pass
+        except OSError:
+            pass
+    records.sort(key=lambda r: r.get("timestamp", ""))
+    return records
+
+
+def _action_of(rec: dict) -> str:
+    return (rec.get("payload") or {}).get("action") or rec.get("event_type", "")
+
+
+def _event_short(rec: dict) -> str:
+    """Formatteer een log record als korte event string voor de tijdlijn."""
+    ts     = _parse_ts(rec.get("timestamp"))
+    ts_str = ts.strftime("%H:%M:%S") if ts else "?"
+    action = _action_of(rec).replace("_", " ")
+    symbol = (rec.get("payload") or {}).get("symbol") or ""
+    parts  = [ts_str, action]
+    if symbol:
+        parts.append(symbol)
+    return " · ".join(parts)
+
+
+def _count_actions(recs: list[dict], *keywords: str) -> int:
+    return sum(1 for r in recs if any(kw in _action_of(r) for kw in keywords))
+
+
+def _build_ant_stats(ant_type: str, today_recs: list[dict]) -> AntStatsEntry:
+    if ant_type == "scout_ant":
+        return AntStatsEntry(
+            signals_found=_count_actions(today_recs, "signal", "opportunity", "detected"),
+        )
+    if ant_type == "research_ant":
+        return AntStatsEntry(
+            candidates_above_threshold=_count_actions(today_recs, "candidate_emitted", "emitted"),
+        )
+    if ant_type == "paper_ant":
+        opened      = _count_actions(today_recs, "trade_opened", "position_opened")
+        closed_recs = [r for r in today_recs if _action_of(r) in ("trade_closed", "position_closed")]
+        pnl_vals    = [float((r.get("payload") or {}).get("realized_pnl") or 0) for r in closed_recs]
+        total_pnl   = round(sum(pnl_vals), 2)
+        wins        = sum(1 for v in pnl_vals if v > 0)
+        win_rate    = round(wins / len(pnl_vals), 2) if pnl_vals else None
+        return AntStatsEntry(
+            open_trades=max(0, opened - len(closed_recs)),
+            total_pnl=total_pnl,
+            win_rate=win_rate,
+        )
+    if ant_type == "audit_ant":
+        return AntStatsEntry(
+            warnings_today=_count_actions(today_recs, "warning", "anomaly", "error"),
+            anomalies_today=_count_actions(today_recs, "anomaly"),
+        )
+    if ant_type == "ingestion_ant":
+        return AntStatsEntry(
+            repos_ingested=_count_actions(today_recs, "candidate_ingested", "ingested"),
+        )
+    if ant_type == "strategy_ant":
+        return AntStatsEntry(
+            variants_generated=_count_actions(today_recs, "variant_emitted", "emitted"),
+        )
+    if ant_type == "execution_ant":
+        return AntStatsEntry(
+            orders_placed=_count_actions(today_recs, "order_placed", "position_opened"),
+            orders_rejected=_count_actions(today_recs, "order_rejected", "rejected", "startup_failed"),
+        )
+    return AntStatsEntry()
+
+
+def _build_ant_summary(ant_type: str, all_recs: list[dict], stats: AntStatsEntry) -> str:
+    if not all_recs:
+        return "Geen activiteit geregistreerd."
+    action = _action_of(all_recs[-1]).replace("_", " ")
+    if ant_type == "scout_ant":
+        n = stats.signals_found or 0
+        return f"{n} signalen vandaag — laatste: {action}"
+    if ant_type == "research_ant":
+        n = stats.candidates_above_threshold or 0
+        return f"{n} kandidaten geëmit vandaag — laatste: {action}"
+    if ant_type == "paper_ant":
+        pnl  = stats.total_pnl or 0.0
+        sign = "+" if pnl >= 0 else ""
+        wr   = f"{int((stats.win_rate or 0) * 100)}%" if stats.win_rate is not None else "—"
+        return f"PnL vandaag: {sign}€{pnl:.2f} · winrate: {wr}"
+    if ant_type == "audit_ant":
+        w = stats.warnings_today or 0
+        return f"{w} waarschuwingen vandaag — laatste: {action}"
+    if ant_type == "ingestion_ant":
+        n = stats.repos_ingested or 0
+        return f"{n} repos geïngesteerd vandaag — laatste: {action}"
+    if ant_type == "strategy_ant":
+        n = stats.variants_generated or 0
+        return f"{n} varianten gegenereerd vandaag — laatste: {action}"
+    if ant_type == "execution_ant":
+        p = stats.orders_placed or 0
+        r = stats.orders_rejected or 0
+        return f"{p} orders geplaatst, {r} geweigerd — laatste: {action}"
+    return f"Laatste actie: {action}"

@@ -598,6 +598,75 @@
     .v1-side-sell { color: #E24B4A; font-weight: 700; font-size: 10px; text-transform: uppercase; }
     .v1-price { color: var(--muted); }
 
+    /* ──────────────────────────────────────────────
+       MIEREN ACTIVITEIT
+    ────────────────────────────────────────────── */
+
+    .activity-grid {
+      display: flex; flex-direction: column;
+      gap: 6px;
+    }
+
+    .ac-card {
+      border: .5px solid var(--border);
+      border-radius: 6px;
+      padding: 9px 11px;
+      background: #faf9f5;
+    }
+
+    .ac-hdr {
+      display: flex; align-items: center;
+      gap: 7px; margin-bottom: 4px;
+    }
+
+    .ac-dot {
+      width: 7px; height: 7px;
+      border-radius: 50%; flex-shrink: 0;
+    }
+
+    .ac-name { font-size: 12px; font-weight: 600; flex: 1; }
+
+    .ac-time {
+      font-size: 10px; color: var(--faint);
+      font-variant-numeric: tabular-nums;
+      font-family: 'SF Mono','Cascadia Code','Consolas',monospace;
+    }
+
+    .ac-summary {
+      font-size: 11px; color: var(--muted);
+      margin-bottom: 5px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+
+    .ac-stats {
+      display: flex; flex-wrap: wrap;
+      gap: 3px; margin-bottom: 5px;
+    }
+
+    .stat-b {
+      display: inline-flex; align-items: center;
+      padding: 2px 7px; border-radius: 20px;
+      font-size: 10px; font-weight: 700;
+      background: #ede9e0; color: var(--text);
+      font-variant-numeric: tabular-nums;
+    }
+    .stat-b.pos  { background: var(--pnl-pos-bg); color: var(--pnl-pos); }
+    .stat-b.neg  { background: var(--pnl-neg-bg); color: var(--pnl-neg); }
+    .stat-b.warn { background: var(--badge-warn-bg); color: var(--badge-warn-txt); }
+
+    .ac-timeline {
+      display: flex; flex-direction: column;
+      gap: 1px;
+      border-top: .5px solid var(--border-soft);
+      padding-top: 5px;
+    }
+
+    .tl-line {
+      font-family: 'SF Mono','Cascadia Code','Consolas',monospace;
+      font-size: 10px; color: var(--faint);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+
   </style>
 </head>
 <body>
@@ -744,6 +813,14 @@
         </table>
       </div>
 
+      <!-- Mieren activiteit -->
+      <div class="card">
+        <div class="card-title">Mieren activiteit</div>
+        <div class="activity-grid" id="activity-grid">
+          <div class="empty">Activiteit laden…</div>
+        </div>
+      </div>
+
       <!-- Brokers -->
       <div class="card">
         <div class="card-title">Brokers</div>
@@ -810,6 +887,7 @@ const S = {
   v1status:    null,
   v1positions: { positions:[], scanned_at:null },
   v1loaded:    false,
+  activity:    { ants:[] },
   tickerIdx:   0,
   // heartbeat live-counter
   hbBase:      null,
@@ -818,6 +896,17 @@ const S = {
 
 const BIOME_COLOR = { crypto:'#1D9E75', equities:'#378ADD', commodities:'#EF9F27' };
 function bcolor(id) { return BIOME_COLOR[id] || '#9ca3af'; }
+
+const ANT_COLOR = {
+  scout_ant:     '#1D9E75',
+  research_ant:  '#378ADD',
+  paper_ant:     '#7C3AED',
+  audit_ant:     '#EF9F27',
+  ingestion_ant: '#F97316',
+  strategy_ant:  '#06B6D4',
+  execution_ant: '#E24B4A',
+};
+function antColor(t) { return ANT_COLOR[t] || '#9ca3af'; }
 
 // ── Formatters ─────────────────────────────────
 
@@ -874,10 +963,10 @@ function pnlCls(v) { return v > 0 ? 'pos' : v < 0 ? 'neg' : 'zero'; }
 
 async function fetchAll() {
   const get = url => fetch(url).then(r => r.json()).catch(() => null);
-  const [st, me, pe, bi, an, br, ti, v1s, v1p] = await Promise.all([
+  const [st, me, pe, bi, an, br, ti, v1s, v1p, act] = await Promise.all([
     get('/api/status'), get('/api/metrics'), get('/api/performance'),
     get('/api/biomes'), get('/api/ants'),    get('/api/brokers'), get('/api/ticker'),
-    get('/api/v1status'), get('/api/v1positions'),
+    get('/api/v1status'), get('/api/v1positions'), get('/api/ants/activity'),
   ]);
 
   if (st) {
@@ -892,6 +981,7 @@ async function fetchAll() {
   if (ti)  S.ticker      = ti;
   if (v1s) S.v1status    = v1s;
   if (v1p) { S.v1positions = v1p; S.v1loaded = true; }
+  if (act) S.activity    = act;
 
   render();
 }
@@ -904,6 +994,7 @@ function render() {
   renderPerf();
   renderBiomes();
   renderAnts();
+  renderActivity();
   renderBrokers();
   renderV1();
 }
@@ -1161,6 +1252,72 @@ function renderV1() {
   el.innerHTML = hdrHtml + posHtml;
 }
 
+// ── Mieren activiteit ──────────────────────────
+
+function renderActivity() {
+  const el   = document.getElementById('activity-grid');
+  const ants = (S.activity && S.activity.ants) || [];
+  if (!ants.length) {
+    el.innerHTML = '<div class="empty">Geen log data — mieren nog niet actief</div>';
+    return;
+  }
+  el.innerHTML = ants.map(a => {
+    const c    = antColor(a.ant_type);
+    const name = fType(a.ant_type);
+    const ts   = a.last_seen ? `<span class="ac-time">${a.last_seen}</span>` : '';
+
+    // Stats badges
+    const st = a.stats || {};
+    const badges = [];
+    if (st.signals_found              != null)
+      badges.push(`<span class="stat-b">${st.signals_found} signalen</span>`);
+    if (st.candidates_above_threshold != null)
+      badges.push(`<span class="stat-b">${st.candidates_above_threshold} kandidaten</span>`);
+    if (st.open_trades                != null)
+      badges.push(`<span class="stat-b">${st.open_trades} open</span>`);
+    if (st.total_pnl != null) {
+      const cls  = st.total_pnl > 0 ? 'pos' : st.total_pnl < 0 ? 'neg' : '';
+      const sign = st.total_pnl >= 0 ? '+' : '';
+      badges.push(`<span class="stat-b ${cls}">${sign}€${st.total_pnl.toFixed(2)}</span>`);
+    }
+    if (st.win_rate != null)
+      badges.push(`<span class="stat-b">${Math.round(st.win_rate * 100)}% wr</span>`);
+    if (st.warnings_today != null) {
+      const cls = st.warnings_today > 0 ? 'warn' : '';
+      badges.push(`<span class="stat-b ${cls}">${st.warnings_today} warn</span>`);
+    }
+    if (st.anomalies_today != null && st.anomalies_today > 0)
+      badges.push(`<span class="stat-b neg">${st.anomalies_today} anomalieën</span>`);
+    if (st.repos_ingested    != null)
+      badges.push(`<span class="stat-b">${st.repos_ingested} repos</span>`);
+    if (st.variants_generated!= null)
+      badges.push(`<span class="stat-b">${st.variants_generated} varianten</span>`);
+    if (st.orders_placed     != null)
+      badges.push(`<span class="stat-b">${st.orders_placed} geplaatst</span>`);
+    if (st.orders_rejected   != null && st.orders_rejected > 0)
+      badges.push(`<span class="stat-b neg">${st.orders_rejected} geweigerd</span>`);
+
+    const statsHtml = badges.length
+      ? `<div class="ac-stats">${badges.join('')}</div>` : '';
+
+    const tlHtml = (a.recent_events || []).length
+      ? `<div class="ac-timeline">${a.recent_events.map(e =>
+          `<div class="tl-line">${e}</div>`).join('')}</div>`
+      : '';
+
+    return `<div class="ac-card">
+      <div class="ac-hdr">
+        <div class="ac-dot" style="background:${c}"></div>
+        <span class="ac-name">${name}</span>
+        ${ts}
+      </div>
+      <div class="ac-summary">${a.summary}</div>
+      ${statsHtml}
+      ${tlHtml}
+    </div>`;
+  }).join('');
+}
+
 // ── Ticker rotation ────────────────────────────
 
 function fmtEvent(ev) {
@@ -1263,6 +1420,10 @@ fetchAll();
 setInterval(fetchAll,     5000);
 setInterval(perSecond,    1000);
 setInterval(rotateTicker, 4000);
+setInterval(async () => {
+  const d = await fetch('/api/ants/activity').then(r => r.json()).catch(() => null);
+  if (d) { S.activity = d; renderActivity(); }
+}, 10000);
 perSecond();
 
 </script>
