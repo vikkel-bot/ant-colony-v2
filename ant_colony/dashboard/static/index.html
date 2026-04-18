@@ -336,40 +336,6 @@
     }
 
     /* ──────────────────────────────────────────────
-       ANTS TABLE
-    ────────────────────────────────────────────── */
-
-    .ants-tbl {
-      width: 100%; border-collapse: collapse;
-      font-size: 12px;
-    }
-    .ants-tbl th {
-      text-align: left;
-      font-size: 9px; font-weight: 700;
-      text-transform: uppercase; letter-spacing: .4px;
-      color: var(--faint);
-      padding: 0 8px 9px 0;
-      border-bottom: .5px solid var(--border);
-    }
-    .ants-tbl td {
-      padding: 9px 8px 9px 0;
-      border-bottom: .5px solid var(--border-soft);
-      vertical-align: middle;
-    }
-    .ants-tbl tr:last-child td { border-bottom: none; }
-
-    .ant-cell  { display: flex; align-items: center; gap: 7px; }
-    .ant-dot   { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-    .ant-name  { font-size: 12px; font-weight: 500; }
-
-    .ttl {
-      font-family: 'SF Mono','Cascadia Code','Consolas',monospace;
-      font-size: 11px; font-variant-numeric: tabular-nums;
-      color: var(--muted);
-    }
-    .ttl.low { color: var(--danger); font-weight: 700; }
-
-    /* ──────────────────────────────────────────────
        BADGES
     ────────────────────────────────────────────── */
 
@@ -1088,34 +1054,6 @@ function renderBiomes() {
   }).join('');
 }
 
-function renderAnts() {
-  const tbody = document.getElementById('ants-body');
-  const ants  = S.ants.ants || [];
-  if (!ants.length) {
-    tbody.innerHTML = '<tr><td colspan="4" class="empty">Geen actieve agents</td></tr>';
-    return;
-  }
-  tbody.innerHTML = ants.map(a => {
-    const c     = bcolor(a.biome);
-    const badge = a.is_live
-      ? '<span class="badge b-live">live</span>'
-      : '<span class="badge b-active">actief</span>';
-    const low   = a.ttl_remaining != null && a.ttl_remaining < 300;
-    const ttlD  = a.ttl_remaining != null
-      ? `data-ttl="${a.ttl_remaining}" data-ttl-at="${Date.now()}"`
-      : '';
-    return `<tr>
-      <td><div class="ant-cell">
-        <div class="ant-dot" style="background:${c}"></div>
-        <span class="ant-name">${fType(a.ant_type)}</span>
-      </div></td>
-      <td style="color:var(--muted);font-size:11px">${a.node_id}</td>
-      <td><span class="ttl${low?' low':''}" ${ttlD}>${fTTL(a.ttl_remaining)}</span></td>
-      <td>${badge}</td>
-    </tr>`;
-  }).join('');
-}
-
 function renderBrokers() {
   const el   = document.getElementById('broker-list');
   const list = S.brokers.brokers || [];
@@ -1341,15 +1279,6 @@ function perSecond() {
     document.getElementById('hb-ago').textContent = total + 's geleden';
   }
 
-  // TTL countdown in ants table
-  document.querySelectorAll('[data-ttl]').forEach(el => {
-    const base    = parseInt(el.dataset.ttl || '0');
-    const setAt   = parseInt(el.dataset.ttlAt || '0');
-    const elapsed = Math.floor((Date.now() - setAt) / 1000);
-    const rem     = Math.max(0, base - elapsed);
-    el.textContent = fTTL(rem);
-    el.className   = 'ttl' + (rem < 300 ? ' low' : '');
-  });
 }
 
 // ── Kill-switch ────────────────────────────────
