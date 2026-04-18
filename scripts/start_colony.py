@@ -385,9 +385,12 @@ def main() -> None:
     # krijgen geen thread — ResearchAnt en AuditAnt klassen bestaan nog niet.
     try:
         from ant_colony.ants.audit_ant import AuditAnt
+        from ant_colony.ants.execution_ant import ExecutionAnt
+        from ant_colony.ants.ingestion_ant import IngestionAnt
         from ant_colony.ants.paper_ant import PaperAnt
         from ant_colony.ants.research_ant import ResearchAnt
         from ant_colony.ants.scout_ant import ScoutAnt
+        from ant_colony.ants.strategy_ant import StrategyAnt
         from ant_colony.schemas.mission import (
             AbortConditions,
             MarketScope,
@@ -409,6 +412,8 @@ def main() -> None:
             symbols=["BTC-EUR", "ETH-EUR", "SOL-EUR"],
             timeframes=["1h", "4h", "1d"],
         )
+
+        _paper_mode_active = os.getenv("BITVAVO_PAPER_MODE", "true").lower() == "true"
 
         _bootstrap_missions = [
             Mission(
@@ -511,12 +516,94 @@ def main() -> None:
                     stale_market_data=False,
                 ),
             ),
-        ]
+            Mission(
+                mission_id=f"ingestion-crypto-{_ts}",
+                ant_type="ingestion_ant",
+                allowed_node=args.node_id,
+                allowed_actions=["read_data", "ingest_candidate"],
+                market_scope=_crypto_scope,
+                capital_limit=0.0,
+                risk_limits=_obs_risk,
+                ttl=3600,
+                heartbeat_interval=120,
+                success_conditions=SuccessConditions(
+                    description="Zoek publieke strategiebronnen en normaliseer naar "
+                                "StrategyCandidate met status INGESTED.",
+                    criteria={"min_candidates_ingested": 1},
+                ),
+                abort_conditions=AbortConditions(
+                    stale_heartbeat=True,
+                    capital_limit_breach=False,
+                    risk_limit_breach=False,
+                    ttl_expired=True,
+                    stale_market_data=False,
+                ),
+            ),
+            Mission(
+                mission_id=f"strategy-crypto-{_ts}",
+                ant_type="strategy_ant",
+                allowed_node=args.node_id,
+                allowed_actions=["read_data", "backtest", "propose_candidate"],
+                market_scope=_crypto_scope,
+                capital_limit=0.0,
+                risk_limits=_obs_risk,
+                ttl=7200,
+                heartbeat_interval=120,
+                success_conditions=SuccessConditions(
+                    description="Genereer en valideer strategie-varianten via walk-forward "
+                                "backtest en emit kandidaten met status RESEARCH.",
+                    criteria={"min_variants_emitted": 1},
+                ),
+                abort_conditions=AbortConditions(
+                    stale_heartbeat=True,
+                    capital_limit_breach=False,
+                    risk_limit_breach=False,
+                    ttl_expired=True,
+                    stale_market_data=False,
+                ),
+            ),
+        ] + (
+            [
+                Mission(
+                    mission_id=f"execution-crypto-{_ts}",
+                    ant_type="execution_ant",
+                    allowed_node=args.node_id,
+                    allowed_actions=["live_execute", "read_data"],
+                    market_scope=_crypto_scope,
+                    capital_limit=500.0,
+                    risk_limits=RiskLimits(
+                        max_drawdown_pct=0.10,
+                        max_position_size=500.0,
+                        daily_loss_limit=50.0,
+                        stop_loss_required=True,
+                    ),
+                    ttl=86400,
+                    heartbeat_interval=60,
+                    success_conditions=SuccessConditions(
+                        description="Voer live trades uit op basis van gevalideerde "
+                                    "PaperAnt-resultaten met Queen-goedkeuring.",
+                        criteria={"min_trades": 1},
+                    ),
+                    abort_conditions=AbortConditions(
+                        stale_heartbeat=True,
+                        capital_limit_breach=True,
+                        risk_limit_breach=True,
+                        ttl_expired=True,
+                        stale_market_data=True,
+                    ),
+                ),
+            ]
+            if _paper_mode_active
+            else []
+        )
 
-        scout_mission    = None
-        research_mission = None
-        paper_mission    = None
-        audit_mission    = None
+        scout_mission     = None
+        research_mission  = None
+        paper_mission     = None
+        audit_mission     = None
+        ingestion_mission = None
+        strategy_mission  = None
+        execution_mission = None
 
         for mission in _bootstrap_missions:
             result = queen.issue_mission(mission)
@@ -537,6 +624,12 @@ def main() -> None:
                 paper_mission = mission
             elif mission.ant_type == "audit_ant" and result.accepted:
                 audit_mission = mission
+            elif mission.ant_type == "ingestion_ant" and result.accepted:
+                ingestion_mission = mission
+            elif mission.ant_type == "strategy_ant" and result.accepted:
+                strategy_mission = mission
+            elif mission.ant_type == "execution_ant" and result.accepted:
+                execution_mission = mission
 
         if scout_mission is not None:
             scout_ant_id = f"scout-{uuid.uuid4().hex[:12]}"
@@ -630,6 +723,87 @@ def main() -> None:
             )
         else:
             log.warning("Audit-missie niet geaccepteerd — geen AuditAnt thread gestart.")
+
+        if ingestion_mission is not None:
+            ingestion_ant_id = f"ingestion-{uuid.uuid4().hex[:12]}"
+            ingestion = IngestionAnt(
+                ant_id=ingestion_ant_id,
+                mission=ingestion_mission,
+                scheduler=scheduler,
+                logs_root=logs_root,
+            )
+            threading.Thread(
+                target=ingestion.run,
+                name=f"ingestion-{ingestion_ant_id[:16]}",
+                daemon=True,
+            ).start()
+            log.info(
+                "IngestionAnt gestart | ant_id=%s  ttl=%ds",
+                ingestion_ant_id,
+                ingestion_mission.ttl,
+            )
+        else:
+            log.warning("Ingestion-missie niet geaccepteerd — geen IngestionAnt thread gestart.")
+
+        if strategy_mission is not None:
+            strategy_ant_id = f"strategy-{uuid.uuid4().hex[:12]}"
+            strategy = StrategyAnt(
+                ant_id=strategy_ant_id,
+                mission=strategy_mission,
+                scheduler=scheduler,
+                biome_registry=biome_registry,
+                logs_root=logs_root,
+            )
+            threading.Thread(
+                target=strategy.run,
+                name=f"strategy-{strategy_ant_id[:16]}",
+                daemon=True,
+            ).start()
+            log.info(
+                "StrategyAnt gestart | ant_id=%s  ttl=%ds  symbols=%s",
+                strategy_ant_id,
+                strategy_mission.ttl,
+                strategy_mission.market_scope.symbols,
+            )
+        else:
+            log.warning("Strategy-missie niet geaccepteerd — geen StrategyAnt thread gestart.")
+
+        if execution_mission is not None:
+            from ant_colony.execution.live_gate import LiveExecutionGate
+            execution_ant_id = f"execution-{uuid.uuid4().hex[:12]}"
+            exec_gate = LiveExecutionGate(
+                queen=queen,
+                scheduler=scheduler,
+                adapter=biome_registry.get("crypto"),
+                logs_root=logs_root,
+            )
+            execution = ExecutionAnt(
+                ant_id=execution_ant_id,
+                mission=execution_mission,
+                scheduler=scheduler,
+                gate=exec_gate,
+                biome_registry=biome_registry,
+                logs_root=logs_root,
+            )
+            threading.Thread(
+                target=execution.run,
+                name=f"execution-{execution_ant_id[:16]}",
+                daemon=True,
+            ).start()
+            log.info(
+                "ExecutionAnt gestart | ant_id=%s  capital=€%.2f  ttl=%ds  paper_mode=%s",
+                execution_ant_id,
+                execution_mission.capital_limit,
+                execution_mission.ttl,
+                _paper_mode_active,
+            )
+        elif _paper_mode_active:
+            log.warning("Execution-missie niet geaccepteerd — geen ExecutionAnt thread gestart.")
+        else:
+            log.info(
+                "ExecutionAnt NIET gestart — BITVAVO_PAPER_MODE is niet 'true' "
+                "(veiligheidscheck: execution vereist paper mode)."
+            )
 
     except Exception:
         log.exception("Mission bootstrap mislukt — colony start toch door.")
