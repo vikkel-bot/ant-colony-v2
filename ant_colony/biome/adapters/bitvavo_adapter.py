@@ -188,6 +188,66 @@ class BitvavoAdapter:
             )
             return None
 
+    def get_candles(
+        self, symbol: str, timeframe: str, limit: int = 100
+    ) -> list[MarketData]:
+        """
+        Haal meerdere historische candles op — chronologisch gesorteerd (oudste eerst).
+
+        Gebruikt door ResearchAnt voor technische analyse (SMA, RSI, Bollinger).
+        Bitvavo geeft candles terug in aflopende volgorde; deze methode keert om.
+
+        Args:
+            symbol:    Markt-identifier (bijv. "BTC-EUR").
+            timeframe: Tijdschaal (bijv. "1h").
+            limit:     Maximaal aantal candles (max 1440 per Bitvavo docs).
+
+        Returns:
+            Gesorteerde lijst van MarketData, [] bij fout of onbekend timeframe.
+        """
+        interval = _TIMEFRAME_MAP.get(timeframe)
+        if not interval:
+            log.warning(
+                "BitvavoAdapter.get_candles: onbekend timeframe %r voor %s",
+                timeframe, symbol,
+            )
+            return []
+
+        try:
+            raw = self._client.candles(symbol, interval, {"limit": limit})
+            if not raw or isinstance(raw, dict):
+                log.warning(
+                    "BitvavoAdapter.get_candles: geen data voor %s/%s — %r",
+                    symbol, timeframe, raw,
+                )
+                return []
+
+            candles: list[MarketData] = []
+            for row in raw:
+                ts_ms, open_, high, low, close, volume = row
+                candles.append(
+                    MarketData(
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        timestamp=datetime.fromtimestamp(float(ts_ms) / 1000.0, tz=timezone.utc),
+                        open=float(open_),
+                        high=float(high),
+                        low=float(low),
+                        close=float(close),
+                        volume=float(volume),
+                        biome_id=self.biome_id,
+                    )
+                )
+
+            candles.sort(key=lambda m: m.timestamp)
+            return candles
+
+        except Exception:
+            log.exception(
+                "BitvavoAdapter.get_candles: fout voor %s/%s", symbol, timeframe
+            )
+            return []
+
     def get_account_state(self) -> AccountState | None:
         """
         Haal EUR balance en in-order waarde op als AccountState.

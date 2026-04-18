@@ -384,6 +384,7 @@ def main() -> None:
     # Research en audit missions worden uitgegeven (zichtbaar op dashboard) maar
     # krijgen geen thread — ResearchAnt en AuditAnt klassen bestaan nog niet.
     try:
+        from ant_colony.ants.research_ant import ResearchAnt
         from ant_colony.ants.scout_ant import ScoutAnt
         from ant_colony.schemas.mission import (
             AbortConditions,
@@ -479,7 +480,9 @@ def main() -> None:
             ),
         ]
 
-        scout_mission = None
+        scout_mission    = None
+        research_mission = None
+
         for mission in _bootstrap_missions:
             result = queen.issue_mission(mission)
             if result.accepted:
@@ -493,6 +496,8 @@ def main() -> None:
                 )
             if mission.ant_type == "scout_ant" and result.accepted:
                 scout_mission = mission
+            elif mission.ant_type == "research_ant" and result.accepted:
+                research_mission = mission
 
         if scout_mission is not None:
             scout_ant_id = f"scout-{uuid.uuid4().hex[:12]}"
@@ -503,12 +508,11 @@ def main() -> None:
                 biome_registry=biome_registry,
                 logs_root=logs_root,
             )
-            scout_thread = threading.Thread(
+            threading.Thread(
                 target=scout.run,
                 name=f"scout-{scout_ant_id[:16]}",
                 daemon=True,
-            )
-            scout_thread.start()
+            ).start()
             log.info(
                 "ScoutAnt gestart | ant_id=%s  ttl=%ds  symbols=%s",
                 scout_ant_id,
@@ -518,9 +522,30 @@ def main() -> None:
         else:
             log.warning("Scout-missie niet geaccepteerd — geen ScoutAnt thread gestart.")
 
-        log.info(
-            "Research en audit missions uitgegeven — geen threads (klassen nog niet geïmplementeerd)."
-        )
+        if research_mission is not None:
+            research_ant_id = f"research-{uuid.uuid4().hex[:12]}"
+            research = ResearchAnt(
+                ant_id=research_ant_id,
+                mission=research_mission,
+                scheduler=scheduler,
+                biome_registry=biome_registry,
+                logs_root=logs_root,
+            )
+            threading.Thread(
+                target=research.run,
+                name=f"research-{research_ant_id[:16]}",
+                daemon=True,
+            ).start()
+            log.info(
+                "ResearchAnt gestart | ant_id=%s  ttl=%ds  symbols=%s",
+                research_ant_id,
+                research_mission.ttl,
+                research_mission.market_scope.symbols,
+            )
+        else:
+            log.warning("Research-missie niet geaccepteerd — geen ResearchAnt thread gestart.")
+
+        log.info("Audit mission uitgegeven — geen thread (AuditAnt nog niet geïmplementeerd).")
 
     except Exception:
         log.exception("Mission bootstrap mislukt — colony start toch door.")
