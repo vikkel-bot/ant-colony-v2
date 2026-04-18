@@ -873,14 +873,17 @@ def create_router(ctx: ColonyContext) -> APIRouter:
         result: list[AntActivityEntry] = []
 
         for ant_type, subdir in _ANT_LOG_DIRS.items():
-            records = _read_ant_dir(ctx.logs_root, subdir)
+            records, dir_exists = _read_ant_dir(ctx.logs_root, subdir)
 
             last_seen:     str | None  = None
             recent_events: list[str]   = []
             stats   = AntStatsEntry()
-            summary = "Geen activiteit geregistreerd."
 
-            if records:
+            if not dir_exists:
+                summary = "Nog geen activiteit."
+            elif not records:
+                summary = "Actief maar nog geen events gelogd."
+            else:
                 last_rec  = records[-1]
                 last_ts   = _parse_ts(last_rec.get("timestamp"))
                 last_seen = last_ts.strftime("%H:%M:%S") if last_ts else None
@@ -1088,11 +1091,17 @@ def _today_cutoff() -> datetime:
     return now.replace(hour=0, minute=0, second=0, microsecond=0)
 
 
-def _read_ant_dir(logs_root: Path, subdir: str) -> list[dict]:
-    """Lees alle niet-trades JSONL records uit een ant-subdir, gesorteerd op timestamp."""
+def _read_ant_dir(logs_root: Path, subdir: str) -> tuple[list[dict], bool]:
+    """
+    Lees alle niet-trades JSONL records uit een ant-subdir.
+
+    Returns:
+        (records, dir_exists) — dir_exists=False als de map nog niet bestaat.
+        records gesorteerd op timestamp.
+    """
     ant_dir = logs_root / subdir
     if not ant_dir.exists():
-        return []
+        return [], False
     records: list[dict] = []
     for path in ant_dir.glob("*.jsonl"):
         if "_trades" in path.name:
@@ -1109,7 +1118,7 @@ def _read_ant_dir(logs_root: Path, subdir: str) -> list[dict]:
         except OSError:
             pass
     records.sort(key=lambda r: r.get("timestamp", ""))
-    return records
+    return records, True
 
 
 def _action_of(rec: dict) -> str:

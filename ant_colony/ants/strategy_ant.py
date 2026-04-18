@@ -143,6 +143,11 @@ class StrategyAnt:
 
         self._log = logging.getLogger(f"ant.strategy.{ant_id[:8]}")
 
+        if self.logs_root is not None:
+            log_dir = self.logs_root / "strategy"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            self._log.info("Logs map: %s", log_dir)
+
     # ------------------------------------------------------------------
     # Publieke interface
     # ------------------------------------------------------------------

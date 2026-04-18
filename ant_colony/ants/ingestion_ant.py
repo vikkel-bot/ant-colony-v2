@@ -112,6 +112,11 @@ class IngestionAnt:
 
         self._log = logging.getLogger(f"ant.ingestion.{ant_id[:8]}")
 
+        if self.logs_root is not None:
+            log_dir = self.logs_root / "ingestion"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            self._log.info("Logs map: %s", log_dir)
+
     # ------------------------------------------------------------------
     # Publieke interface
     # ------------------------------------------------------------------

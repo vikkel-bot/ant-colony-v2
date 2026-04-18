@@ -95,6 +95,11 @@ class ExecutionAnt:
 
         self._log = logging.getLogger(f"ant.execution.{ant_id[:8]}")
 
+        if self.logs_root is not None:
+            log_dir = self.logs_root / "execution"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            self._log.info("Logs map: %s", log_dir)
+
     # ------------------------------------------------------------------
     # Publieke interface
     # ------------------------------------------------------------------
