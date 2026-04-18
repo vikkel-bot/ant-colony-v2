@@ -378,11 +378,13 @@ def main() -> None:
     )
     scheduler_thread.start()
 
-    # --- Stap 8b: bootstrap ScoutAnt --- #
-    # Bouw de scout-missie, geef hem uit via de Queen en start een daemon thread.
-    # De thread logt OpportunitySignals naar ANT_LOGS/scouts/{ant_id}.jsonl.
-    # De dashboard-tikker pikt ze automatisch op via rglob("*.jsonl").
+    # --- Stap 8b: bootstrap missions (scout + research + audit) --- #
+    # Geeft alle drie scouting-missions uit via de Queen en start een ScoutAnt thread.
+    # Research en audit missions worden uitgegeven (zichtbaar op dashboard) maar
+    # krijgen geen thread — ResearchAnt en AuditAnt klassen bestaan nog niet.
     try:
+        from datetime import timezone as _tz
+
         from ant_colony.ants.scout_ant import ScoutAnt
         from ant_colony.schemas.mission import (
             AbortConditions,
@@ -392,72 +394,137 @@ def main() -> None:
             SuccessConditions,
         )
 
+        _ts = datetime.now(tz=_tz.utc).strftime("%Y%m%d-%H%M%S")
+
         _obs_risk = RiskLimits(
             max_drawdown_pct=0.01,
             max_position_size=1.0,
             daily_loss_limit=1.0,
             stop_loss_required=False,
         )
-        scout_mission = Mission(
-            mission_id="scout-crypto-001",
-            ant_type="scout_ant",
-            allowed_node=args.node_id,
-            allowed_actions=["read_data", "detect_opportunity"],
-            market_scope=MarketScope(
-                biome="crypto",
-                symbols=["BTC-EUR", "ETH-EUR", "SOL-EUR"],
-                timeframes=["1h", "4h", "1d"],
-            ),
-            capital_limit=0.0,
-            risk_limits=_obs_risk,
-            ttl=3600,
-            heartbeat_interval=60,
-            success_conditions=SuccessConditions(
-                description="Detecteer en rapporteer minstens één kansrijke marktstructuur.",
-                criteria={"min_opportunities_detected": 1},
-            ),
-            abort_conditions=AbortConditions(
-                stale_heartbeat=True,
-                capital_limit_breach=False,
-                risk_limit_breach=False,
-                ttl_expired=True,
-                stale_market_data=True,
-            ),
+        _crypto_scope = MarketScope(
+            biome="crypto",
+            symbols=["BTC-EUR", "ETH-EUR", "SOL-EUR"],
+            timeframes=["1h", "4h", "1d"],
         )
 
-        mission_result = queen.issue_mission(scout_mission)
-        if mission_result.accepted:
-            log.info("Scout-missie geaccepteerd — mission_id=%s", scout_mission.mission_id)
-        else:
-            log.warning(
-                "Scout-missie geweigerd: %s — %s",
-                mission_result.rejection_reason,
-                mission_result.rejection_detail,
+        _bootstrap_missions = [
+            Mission(
+                mission_id=f"scout-crypto-{_ts}",
+                ant_type="scout_ant",
+                allowed_node=args.node_id,
+                allowed_actions=["read_data", "detect_opportunity"],
+                market_scope=_crypto_scope,
+                capital_limit=0.0,
+                risk_limits=_obs_risk,
+                ttl=3600,
+                heartbeat_interval=60,
+                success_conditions=SuccessConditions(
+                    description="Detecteer en rapporteer minstens één kansrijke marktstructuur "
+                                "op BTC-EUR, ETH-EUR of SOL-EUR binnen de TTL.",
+                    criteria={"min_opportunities_detected": 1},
+                ),
+                abort_conditions=AbortConditions(
+                    stale_heartbeat=True,
+                    capital_limit_breach=False,
+                    risk_limit_breach=False,
+                    ttl_expired=True,
+                    stale_market_data=True,
+                ),
+            ),
+            Mission(
+                mission_id=f"research-crypto-{_ts}",
+                ant_type="research_ant",
+                allowed_node=args.node_id,
+                allowed_actions=["read_data", "backtest", "propose_candidate"],
+                market_scope=_crypto_scope,
+                capital_limit=0.0,
+                risk_limits=_obs_risk,
+                ttl=7200,
+                heartbeat_interval=120,
+                success_conditions=SuccessConditions(
+                    description="Voer minimaal één backtest uit en dien een StrategyCandidate "
+                                "in met status RESEARCH binnen de TTL.",
+                    criteria={"min_backtests": 1, "candidate_status": "research"},
+                ),
+                abort_conditions=AbortConditions(
+                    stale_heartbeat=True,
+                    capital_limit_breach=False,
+                    risk_limit_breach=False,
+                    ttl_expired=True,
+                    stale_market_data=False,
+                ),
+            ),
+            Mission(
+                mission_id=f"audit-crypto-{_ts}",
+                ant_type="audit_ant",
+                allowed_node=args.node_id,
+                allowed_actions=["read_data", "validate", "report"],
+                market_scope=_crypto_scope,
+                capital_limit=0.0,
+                risk_limits=_obs_risk,
+                ttl=86400,
+                heartbeat_interval=300,
+                success_conditions=SuccessConditions(
+                    description="Valideer alle colony audit logs en schrijf een dagrapport "
+                                "binnen de TTL.",
+                    criteria={"report_written": True},
+                ),
+                abort_conditions=AbortConditions(
+                    stale_heartbeat=True,
+                    capital_limit_breach=False,
+                    risk_limit_breach=False,
+                    ttl_expired=True,
+                    stale_market_data=False,
+                ),
+            ),
+        ]
+
+        scout_mission = None
+        for mission in _bootstrap_missions:
+            result = queen.issue_mission(mission)
+            if result.accepted:
+                log.info("Missie geaccepteerd — %s (%s)", mission.mission_id, mission.ant_type)
+            else:
+                log.warning(
+                    "Missie geweigerd: %s — %s / %s",
+                    mission.mission_id,
+                    result.rejection_reason,
+                    result.rejection_detail,
+                )
+            if mission.ant_type == "scout_ant" and result.accepted:
+                scout_mission = mission
+
+        if scout_mission is not None:
+            scout_ant_id = f"scout-{uuid.uuid4().hex[:12]}"
+            scout = ScoutAnt(
+                ant_id=scout_ant_id,
+                mission=scout_mission,
+                scheduler=scheduler,
+                biome_registry=biome_registry,
+                logs_root=logs_root,
             )
+            scout_thread = threading.Thread(
+                target=scout.run,
+                name=f"scout-{scout_ant_id[:16]}",
+                daemon=True,
+            )
+            scout_thread.start()
+            log.info(
+                "ScoutAnt gestart | ant_id=%s  ttl=%ds  symbols=%s",
+                scout_ant_id,
+                scout_mission.ttl,
+                scout_mission.market_scope.symbols,
+            )
+        else:
+            log.warning("Scout-missie niet geaccepteerd — geen ScoutAnt thread gestart.")
 
-        scout_ant_id = f"scout-{uuid.uuid4().hex[:12]}"
-        scout = ScoutAnt(
-            ant_id=scout_ant_id,
-            mission=scout_mission,
-            scheduler=scheduler,
-            biome_registry=biome_registry,
-            logs_root=logs_root,
-        )
-        scout_thread = threading.Thread(
-            target=scout.run,
-            name=f"scout-{scout_ant_id[:16]}",
-            daemon=True,
-        )
-        scout_thread.start()
         log.info(
-            "ScoutAnt gestart | ant_id=%s  ttl=%ds  symbols=%s",
-            scout_ant_id,
-            scout_mission.ttl,
-            scout_mission.market_scope.symbols,
+            "Research en audit missions uitgegeven — geen threads (klassen nog niet geïmplementeerd)."
         )
 
     except Exception:
-        log.exception("ScoutAnt bootstrap mislukt — colony start toch door.")
+        log.exception("Mission bootstrap mislukt — colony start toch door.")
 
     # --- Stap 9: bouw ColonyContext en start dashboard (blocking) ---
     context = ColonyContext(
