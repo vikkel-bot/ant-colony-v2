@@ -223,21 +223,35 @@ def _read_broker_artifacts(live_root: Path) -> list[dict]:
     """
     Lees alle LIVE-*.json bestanden uit live_test/broker/.
 
-    Filtert op status=="filled". Retourneert gesorteerd op ts_utc (oud→nieuw)
-    zodat buy/sell pairing op volgorde werkt.
+    Filtert op status=="filled". Dedupliceert op orderId zodat meerdere
+    artifacts voor dezelfde order (bijv. per fill) als één trade tellen.
+    Retourneert gesorteerd op ts_utc (oud→nieuw) zodat buy/sell pairing
+    op volgorde werkt.
     """
     broker_dir = live_root / "live_test" / "broker"
     if not broker_dir.exists():
         return []
 
+    seen_order_ids: set[str] = set()
     records: list[dict] = []
-    for path in broker_dir.glob("LIVE-*.json"):
+
+    for path in sorted(broker_dir.glob("LIVE-*.json")):
         try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-            data_block = raw.get("data") or {}
-            if data_block.get("raw", {}).get("status") != "filled":
+            artifact = json.loads(path.read_text(encoding="utf-8"))
+            data_block = artifact.get("data") or {}
+            raw_block  = data_block.get("raw") or {}
+
+            if raw_block.get("status") != "filled":
                 continue
-            records.append(raw)
+
+            # Dedupliceer op orderId — meerdere bestanden per order tellen als één.
+            order_id = str(raw_block.get("orderId") or raw_block.get("order_id") or "")
+            if order_id and order_id in seen_order_ids:
+                continue
+            if order_id:
+                seen_order_ids.add(order_id)
+
+            records.append(artifact)
         except (OSError, json.JSONDecodeError):
             pass
 
@@ -310,8 +324,24 @@ def _scan_execution_triggers(live_root: Path) -> dict[str, dict]:
     return triggers
 
 
-def _get_live_price(market: str) -> float | None:
-    """Haal live tickerprijs op via Bitvavo public API (geen auth vereist)."""
+def _get_live_price(market: str, registry=None) -> float | None:
+    """
+    Haal live sluitingsprijs op voor market.
+
+    Volgorde:
+      1. BiomeRegistry crypto-adapter → get_market_data(market, "1m").close
+      2. Bitvavo public REST API (geen auth) als fallback
+    """
+    if registry is not None:
+        try:
+            adapter = registry.get("crypto")
+            if adapter is not None:
+                md = adapter.get_market_data(market, "1m")
+                if md is not None and md.close > 0:
+                    return md.close
+        except Exception:
+            pass
+
     try:
         url = _BITVAVO_TICKER.format(market=market)
         req = urllib.request.Request(url, headers={"User-Agent": "ant-colony-dashboard/2"})
@@ -650,7 +680,7 @@ def create_router(ctx: ColonyContext) -> APIRouter:
             trigger_high = trig.get("trigger_high")
             trigger_low  = trig.get("trigger_low")
 
-            current_price = _get_live_price(market) if market else None
+            current_price = _get_live_price(market, ctx.biome_registry) if market else None
 
             unrealized_pnl: float | None = None
             pnl_pct:        float | None = None
