@@ -795,24 +795,6 @@
     <!-- ── RIGHT ── -->
     <div class="col">
 
-      <!-- Actieve mieren -->
-      <div class="card">
-        <div class="card-title">Actieve mieren</div>
-        <table class="ants-tbl">
-          <thead>
-            <tr>
-              <th>Agent</th>
-              <th>Node</th>
-              <th>TTL</th>
-              <th>Status</th>
-            </tr>
-          </thead>
-          <tbody id="ants-body">
-            <tr><td colspan="4" class="empty">Geen actieve agents</td></tr>
-          </tbody>
-        </table>
-      </div>
-
       <!-- Mieren activiteit -->
       <div class="card">
         <div class="card-title">Mieren activiteit</div>
@@ -993,7 +975,6 @@ function render() {
   renderMetrics();
   renderPerf();
   renderBiomes();
-  renderAnts();
   renderActivity();
   renderBrokers();
   renderV1();

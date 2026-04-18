@@ -874,22 +874,26 @@ def create_router(ctx: ColonyContext) -> APIRouter:
 
         for ant_type, subdir in _ANT_LOG_DIRS.items():
             records = _read_ant_dir(ctx.logs_root, subdir)
-            if not records:
-                continue
 
-            last_rec  = records[-1]
-            last_ts   = _parse_ts(last_rec.get("timestamp"))
-            last_seen = last_ts.strftime("%H:%M:%S") if last_ts else None
+            last_seen:     str | None  = None
+            recent_events: list[str]   = []
+            stats   = AntStatsEntry()
+            summary = "Geen activiteit geregistreerd."
 
-            recent_events = [_event_short(r) for r in records[-3:]]
+            if records:
+                last_rec  = records[-1]
+                last_ts   = _parse_ts(last_rec.get("timestamp"))
+                last_seen = last_ts.strftime("%H:%M:%S") if last_ts else None
 
-            today_recs = [
-                r for r in records
-                if (_parse_ts(r.get("timestamp")) or datetime.min.replace(tzinfo=timezone.utc)) >= today
-            ]
+                recent_events = [_event_short(r) for r in records[-3:]]
 
-            stats   = _build_ant_stats(ant_type, today_recs)
-            summary = _build_ant_summary(ant_type, records, stats)
+                today_recs = [
+                    r for r in records
+                    if (_parse_ts(r.get("timestamp")) or datetime.min.replace(tzinfo=timezone.utc)) >= today
+                ]
+
+                stats   = _build_ant_stats(ant_type, today_recs)
+                summary = _build_ant_summary(ant_type, records, stats)
 
             result.append(AntActivityEntry(
                 ant_type=ant_type,
