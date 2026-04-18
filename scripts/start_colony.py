@@ -384,6 +384,7 @@ def main() -> None:
     # Research en audit missions worden uitgegeven (zichtbaar op dashboard) maar
     # krijgen geen thread — ResearchAnt en AuditAnt klassen bestaan nog niet.
     try:
+        from ant_colony.ants.audit_ant import AuditAnt
         from ant_colony.ants.research_ant import ResearchAnt
         from ant_colony.ants.scout_ant import ScoutAnt
         from ant_colony.schemas.mission import (
@@ -482,6 +483,7 @@ def main() -> None:
 
         scout_mission    = None
         research_mission = None
+        audit_mission    = None
 
         for mission in _bootstrap_missions:
             result = queen.issue_mission(mission)
@@ -498,6 +500,8 @@ def main() -> None:
                 scout_mission = mission
             elif mission.ant_type == "research_ant" and result.accepted:
                 research_mission = mission
+            elif mission.ant_type == "audit_ant" and result.accepted:
+                audit_mission = mission
 
         if scout_mission is not None:
             scout_ant_id = f"scout-{uuid.uuid4().hex[:12]}"
@@ -545,7 +549,28 @@ def main() -> None:
         else:
             log.warning("Research-missie niet geaccepteerd — geen ResearchAnt thread gestart.")
 
-        log.info("Audit mission uitgegeven — geen thread (AuditAnt nog niet geïmplementeerd).")
+        if audit_mission is not None:
+            audit_ant_id = f"audit-{uuid.uuid4().hex[:12]}"
+            audit = AuditAnt(
+                ant_id=audit_ant_id,
+                mission=audit_mission,
+                scheduler=scheduler,
+                biome_registry=biome_registry,
+                logs_root=logs_root,
+                scheduler_tick_interval=args.tick_interval,
+            )
+            threading.Thread(
+                target=audit.run,
+                name=f"audit-{audit_ant_id[:16]}",
+                daemon=True,
+            ).start()
+            log.info(
+                "AuditAnt gestart | ant_id=%s  ttl=%ds",
+                audit_ant_id,
+                audit_mission.ttl,
+            )
+        else:
+            log.warning("Audit-missie niet geaccepteerd — geen AuditAnt thread gestart.")
 
     except Exception:
         log.exception("Mission bootstrap mislukt — colony start toch door.")
