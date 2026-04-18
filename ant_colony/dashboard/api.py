@@ -296,29 +296,45 @@ def _scan_execution_triggers(live_root: Path) -> dict[str, dict]:
     """
     Zoek trigger_high / trigger_low per market in live_test/execution/.
 
+    Veldnamen die herkend worden (in volgorde van voorkeur):
+      trigger_high, tp_price, take_profit_price
+      trigger_low,  sl_price, stop_loss_price
+
     Retourneert: {market: {"trigger_high": float|None, "trigger_low": float|None}}
     """
     exec_dir = live_root / "live_test" / "execution"
     if not exec_dir.exists():
         return {}
 
+    _HIGH_KEYS = ("trigger_high", "tp_price", "take_profit_price")
+    _LOW_KEYS  = ("trigger_low",  "sl_price", "stop_loss_price")
+
+    def _first_float(d: dict, keys: tuple) -> float | None:
+        for k in keys:
+            v = d.get(k)
+            if v is not None:
+                try:
+                    return float(v)
+                except (TypeError, ValueError):
+                    pass
+        return None
+
     triggers: dict[str, dict] = {}
-    for path in exec_dir.glob("*.json"):
+    for path in sorted(exec_dir.glob("*.json")):
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             market = str(data.get("market") or data.get("symbol") or "")
             if not market:
                 continue
-            th = data.get("trigger_high")
-            tl = data.get("trigger_low")
+            th = _first_float(data, _HIGH_KEYS)
+            tl = _first_float(data, _LOW_KEYS)
             if th is not None or tl is not None:
-                # Laatste bestand per market wint (gesorteerd op naam).
                 existing = triggers.get(market, {})
                 triggers[market] = {
-                    "trigger_high": float(th) if th is not None else existing.get("trigger_high"),
-                    "trigger_low":  float(tl) if tl is not None else existing.get("trigger_low"),
+                    "trigger_high": th if th is not None else existing.get("trigger_high"),
+                    "trigger_low":  tl if tl is not None else existing.get("trigger_low"),
                 }
-        except (OSError, json.JSONDecodeError, ValueError):
+        except (OSError, json.JSONDecodeError):
             pass
 
     return triggers
