@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, model_validator
 
 
 class CandidateStatus(str, Enum):
+    INGESTED = "ingested"   # discovered from external source, not yet analysed
     RESEARCH = "research"
     PAPER = "paper"
     APPROVED = "approved"
@@ -17,6 +18,7 @@ class CandidateStatus(str, Enum):
 
 # Status may only move forward along this chain (or to rejected from any state).
 _STATUS_ORDER = [
+    CandidateStatus.INGESTED,
     CandidateStatus.RESEARCH,
     CandidateStatus.PAPER,
     CandidateStatus.APPROVED,
