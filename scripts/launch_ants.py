@@ -22,6 +22,7 @@ import logging
 import sys
 import threading
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -73,6 +74,11 @@ def _build_parser() -> argparse.ArgumentParser:
 # Mission definities
 # ---------------------------------------------------------------------------
 
+def _ts() -> str:
+    """Timestamp suffix voor mission_ids — bijv. 20260418-092130."""
+    return datetime.now(tz=timezone.utc).strftime("%Y%m%d-%H%M%S")
+
+
 def _build_missions(node_id: str):
     """Construeer de drie scouting-missions. Importeert schemas lazy."""
     from ant_colony.schemas.mission import (
@@ -99,10 +105,12 @@ def _build_missions(node_id: str):
         timeframes=["1h", "4h", "1d"],
     )
 
+    ts = _ts()
+
     return [
         # ── Mier 1: scout ─────────────────────────────────────────────
         Mission(
-            mission_id="scout-crypto-001",
+            mission_id=f"scout-crypto-{ts}",
             ant_type="scout_ant",
             allowed_node=node_id,
             allowed_actions=["read_data", "detect_opportunity"],
@@ -127,7 +135,7 @@ def _build_missions(node_id: str):
 
         # ── Mier 2: research ──────────────────────────────────────────
         Mission(
-            mission_id="research-crypto-001",
+            mission_id=f"research-crypto-{ts}",
             ant_type="research_ant",
             allowed_node=node_id,
             allowed_actions=["read_data", "backtest", "propose_candidate"],
@@ -152,7 +160,7 @@ def _build_missions(node_id: str):
 
         # ── Mier 3: audit ─────────────────────────────────────────────
         Mission(
-            mission_id="audit-crypto-001",
+            mission_id=f"audit-crypto-{ts}",
             ant_type="audit_ant",
             allowed_node=node_id,
             allowed_actions=["read_data", "validate", "report"],
