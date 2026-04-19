@@ -354,28 +354,43 @@ class ResearchAnt:
                     except json.JSONDecodeError:
                         continue
 
+                    # Dubbele filter: event_type én payload.action
+                    if record.get("event_type") != "action_executed":
+                        continue
                     if payload.get("action") != "candidate_ingested":
                         continue
 
                     candidate_id = str(payload.get("candidate_id") or "")
-                    if not candidate_id or candidate_id in self._seen_ingestion_ids:
+                    if not candidate_id:
+                        self._log.info(
+                            "Ingestion record zonder candidate_id overgeslagen in %s", path.name
+                        )
                         continue
+
+                    if candidate_id in self._seen_ingestion_ids:
+                        self._log.info(
+                            "Ingestion kandidaat al verwerkt — overgeslagen | id=%s",
+                            candidate_id[:16],
+                        )
+                        continue
+
+                    entry_keywords = payload.get("entry_keywords") or []
+                    self._log.info(
+                        "Nieuwe ingestion kandidaat gevonden | id=%s keywords=%s",
+                        candidate_id[:16], entry_keywords[:5],
+                    )
                     self._seen_ingestion_ids.add(candidate_id)
                     new_count += 1
                     self._backtest_ingested_candidate(candidate_id, payload, biome_id, timeframe)
             except OSError:
                 self._log.warning("Kan ingestion-log niet lezen: %s", path)
 
-        if new_count:
-            self._log.info(
-                "Ingestion kandidaten gelezen: %d nieuw (totaal gezien: %d)",
-                new_count, len(self._seen_ingestion_ids),
-            )
-        else:
-            self._log.debug(
-                "Geen nieuwe ingestion kandidaten (totaal gezien: %d)",
-                len(self._seen_ingestion_ids),
-            )
+        self._log.info(
+            "Ingestion scan klaar | nieuw=%d totaal_gezien=%d bestand=%s",
+            new_count,
+            len(self._seen_ingestion_ids),
+            ingestion_dir,
+        )
 
     def _backtest_ingested_candidate(
         self,
