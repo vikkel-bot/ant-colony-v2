@@ -44,6 +44,7 @@ from ant_colony.ants.research_ant import (
     _bollinger,
     _rsi,
     _sma,
+    _strategy_type_from_signal,
 )
 from ant_colony.biome.biome_adapter import MarketData
 from ant_colony.biome.biome_registry import BiomeRegistry
@@ -851,3 +852,158 @@ class TestAuditLog:
 
         record = read_jsonl(log_path(tmp_path, ant))[0]
         assert abs(record["payload"]["sharpe"] - 0.75) < 1e-3
+
+
+# ---------------------------------------------------------------------------
+# _strategy_type_from_signal — Claude/improved variant + tp_pct classificatie
+# ---------------------------------------------------------------------------
+
+class TestStrategyTypeFromSignalClaudeVariants:
+
+    def test_claude_keyword_high_tp_pct_is_momentum(self):
+        result = _strategy_type_from_signal("LONG", ["claude", "sma"], tp_pct=0.08)
+        assert result == "momentum"
+
+    def test_claude_keyword_low_tp_pct_is_mean_reversion(self):
+        result = _strategy_type_from_signal("LONG", ["claude", "rsi"], tp_pct=0.04)
+        assert result == "mean_reversion"
+
+    def test_claude_keyword_mid_tp_pct_is_hybrid(self):
+        result = _strategy_type_from_signal("LONG", ["claude"], tp_pct=0.06)
+        assert result == "hybrid"
+
+    def test_claude_keyword_no_tp_pct_is_hybrid(self):
+        result = _strategy_type_from_signal("LONG", ["claude"], tp_pct=None)
+        assert result == "hybrid"
+
+    def test_improved_keyword_high_tp_pct_is_momentum(self):
+        result = _strategy_type_from_signal("LONG", ["improved", "breakout"], tp_pct=0.09)
+        assert result == "momentum"
+
+    def test_improved_keyword_low_tp_pct_is_mean_reversion(self):
+        result = _strategy_type_from_signal("SHORT", ["improved"], tp_pct=0.03)
+        assert result == "mean_reversion"
+
+    def test_improved_keyword_no_tp_pct_is_hybrid(self):
+        result = _strategy_type_from_signal("LONG", ["improved"], tp_pct=None)
+        assert result == "hybrid"
+
+    def test_tp_pct_boundary_007_is_still_hybrid(self):
+        """tp_pct == 0.07 is niet > 0.07 en niet <= 0.04 → hybrid."""
+        result = _strategy_type_from_signal("LONG", ["claude"], tp_pct=0.07)
+        assert result == "hybrid"
+
+    def test_tp_pct_boundary_004_is_mean_reversion(self):
+        """tp_pct == 0.04 is <= 0.04 → mean_reversion."""
+        result = _strategy_type_from_signal("LONG", ["claude"], tp_pct=0.04)
+        assert result == "mean_reversion"
+
+    def test_normal_keywords_not_affected_by_tp_pct(self):
+        """Zonder 'claude'/'improved' wordt tp_pct genegeerd."""
+        result = _strategy_type_from_signal("LONG", ["sma", "crossover"], tp_pct=0.02)
+        assert result != "mean_reversion"
+
+
+# ---------------------------------------------------------------------------
+# _check_strategy_diversity — waarschuwing bij homogene top 3
+# ---------------------------------------------------------------------------
+
+def _write_research_log(log_dir: Path, entries: list[dict]) -> None:
+    p = log_dir / "research" / "r.jsonl"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with p.open("w") as f:
+        for e in entries:
+            f.write(json.dumps({"payload": e}) + "\n")
+
+
+class TestCheckStrategyDiversity:
+
+    def _make_candidate(self, sharpe: float, strategy_type: str) -> dict:
+        return {
+            "action": "candidate_accepted",
+            "candidate_id": f"c-{sharpe}",
+            "sharpe": sharpe,
+            "strategy_type": strategy_type,
+        }
+
+    def test_warns_when_top3_all_same_type(self, tmp_path, caplog):
+        ant = make_ant(tmp_path)
+        entries = [
+            self._make_candidate(1.2, "momentum"),
+            self._make_candidate(1.0, "momentum"),
+            self._make_candidate(0.8, "momentum"),
+        ]
+        _write_research_log(tmp_path, entries)
+
+        import logging
+        with caplog.at_level(logging.WARNING, logger="ant_colony.ants.research_ant"):
+            ant._check_strategy_diversity()
+
+        assert any("diversiteit" in r.message.lower() or "strategy_type" in r.message
+                   for r in caplog.records)
+
+    def test_no_warn_when_types_differ(self, tmp_path, caplog):
+        ant = make_ant(tmp_path)
+        entries = [
+            self._make_candidate(1.2, "momentum"),
+            self._make_candidate(1.0, "mean_reversion"),
+            self._make_candidate(0.8, "momentum"),
+        ]
+        _write_research_log(tmp_path, entries)
+
+        import logging
+        with caplog.at_level(logging.WARNING, logger="ant_colony.ants.research_ant"):
+            ant._check_strategy_diversity()
+
+        warning_msgs = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert not any("diversiteit" in r.message.lower() for r in warning_msgs)
+
+    def test_no_warn_when_fewer_than_3_candidates(self, tmp_path, caplog):
+        ant = make_ant(tmp_path)
+        entries = [
+            self._make_candidate(1.2, "momentum"),
+            self._make_candidate(1.0, "momentum"),
+        ]
+        _write_research_log(tmp_path, entries)
+
+        import logging
+        with caplog.at_level(logging.WARNING, logger="ant_colony.ants.research_ant"):
+            ant._check_strategy_diversity()
+
+        warning_msgs = [r for r in caplog.records if r.levelname == "WARNING"
+                        and "diversiteit" in r.message.lower()]
+        assert not warning_msgs
+
+    def test_no_warn_when_logs_root_none(self, caplog):
+        ant = ResearchAnt(
+            ant_id="ant-noroot",
+            mission=make_mission(),
+            scheduler=MagicMock(),
+            biome_registry=make_registry(candles=[]),
+            logs_root=None,
+        )
+        import logging
+        with caplog.at_level(logging.WARNING, logger="ant_colony.ants.research_ant"):
+            ant._check_strategy_diversity()
+
+        assert not caplog.records
+
+    def test_uses_top3_by_sharpe_not_all(self, tmp_path, caplog):
+        """Top 3 op sharpe zijn divers, overige 2 zijn homogeen → geen warning."""
+        ant = make_ant(tmp_path)
+        entries = [
+            self._make_candidate(1.5, "momentum"),
+            self._make_candidate(1.3, "mean_reversion"),
+            self._make_candidate(1.1, "hybrid"),
+            self._make_candidate(0.9, "momentum"),
+            self._make_candidate(0.8, "momentum"),
+        ]
+        _write_research_log(tmp_path, entries)
+
+        import logging
+        with caplog.at_level(logging.WARNING, logger="ant_colony.ants.research_ant"):
+            ant._check_strategy_diversity()
+
+        warning_msgs = [r for r in caplog.records if r.levelname == "WARNING"
+                        and "diversiteit" in r.message.lower()]
+        assert not warning_msgs

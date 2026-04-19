@@ -191,6 +191,7 @@ class ResearchAnt:
             self._check_bollinger(symbol, candles, closes)
 
         self._process_ingestion_candidates()
+        self._check_strategy_diversity()
         self._last_action = "tick"
 
     # ------------------------------------------------------------------
@@ -632,8 +633,14 @@ class ResearchAnt:
             exp_ret = round((avg_win * win_rate) - (avg_loss * (1.0 - win_rate)), 4)
 
         entry_kws     = (candidate.entry_conditions or {}).get("keywords") or []
-        strategy_type = _strategy_type_from_signal(candidate.name or "", entry_kws)
+        tp_pct        = (candidate.exit_conditions or {}).get("take_profit_pct")
+        strategy_type = _strategy_type_from_signal(candidate.name or "", entry_kws, tp_pct=tp_pct)
         grade         = _grade_from_sharpe(sharpe)
+
+        self._log.debug(
+            "Classificatie | signal=%s keywords=%s tp_pct=%s → strategy_type=%s",
+            candidate.name, entry_kws, tp_pct, strategy_type,
+        )
 
         event = AuditEvent(
             event_type=AuditEventType.ACTION_EXECUTED,
@@ -671,6 +678,56 @@ class ResearchAnt:
             self._log.exception("Kon kandidaat niet naar disk schrijven: %s", log_path)
 
     # ------------------------------------------------------------------
+    # Strategy diversiteit controle
+    # ------------------------------------------------------------------
+
+    def _check_strategy_diversity(self) -> None:
+        """
+        Log een WARNING als de top 3 Queen-strategieën allemaal hetzelfde strategy_type hebben.
+
+        Leest ANT_LOGS/research/*.jsonl, sorteert op sharpe, bekijkt top 3.
+        """
+        if self.logs_root is None:
+            return
+
+        research_dir = self.logs_root / "research"
+        if not research_dir.exists():
+            return
+
+        candidates: list[dict] = []
+        for path in research_dir.glob("*.jsonl"):
+            try:
+                for line in path.read_text(encoding="utf-8").splitlines():
+                    if not line.strip():
+                        continue
+                    try:
+                        rec = json.loads(line)
+                        payload = rec.get("payload") or {}
+                        if (payload.get("action") == "candidate_accepted"
+                                and payload.get("sharpe") is not None
+                                and payload.get("strategy_type")):
+                            candidates.append(payload)
+                    except json.JSONDecodeError:
+                        pass
+            except OSError:
+                pass
+
+        if len(candidates) < 3:
+            return
+
+        top3 = sorted(candidates, key=lambda c: float(c.get("sharpe") or 0), reverse=True)[:3]
+        types = {c.get("strategy_type") for c in top3}
+
+        if len(types) == 1:
+            sole_type = next(iter(types))
+            self._log.warning(
+                "Queen ziet alleen één strategy_type — diversiteit laag | "
+                "type=%s top3_sharpes=%s",
+                sole_type,
+                [round(float(c.get("sharpe") or 0), 3) for c in top3],
+            )
+
+    # ------------------------------------------------------------------
     # Heartbeat
     # ------------------------------------------------------------------
 
@@ -700,17 +757,36 @@ class ResearchAnt:
 # Keyword → BacktestConfig vertaling
 # ---------------------------------------------------------------------------
 
-def _strategy_type_from_signal(signal_type: str, keywords: list[str]) -> str:
+def _strategy_type_from_signal(
+    signal_type: str,
+    keywords: list[str],
+    tp_pct: float | None = None,
+) -> str:
     """
-    Leid strategy_type af uit signal_type en entry_keywords.
+    Leid strategy_type af uit signal_type, entry_keywords en optionele tp_pct.
 
     Directe ResearchAnt signalen (sma_crossover, rsi_*, bb_*) worden exact
     gematcht op signal_type. Voor ingested candidates wordt keyword-analyse
     gebruikt; combinaties van twee of meer typen → "hybrid".
+
+    Claude Ant varianten (keywords bevatten 'claude' of 'improved') worden
+    geclassificeerd op basis van tp_pct:
+      - tp_pct > 0.07 → momentum
+      - tp_pct <= 0.04 → mean_reversion
+      - anders         → hybrid
     """
     st  = (signal_type or "").lower()
     kw  = {k.lower() for k in (keywords or [])}
     kws = " ".join(sorted(kw))  # voor multi-word substring check
+
+    # --- Claude Ant varianten: expliciete tp_pct classificatie ---
+    if "claude" in kw or "improved" in kw:
+        if tp_pct is not None:
+            if tp_pct > 0.07:
+                return "momentum"
+            if tp_pct <= 0.04:
+                return "mean_reversion"
+        return "hybrid"
 
     # --- Directe signalen van ResearchAnt ---
     if "sma_crossover" in st or ("sma" in st and "cross" in st):

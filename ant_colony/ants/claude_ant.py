@@ -46,9 +46,14 @@ _MODEL             = "claude-sonnet-4-6"
 _MAX_TOKENS        = 500
 _TOP_N_CANDIDATES  = 3
 _MAX_WORDS_PER_CANDIDATE = 200
-_RATE_LIMIT_FAST   = 600.0    # normaal: 1 call per 10 minuten
+_RATE_LIMIT_FAST   = 1800.0   # normaal: 1 call per 30 minuten
 _RATE_LIMIT_SLOW   = 3600.0   # bij 80% budget: 1 call per uur
 _BUDGET_WARN_PCT   = 0.80     # drempel voor rate limit escalatie
+
+# Pipeline-gating: minimale pipeline-activiteit voordat Claude API wordt aangeroepen
+_PIPELINE_MIN_RESEARCH      = 10   # minimaal N accepted candidates in laatste 24u
+_PIPELINE_MIN_CLOSED_TRADES = 5    # minimaal N gesloten paper trades
+_PIPELINE_WINDOW_SECS       = 86_400  # 24 uur
 
 # Kostenschatting in EUR: Sonnet €3/M input + €15/M output tokens
 _COST_PER_M_INPUT  = 3.0
@@ -256,6 +261,12 @@ class ClaudeAnt:
                 self._status = AntStatus.ABORTED
                 return
 
+            ready, reason = self._pipeline_ready()
+            if not ready:
+                self._log.info("Claude Ant wacht op pipeline data — %s", reason)
+                self._last_action = f"wacht:{reason}"
+                return
+
             elapsed_since_call = time.monotonic() - self._last_api_call
             effective_limit    = self._rate_limit
             if elapsed_since_call < effective_limit:
@@ -275,6 +286,107 @@ class ClaudeAnt:
         except Exception:
             self._log.exception("Onverwachte fout in ClaudeAnt._tick()")
         self._last_action = "tick"
+
+    # ------------------------------------------------------------------
+    # Pipeline gating
+    # ------------------------------------------------------------------
+
+    def _pipeline_ready(self) -> tuple[bool, str]:
+        """
+        Controleer of de pipeline genoeg data heeft voor zinvolle Claude-analyse.
+
+        Returns (True, "") als pipeline groen is.
+        Returns (False, reden) als één of meer voorwaarden niet voldaan zijn.
+        """
+        # Voorwaarde 1: budget niet in waarschuwingsstatus
+        if self._budget_eur > 0 and self._month_cost_eur >= _BUDGET_WARN_PCT * self._budget_eur:
+            return False, "BUDGET_WARNING actief"
+
+        if self.logs_root is None:
+            return False, "geen logs_root geconfigureerd"
+
+        # Voorwaarde 2: minimaal N research-kandidaten in laatste 24u
+        research_count = self._count_recent_research_candidates()
+        if research_count < _PIPELINE_MIN_RESEARCH:
+            return False, (
+                f"onvoldoende research-kandidaten: {research_count}/{_PIPELINE_MIN_RESEARCH} "
+                f"in laatste 24u"
+            )
+
+        # Voorwaarde 3: minimaal N gesloten paper trades
+        closed_trades = self._count_closed_paper_trades()
+        if closed_trades < _PIPELINE_MIN_CLOSED_TRADES:
+            return False, (
+                f"onvoldoende gesloten paper trades: {closed_trades}/{_PIPELINE_MIN_CLOSED_TRADES}"
+            )
+
+        return True, ""
+
+    def _count_recent_research_candidates(self) -> int:
+        """Tel accepted candidates in ANT_LOGS/research/ die in de laatste 24u zijn gelogd."""
+        if self.logs_root is None:
+            return 0
+
+        research_dir = self.logs_root / "research"
+        if not research_dir.exists():
+            return 0
+
+        cutoff = datetime.now(tz=timezone.utc).timestamp() - _PIPELINE_WINDOW_SECS
+        count = 0
+
+        for path in research_dir.glob("*.jsonl"):
+            try:
+                for line in path.read_text(encoding="utf-8").splitlines():
+                    if not line.strip():
+                        continue
+                    try:
+                        rec = json.loads(line)
+                        payload = rec.get("payload") or {}
+                        if payload.get("action") != "candidate_accepted":
+                            continue
+                        ts_str = rec.get("timestamp", "")
+                        if not ts_str:
+                            count += 1  # geen timestamp → tel mee (fail-open voor oude logs)
+                            continue
+                        try:
+                            ts = datetime.fromisoformat(ts_str)
+                            if ts.timestamp() >= cutoff:
+                                count += 1
+                        except (ValueError, TypeError):
+                            count += 1
+                    except json.JSONDecodeError:
+                        pass
+            except OSError:
+                pass
+
+        return count
+
+    def _count_closed_paper_trades(self) -> int:
+        """Tel gesloten paper trades in ANT_LOGS/paper/ (entries met closed_at niet-null)."""
+        if self.logs_root is None:
+            return 0
+
+        paper_dir = self.logs_root / "paper"
+        if not paper_dir.exists():
+            return 0
+
+        count = 0
+        for path in paper_dir.glob("*.jsonl"):
+            try:
+                for line in path.read_text(encoding="utf-8").splitlines():
+                    if not line.strip():
+                        continue
+                    try:
+                        rec = json.loads(line)
+                        payload = rec.get("payload") or {}
+                        if payload.get("closed_at") is not None or payload.get("action") == "trade_closed":
+                            count += 1
+                    except json.JSONDecodeError:
+                        pass
+            except OSError:
+                pass
+
+        return count
 
     # ------------------------------------------------------------------
     # Kandidaten lezen
