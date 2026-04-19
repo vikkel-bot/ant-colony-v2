@@ -194,14 +194,14 @@ def test_no_research_candidates_no_api_call(tmp_path: Path) -> None:
     assert call_count == 0
 
 
-def test_top5_selection_by_sharpe(tmp_path: Path) -> None:
-    """Kandidaten gesorteerd op sharpe, top 5 geselecteerd."""
+def test_top3_selection_by_sharpe(tmp_path: Path) -> None:
+    """Kandidaten gesorteerd op sharpe, top 3 geselecteerd."""
     ant = make_ant(tmp_path)
     for i in range(8):
         write_research_record(tmp_path, sharpe=float(i) * 0.1)
 
     candidates = ant._read_top_candidates()
-    assert len(candidates) == 5
+    assert len(candidates) == 3
     # Hoogste sharpe eerst
     assert candidates[0]["sharpe"] >= candidates[1]["sharpe"]
 

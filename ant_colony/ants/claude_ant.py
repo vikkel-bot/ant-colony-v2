@@ -43,8 +43,9 @@ from ant_colony.schemas.strategy_candidate import (
 )
 
 _MODEL             = "claude-sonnet-4-6"
-_MAX_TOKENS        = 2000
-_TOP_N_CANDIDATES  = 5
+_MAX_TOKENS        = 800
+_TOP_N_CANDIDATES  = 3
+_MAX_WORDS_PER_CANDIDATE = 200
 _RATE_LIMIT_FAST   = 300.0    # normaal: 1 call per 5 minuten
 _RATE_LIMIT_SLOW   = 3600.0   # bij 80% budget: 1 call per uur
 _BUDGET_WARN_PCT   = 0.80     # drempel voor rate limit escalatie
@@ -52,6 +53,18 @@ _BUDGET_WARN_PCT   = 0.80     # drempel voor rate limit escalatie
 # Kostenschatting in EUR: Sonnet €3/M input + €15/M output tokens
 _COST_PER_M_INPUT  = 3.0
 _COST_PER_M_OUTPUT = 15.0
+
+
+def _trim_candidate(c: dict) -> dict:
+    """Beperk elke tekstveld tot _MAX_WORDS_PER_CANDIDATE woorden voor een kleinere prompt."""
+    result = {}
+    for key, val in c.items():
+        if isinstance(val, str):
+            words = val.split()
+            result[key] = " ".join(words[:_MAX_WORDS_PER_CANDIDATE]) if len(words) > _MAX_WORDS_PER_CANDIDATE else val
+        else:
+            result[key] = val
+    return result
 
 
 _PROMPT_TEMPLATE = """\
@@ -331,7 +344,9 @@ class ClaudeAnt:
             self._log.error("anthropic package niet geïnstalleerd — pip install anthropic")
             return
 
-        candidates_json = json.dumps(candidates, indent=2, default=str)
+        candidates_json = json.dumps(
+            [_trim_candidate(c) for c in candidates], indent=2, default=str
+        )
         prompt = _PROMPT_TEMPLATE.format(candidates_json=candidates_json)
 
         self._log.info(
