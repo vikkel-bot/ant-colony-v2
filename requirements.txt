@@ -6,3 +6,4 @@ python-bitvavo-api>=1.1.0
 tzdata>=2024.1
 anthropic>=0.25.0
 python-dotenv>=1.0.0
+yfinance>=0.2.0

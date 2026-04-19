@@ -1071,6 +1071,126 @@ def main() -> None:
     except Exception:
         log.exception("OperatorAnt bootstrap mislukt — colony draait door zonder OperatorAnt.")
 
+    # --- Stap 8f: Equities ants (opt-in via EQUITIES_ENABLED=true) ---
+    try:
+        _equities_enabled = os.getenv("EQUITIES_ENABLED", "false").lower() == "true"
+        if _equities_enabled:
+            from ant_colony.ants.equities.sector_scout_ant import SectorScoutAnt
+            from ant_colony.ants.equities.fundamental_ant import FundamentalAnt
+            from ant_colony.ants.equities.dividend_scout_ant import DividendScoutAnt
+            from ant_colony.biome.adapters.yahoo_finance_adapter import YahooFinanceAdapter
+            from ant_colony.colony.scheduler.colony_scheduler import AgentRecord
+            from ant_colony.schemas.mission import (
+                AbortConditions, MarketScope, Mission, RiskLimits, SuccessConditions,
+            )
+
+            _ts_eq     = datetime.now(tz=timezone.utc).strftime("%Y%m%d-%H%M%S")
+            _yf_adapter = YahooFinanceAdapter()
+            _obs_risk_eq = RiskLimits(
+                max_drawdown_pct=0.01, max_position_size=1.0,
+                daily_loss_limit=1.0, stop_loss_required=False,
+            )
+            _eq_scope = MarketScope(
+                biome="equities",
+                symbols=["XLK", "XLE", "XLV", "XLF", "XLI", "XLB",
+                         "XLP", "XLY", "XLU", "XLRE", "XLC"],
+            )
+            _eq_missions = [
+                Mission(
+                    mission_id=f"sector-scout-{_ts_eq}",
+                    ant_type="sector_scout_ant",
+                    allowed_node=args.node_id,
+                    allowed_actions=["read_data", "report"],
+                    market_scope=_eq_scope,
+                    capital_limit=0.0,
+                    risk_limits=_obs_risk_eq,
+                    ttl=86400,
+                    heartbeat_interval=3600,
+                    success_conditions=SuccessConditions(
+                        description="Rank SPDR sector ETFs op 3-maands momentum en emiteer signalen.",
+                    ),
+                ),
+                Mission(
+                    mission_id=f"fundamental-{_ts_eq}",
+                    ant_type="fundamental_ant",
+                    allowed_node=args.node_id,
+                    allowed_actions=["read_data", "propose_candidate"],
+                    market_scope=MarketScope(biome="equities", symbols=["AAPL", "MSFT"]),
+                    capital_limit=0.0,
+                    risk_limits=_obs_risk_eq,
+                    ttl=86400,
+                    heartbeat_interval=3600,
+                    success_conditions=SuccessConditions(
+                        description="Screen S&P500 top 50 op Piotroski F-Score en momentum.",
+                    ),
+                ),
+                Mission(
+                    mission_id=f"dividend-scout-{_ts_eq}",
+                    ant_type="dividend_scout_ant",
+                    allowed_node=args.node_id,
+                    allowed_actions=["read_data", "report"],
+                    market_scope=MarketScope(biome="equities", symbols=["JNJ", "KO"]),
+                    capital_limit=0.0,
+                    risk_limits=_obs_risk_eq,
+                    ttl=86400,
+                    heartbeat_interval=3600,
+                    success_conditions=SuccessConditions(
+                        description="Screen Dividend Aristocrats en geef VIX hedge-signaal.",
+                    ),
+                ),
+            ]
+
+            _eq_ant_classes = {
+                "sector_scout_ant":   (SectorScoutAnt, {"adapter": _yf_adapter}),
+                "fundamental_ant":    (FundamentalAnt, {"adapter": _yf_adapter}),
+                "dividend_scout_ant": (DividendScoutAnt, {"adapter": _yf_adapter}),
+            }
+
+            for eq_mission in _eq_missions:
+                eq_result = queen.issue_mission(eq_mission)
+                if not eq_result.accepted:
+                    log.warning(
+                        "Equities-missie geweigerd: %s — %s",
+                        eq_mission.mission_id,
+                        eq_result.rejection_reason,
+                    )
+                    continue
+
+                ant_class, extra_kwargs = _eq_ant_classes[eq_mission.ant_type]
+                eq_ant_id = f"{eq_mission.ant_type[:8]}-{uuid.uuid4().hex[:12]}"
+                eq_ant = ant_class(
+                    ant_id=eq_ant_id,
+                    mission=eq_mission,
+                    scheduler=scheduler,
+                    logs_root=logs_root,
+                    **extra_kwargs,
+                )
+                threading.Thread(
+                    target=eq_ant.run,
+                    name=f"eq-{eq_ant_id[:20]}",
+                    daemon=True,
+                ).start()
+                scheduler.register_agent(AgentRecord(
+                    ant_id=eq_ant_id,
+                    mission_id=eq_mission.mission_id,
+                    node_id=args.node_id,
+                    ant_type=eq_mission.ant_type,
+                    ttl=eq_mission.ttl,
+                    heartbeat_interval=eq_mission.heartbeat_interval,
+                ))
+                log.info(
+                    "Equities ant gestart | type=%s  ant_id=%s  ttl=%ds",
+                    eq_mission.ant_type,
+                    eq_ant_id,
+                    eq_mission.ttl,
+                )
+        else:
+            log.info(
+                "Equities ants uitgeschakeld (opt-in vereist — zet EQUITIES_ENABLED=true)."
+            )
+    except Exception:
+        log.exception("Equities bootstrap mislukt — colony draait door zonder equities ants.")
+
     # --- Stap 9: bouw ColonyContext en start dashboard (blocking) ---
     context = ColonyContext(
         queen=queen,

@@ -16,6 +16,10 @@ class AntType(str, Enum):
     STRATEGY = "strategy_ant"
     OPERATOR = "operator_ant"
     CLAUDE   = "claude_ant"
+    # Equities biome
+    SECTOR_SCOUT   = "sector_scout_ant"
+    FUNDAMENTAL    = "fundamental_ant"
+    DIVIDEND_SCOUT = "dividend_scout_ant"
 
 
 class AntStatus(str, Enum):
