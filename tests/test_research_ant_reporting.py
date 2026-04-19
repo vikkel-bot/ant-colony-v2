@@ -152,7 +152,11 @@ def test_strategy_type_rsi_overbought() -> None:
 
 
 def test_strategy_type_bollinger_from_signal() -> None:
-    assert _strategy_type_from_signal("bb_lower_touch", []) == "bollinger"
+    assert _strategy_type_from_signal("bb_lower_touch", []) == "bollinger_bands"
+
+
+def test_strategy_type_bollinger_upper_from_signal() -> None:
+    assert _strategy_type_from_signal("bb_upper_touch", []) == "bollinger_bands"
 
 
 def test_strategy_type_momentum_from_keywords() -> None:
@@ -160,7 +164,21 @@ def test_strategy_type_momentum_from_keywords() -> None:
 
 
 def test_strategy_type_mean_reversion_from_keywords() -> None:
-    assert _strategy_type_from_signal("ingested_abc12345", ["mean reversion", "rsi"]) == "mean_reversion"
+    # Pure mean_reversion — geen andere strategie-keywords
+    assert _strategy_type_from_signal("ingested_abc12345", ["mean reversion"]) == "mean_reversion"
+
+
+def test_strategy_type_hybrid_from_mixed_keywords() -> None:
+    # mean reversion + rsi = twee actieve types → hybrid
+    assert _strategy_type_from_signal("ingested_abc12345", ["mean reversion", "rsi"]) == "hybrid"
+
+
+def test_strategy_type_macd_from_keywords() -> None:
+    assert _strategy_type_from_signal("ingested_abc12345", ["macd", "signal"]) == "macd_based"
+
+
+def test_strategy_type_hybrid_sma_rsi() -> None:
+    assert _strategy_type_from_signal("ingested_abc12345", ["sma", "rsi"]) == "hybrid"
 
 
 def test_strategy_type_breakout_from_keywords() -> None:

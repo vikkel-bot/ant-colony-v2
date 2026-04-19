@@ -699,27 +699,55 @@ class ResearchAnt:
 # ---------------------------------------------------------------------------
 
 def _strategy_type_from_signal(signal_type: str, keywords: list[str]) -> str:
-    """Leid strategy_type af uit signal_type en entry_keywords."""
-    st = (signal_type or "").lower()
+    """
+    Leid strategy_type af uit signal_type en entry_keywords.
+
+    Directe ResearchAnt signalen (sma_crossover, rsi_*, bb_*) worden exact
+    gematcht op signal_type. Voor ingested candidates wordt keyword-analyse
+    gebruikt; combinaties van twee of meer typen → "hybrid".
+    """
+    st  = (signal_type or "").lower()
+    kw  = {k.lower() for k in (keywords or [])}
+    kws = " ".join(sorted(kw))  # voor multi-word substring check
+
+    # --- Directe signalen van ResearchAnt ---
     if "sma_crossover" in st or ("sma" in st and "cross" in st):
         return "sma_crossover"
-    if "rsi" in st:
+    if "rsi" in st and "ingested" not in st:
         return "rsi_based"
-    if "bollinger" in st or "bb_" in st:
-        return "bollinger"
-    kw = {k.lower() for k in (keywords or [])}
-    if "momentum" in kw or "macd" in kw:
+    if "bb_upper" in st or "bb_lower" in st or ("bollinger" in st and "ingested" not in st):
+        return "bollinger_bands"
+
+    # --- Keyword-gebaseerde classificatie (ingested candidates + fallback) ---
+    has_sma      = bool(kw & {"sma", "crossover", "ema", "moving average"})
+    has_rsi      = "rsi" in kw
+    has_bollinger = "bollinger" in kw
+    has_macd     = "macd" in kw
+    has_momentum = "momentum" in kw
+    has_breakout = "breakout" in kw
+    has_mean_rev = "mean reversion" in kws or "mean_reversion" in kw
+
+    active_types = sum([
+        has_sma, has_rsi, has_bollinger, has_macd,
+        has_momentum, has_breakout, has_mean_rev,
+    ])
+
+    if active_types >= 2:
+        return "hybrid"
+    if has_macd:
+        return "macd_based"
+    if has_momentum:
         return "momentum"
-    if "mean reversion" in " ".join(kw) or "mean_reversion" in kw:
-        return "mean_reversion"
-    if "breakout" in kw:
+    if has_breakout:
         return "breakout"
-    if "rsi" in kw:
-        return "rsi_based"
-    if "sma" in kw or "crossover" in kw or "ema" in kw:
+    if has_sma:
         return "sma_crossover"
-    if "bollinger" in kw:
-        return "bollinger"
+    if has_rsi:
+        return "rsi_based"
+    if has_bollinger:
+        return "bollinger_bands"
+    if has_mean_rev:
+        return "mean_reversion"
     return "unknown"
 
 

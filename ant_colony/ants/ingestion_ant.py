@@ -58,6 +58,10 @@ _SEARCH_TERMS        = [
     "crypto bot",
     "mean reversion",
     "momentum strategy",
+    "breakout strategy crypto",
+    "trend following bot",
+    "scalping strategy python",
+    "arbitrage crypto bot",
 ]
 _RESULTS_PER_TERM    = 10
 _MIN_STARS           = 10
