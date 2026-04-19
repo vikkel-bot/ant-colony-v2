@@ -809,35 +809,7 @@ def main() -> None:
         else:
             log.warning("Ingestion-missie niet geaccepteerd — geen IngestionAnt thread gestart.")
 
-        if strategy_mission is not None:
-            strategy_ant_id = f"strategy-{uuid.uuid4().hex[:12]}"
-            strategy = StrategyAnt(
-                ant_id=strategy_ant_id,
-                mission=strategy_mission,
-                scheduler=scheduler,
-                biome_registry=biome_registry,
-                logs_root=logs_root,
-            )
-            threading.Thread(
-                target=strategy.run,
-                name=f"strategy-{strategy_ant_id[:16]}",
-                daemon=True,
-            ).start()
-            scheduler.register_agent(AgentRecord(
-                ant_id=strategy_ant_id,
-                mission_id=strategy_mission.mission_id,
-                node_id=args.node_id,
-                ant_type="strategy_ant",
-                ttl=strategy_mission.ttl,
-                heartbeat_interval=strategy_mission.heartbeat_interval,
-            ))
-            log.info(
-                "StrategyAnt gestart | ant_id=%s  ttl=%ds  symbols=%s",
-                strategy_ant_id,
-                strategy_mission.ttl,
-                strategy_mission.market_scope.symbols,
-            )
-        else:
+        if strategy_mission is None:
             log.warning("Strategy-missie niet geaccepteerd — geen StrategyAnt thread gestart.")
 
         if execution_mission is not None:
@@ -887,6 +859,46 @@ def main() -> None:
 
     except Exception:
         log.exception("Mission bootstrap mislukt — colony start toch door.")
+
+    # --- Stap 8b-extra: StrategyAnt (eigen try-blok zodat bootstrap-fouten het niet blokkeren) ---
+    try:
+        # strategy_mission is set inside the main bootstrap block above.
+        # Using locals() lookup so this block stays independent even if bootstrap threw.
+        _strategy_mission = locals().get("strategy_mission")
+        if _strategy_mission is not None:
+            from ant_colony.ants.strategy_ant import StrategyAnt
+            from ant_colony.colony.scheduler.colony_scheduler import AgentRecord
+            strategy_ant_id = f"strategy-{uuid.uuid4().hex[:12]}"
+            strategy = StrategyAnt(
+                ant_id=strategy_ant_id,
+                mission=_strategy_mission,
+                scheduler=scheduler,
+                biome_registry=biome_registry,
+                logs_root=logs_root,
+            )
+            threading.Thread(
+                target=strategy.run,
+                name=f"strategy-{strategy_ant_id[:16]}",
+                daemon=True,
+            ).start()
+            scheduler.register_agent(AgentRecord(
+                ant_id=strategy_ant_id,
+                mission_id=_strategy_mission.mission_id,
+                node_id=args.node_id,
+                ant_type="strategy_ant",
+                ttl=_strategy_mission.ttl,
+                heartbeat_interval=_strategy_mission.heartbeat_interval,
+            ))
+            log.info(
+                "StrategyAnt gestart | ant_id=%s  ttl=%ds  symbols=%s",
+                strategy_ant_id,
+                _strategy_mission.ttl,
+                _strategy_mission.market_scope.symbols,
+            )
+        else:
+            log.warning("StrategyAnt niet gestart — geen geaccepteerde strategy-missie.")
+    except Exception:
+        log.exception("StrategyAnt bootstrap mislukt — colony draait door zonder StrategyAnt.")
 
     # --- Stap 8c: ClaudeAnt (opt-in, eigen try-blok zodat andere fouten het niet blokkeren) ---
     try:

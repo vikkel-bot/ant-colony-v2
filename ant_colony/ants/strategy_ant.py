@@ -154,11 +154,13 @@ class StrategyAnt:
 
     def run(self) -> AntStatus:
         """Blokkerende tick-loop. Retourneert AntStatus bij afsluiting."""
+        self._log.info("StrategyAnt run() gestart")
         self._status = AntStatus.RUNNING
         self._log.info(
-            "StrategyAnt gestart | mission=%s ttl=%ds",
+            "StrategyAnt actief | mission=%s ttl=%ds logs_root=%s",
             self.mission.mission_id,
             self.mission.ttl,
+            self.logs_root,
         )
 
         started_at     = datetime.now(tz=timezone.utc)
@@ -188,7 +190,9 @@ class StrategyAnt:
             self._log.info("StrategyAnt onderbroken door operator")
             self._status = AntStatus.ABORTED
         except Exception:
-            self._log.exception("Onverwachte fout in tick-loop")
+            self._log.exception(
+                "Onverwachte fout in StrategyAnt tick-loop — ant gestopt"
+            )
             self._status = AntStatus.ABORTED
         finally:
             self._send_heartbeat()
