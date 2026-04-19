@@ -17,11 +17,10 @@ import pytest
 from ant_colony.ants.equities.sector_scout_ant import (
     SectorScoutAnt,
     _SPDR_ETFS,
-    _BOTTOM_N,
     _TOP_N,
 )
-from ant_colony.biome.adapters.yahoo_finance_adapter import YahooFinanceAdapter
 from ant_colony.biome.biome_adapter import MarketData
+from ant_colony.biome.biome_registry import BiomeRegistry
 from ant_colony.schemas.ant import AntStatus
 from ant_colony.schemas.mission import (
     AbortConditions, MarketScope, Mission, RiskLimits, SuccessConditions,
@@ -39,7 +38,7 @@ def make_mission() -> Mission:
         ant_type="sector_scout_ant",
         allowed_node="pc2",
         allowed_actions=["read_data", "report"],
-        market_scope=MarketScope(biome="equities", symbols=list(_SPDR_ETFS.keys())[:3]),
+        market_scope=MarketScope(biome="equities", symbols=["XLK"]),
         capital_limit=0.0,
         risk_limits=RiskLimits(
             max_drawdown_pct=0.01, max_position_size=1.0,
@@ -55,17 +54,15 @@ def make_candle(symbol: str, close: float, open_: float = 100.0) -> MarketData:
     return MarketData(
         symbol=symbol, timeframe="1d",
         timestamp=datetime.now(tz=timezone.utc),
-        open=open_, high=close + 1, low=open_ - 1, close=close,
+        open=open_, high=close + 1, low=max(open_ - 1, 0.01), close=close,
         volume=1_000_000.0, biome_id="equities",
     )
 
 
-def make_adapter_with_returns(symbol_returns: dict[str, float]) -> MagicMock:
-    """
-    Bouw een mock-adapter waar get_candles de opgegeven returns simuleert.
-    Return r = (last - first) / first  →  last = first * (1 + r).
-    """
-    adapter = MagicMock(spec=YahooFinanceAdapter)
+def make_adapter(symbol_returns: dict[str, float]) -> MagicMock:
+    """Mock adapter where get_candles simulates the given returns."""
+    adapter = MagicMock()
+    adapter.is_available.return_value = True
 
     def get_candles(symbol, period="3mo", interval="1d"):
         r = symbol_returns.get(symbol)
@@ -79,17 +76,34 @@ def make_adapter_with_returns(symbol_returns: dict[str, float]) -> MagicMock:
         ]
 
     adapter.get_candles.side_effect = get_candles
+    adapter.get_market_data.side_effect = lambda sym, tf: make_candle(sym, 110.0)
     return adapter
 
 
+def make_biome_registry(adapter: MagicMock) -> MagicMock:
+    registry = MagicMock(spec=BiomeRegistry)
+    registry.get.return_value = adapter
+    return registry
+
+
 def make_ant(adapter=None, logs_root=None) -> SectorScoutAnt:
+    if adapter is None:
+        adapter = MagicMock()
+        adapter.is_available.return_value = True
+        adapter.get_candles.return_value = []
+        adapter.get_market_data.return_value = None
     return SectorScoutAnt(
         ant_id=str(uuid.uuid4()),
         mission=make_mission(),
         scheduler=MagicMock(),
-        adapter=adapter or MagicMock(spec=YahooFinanceAdapter),
+        biome_registry=make_biome_registry(adapter),
         logs_root=logs_root,
     )
+
+
+def _full_returns() -> dict[str, float]:
+    symbols = list(_SPDR_ETFS.keys())
+    return {s: (i - 5) * 0.01 for i, s in enumerate(symbols)}
 
 
 # ---------------------------------------------------------------------------
@@ -101,34 +115,50 @@ class TestGet3moReturn:
     def test_positive_return_calculated(self) -> None:
         ant = make_ant()
         candles = [make_candle("XLK", 100.0), make_candle("XLK", 115.0)]
-        ant.adapter.get_candles.return_value = candles
-        result = ant._get_3mo_return("XLK")
+        result = ant._get_3mo_return("XLK", lambda *a, **k: candles)
         assert result == pytest.approx(0.15)
 
     def test_negative_return_calculated(self) -> None:
         ant = make_ant()
         candles = [make_candle("XLE", 200.0), make_candle("XLE", 180.0)]
-        ant.adapter.get_candles.return_value = candles
-        result = ant._get_3mo_return("XLE")
+        result = ant._get_3mo_return("XLE", lambda *a, **k: candles)
         assert result == pytest.approx(-0.10)
 
     def test_zero_first_close_returns_none(self) -> None:
         ant = make_ant()
         candles = [make_candle("XLV", 0.0), make_candle("XLV", 50.0)]
-        ant.adapter.get_candles.return_value = candles
-        result = ant._get_3mo_return("XLV")
+        result = ant._get_3mo_return("XLV", lambda *a, **k: candles)
         assert result is None
 
     def test_single_candle_returns_none(self) -> None:
         ant = make_ant()
-        ant.adapter.get_candles.return_value = [make_candle("XLK", 100.0)]
-        result = ant._get_3mo_return("XLK")
+        result = ant._get_3mo_return("XLK", lambda *a, **k: [make_candle("XLK", 100.0)])
         assert result is None
 
     def test_empty_candles_returns_none(self) -> None:
         ant = make_ant()
-        ant.adapter.get_candles.return_value = []
-        result = ant._get_3mo_return("XLK")
+        result = ant._get_3mo_return("XLK", lambda *a, **k: [])
+        assert result is None
+
+    def test_get_candles_called_with_3mo_period(self) -> None:
+        ant = make_ant()
+        calls = []
+
+        def recording_fn(sym, period="3mo", interval="1d"):
+            calls.append((sym, period, interval))
+            return []
+
+        ant._get_3mo_return("XLK", recording_fn)
+        assert calls == [("XLK", _SPDR_ETFS and "3mo", "1d")]
+        assert calls[0][1] == "3mo"
+
+    def test_exception_in_candles_returns_none(self) -> None:
+        ant = make_ant()
+
+        def boom(*a, **k):
+            raise RuntimeError("api error")
+
+        result = ant._get_3mo_return("XLK", boom)
         assert result is None
 
 
@@ -138,35 +168,21 @@ class TestGet3moReturn:
 
 
 class TestBuildSignals:
-    def test_top3_get_long_signal(self) -> None:
+    def test_top_n_get_long_signal(self) -> None:
         ant = make_ant()
-        ranking = [("XLK", 0.20), ("XLF", 0.15), ("XLV", 0.10),
-                   ("XLI", 0.05), ("XLB", 0.02), ("XLP", 0.01),
-                   ("XLY", -0.01), ("XLU", -0.02), ("XLRE", -0.05),
-                   ("XLC", -0.08), ("XLE", -0.12)]
+        ranking = [(sym, 0.10 - i * 0.02) for i, sym in enumerate(_SPDR_ETFS.keys())]
         signals = ant._build_signals(ranking)
         long_symbols = {s["symbol"] for s in signals if s["signal"] == "LONG"}
-        assert long_symbols == {"XLK", "XLF", "XLV"}
+        expected_top = {sym for sym, _ in ranking[:_TOP_N]}
+        assert long_symbols == expected_top
 
-    def test_bottom3_get_short_signal(self) -> None:
+    def test_rest_get_neutral_signal(self) -> None:
         ant = make_ant()
-        ranking = [("XLK", 0.20), ("XLF", 0.15), ("XLV", 0.10),
-                   ("XLI", 0.05), ("XLB", 0.02), ("XLP", 0.01),
-                   ("XLY", -0.01), ("XLU", -0.02), ("XLRE", -0.05),
-                   ("XLC", -0.08), ("XLE", -0.12)]
-        signals = ant._build_signals(ranking)
-        short_symbols = {s["symbol"] for s in signals if s["signal"] == "SHORT"}
-        assert short_symbols == {"XLRE", "XLC", "XLE"}
-
-    def test_middle_get_neutral_signal(self) -> None:
-        ant = make_ant()
-        ranking = [("XLK", 0.20), ("XLF", 0.15), ("XLV", 0.10),
-                   ("XLI", 0.05), ("XLB", 0.02), ("XLP", 0.01),
-                   ("XLY", -0.01), ("XLU", -0.02), ("XLRE", -0.05),
-                   ("XLC", -0.08), ("XLE", -0.12)]
+        ranking = [(sym, 0.10 - i * 0.02) for i, sym in enumerate(_SPDR_ETFS.keys())]
         signals = ant._build_signals(ranking)
         neutral_symbols = {s["symbol"] for s in signals if s["signal"] == "NEUTRAL"}
-        assert neutral_symbols == {"XLI", "XLB", "XLP", "XLY", "XLU"}
+        expected_rest = {sym for sym, _ in ranking[_TOP_N:]}
+        assert neutral_symbols == expected_rest
 
     def test_signal_count_equals_ranking_count(self) -> None:
         ant = make_ant()
@@ -176,17 +192,25 @@ class TestBuildSignals:
 
     def test_signal_has_required_fields(self) -> None:
         ant = make_ant()
-        ranking = [("XLK", 0.10)]
-        signals = ant._build_signals(ranking)
+        signals = ant._build_signals([("XLK", 0.10)])
         for field in ("symbol", "sector", "return_3mo", "rank", "signal"):
             assert field in signals[0]
 
     def test_rank_starts_at_one(self) -> None:
         ant = make_ant()
-        ranking = [("XLK", 0.10), ("XLE", -0.05)]
-        signals = ant._build_signals(ranking)
+        signals = ant._build_signals([("XLK", 0.10), ("XLE", -0.05)])
         assert signals[0]["rank"] == 1
         assert signals[1]["rank"] == 2
+
+    def test_sector_name_populated(self) -> None:
+        ant = make_ant()
+        signals = ant._build_signals([("XLK", 0.10)])
+        assert signals[0]["sector"] == _SPDR_ETFS["XLK"]
+
+    def test_return_value_rounded(self) -> None:
+        ant = make_ant()
+        signals = ant._build_signals([("XLK", 0.123456789)])
+        assert signals[0]["return_3mo"] == pytest.approx(0.123457, abs=1e-5)
 
 
 # ---------------------------------------------------------------------------
@@ -195,80 +219,148 @@ class TestBuildSignals:
 
 
 class TestTick:
-    def _make_full_returns(self) -> dict[str, float]:
-        symbols = list(_SPDR_ETFS.keys())
-        return {s: (i - 5) * 0.01 for i, s in enumerate(symbols)}
-
     def test_tick_returns_signals_list(self) -> None:
-        adapter = make_adapter_with_returns(self._make_full_returns())
+        adapter = make_adapter(_full_returns())
         ant = make_ant(adapter=adapter)
         signals = ant._tick()
         assert isinstance(signals, list)
         assert len(signals) == len(_SPDR_ETFS)
 
     def test_tick_sets_last_action(self) -> None:
-        adapter = make_adapter_with_returns(self._make_full_returns())
+        adapter = make_adapter(_full_returns())
         ant = make_ant(adapter=adapter)
         ant._tick()
         assert ant._last_action != "init"
 
     def test_tick_no_data_returns_empty(self) -> None:
-        adapter = MagicMock(spec=YahooFinanceAdapter)
+        adapter = MagicMock()
+        adapter.is_available.return_value = True
         adapter.get_candles.return_value = []
+        adapter.get_market_data.return_value = None
         ant = make_ant(adapter=adapter)
         result = ant._tick()
         assert result == []
 
-    def test_tick_writes_log(self, tmp_path: Path) -> None:
-        adapter = make_adapter_with_returns(self._make_full_returns())
+    def test_tick_no_adapter_returns_empty(self) -> None:
+        registry = MagicMock(spec=BiomeRegistry)
+        registry.get.return_value = None
+        ant = SectorScoutAnt(
+            ant_id=str(uuid.uuid4()),
+            mission=make_mission(),
+            scheduler=MagicMock(),
+            biome_registry=registry,
+        )
+        result = ant._tick()
+        assert result == []
+
+    def test_tick_unavailable_adapter_returns_empty(self) -> None:
+        adapter = MagicMock()
+        adapter.is_available.return_value = False
+        ant = make_ant(adapter=adapter)
+        result = ant._tick()
+        assert result == []
+
+    def test_tick_writes_signals_log(self, tmp_path: Path) -> None:
+        adapter = make_adapter(_full_returns())
         ant = make_ant(adapter=adapter, logs_root=tmp_path)
         ant._tick()
-        log_path = tmp_path / "equities" / "sector_scout" / f"{ant.ant_id}.jsonl"
+        log_path = tmp_path / "scouts" / f"{ant.ant_id}.jsonl"
         assert log_path.exists()
 
-    def test_log_has_ranking_and_signals(self, tmp_path: Path) -> None:
-        adapter = make_adapter_with_returns(self._make_full_returns())
+    def test_log_contains_opportunity_detected_events(self, tmp_path: Path) -> None:
+        adapter = make_adapter(_full_returns())
         ant = make_ant(adapter=adapter, logs_root=tmp_path)
         ant._tick()
-        log_path = tmp_path / "equities" / "sector_scout" / f"{ant.ant_id}.jsonl"
-        records = [json.loads(l) for l in log_path.read_text().splitlines() if l.strip()]
+        log_path = tmp_path / "scouts" / f"{ant.ant_id}.jsonl"
+        records = [json.loads(line) for line in log_path.read_text().splitlines() if line.strip()]
+        assert len(records) == _TOP_N
+        assert all(r["payload"]["action"] == "opportunity_detected" for r in records)
+
+    def test_log_signal_has_required_payload_fields(self, tmp_path: Path) -> None:
+        adapter = make_adapter(_full_returns())
+        ant = make_ant(adapter=adapter, logs_root=tmp_path)
+        ant._tick()
+        log_path = tmp_path / "scouts" / f"{ant.ant_id}.jsonl"
+        records = [json.loads(line) for line in log_path.read_text().splitlines() if line.strip()]
         payload = records[0]["payload"]
-        assert "ranking" in payload
-        assert "signals" in payload
+        for field in ("signal_id", "symbol", "current_price", "confidence",
+                      "change_pct", "signal_type", "sector_name", "momentum_rank"):
+            assert field in payload
 
     def test_partial_data_still_produces_signals(self) -> None:
-        # Only 5 of 11 ETFs have data
         partial = {s: 0.01 * i for i, s in enumerate(list(_SPDR_ETFS.keys())[:5])}
-        adapter = make_adapter_with_returns(partial)
+        adapter = make_adapter(partial)
         ant = make_ant(adapter=adapter)
         signals = ant._tick()
         assert len(signals) == 5
 
+    def test_no_current_price_skips_signal_log(self, tmp_path: Path) -> None:
+        adapter = make_adapter(_full_returns())
+        adapter.get_market_data.side_effect = None
+        adapter.get_market_data.return_value = None
+        ant = make_ant(adapter=adapter, logs_root=tmp_path)
+        ant._tick()
+        log_path = tmp_path / "scouts" / f"{ant.ant_id}.jsonl"
+        assert not log_path.exists() or log_path.read_text().strip() == ""
+
 
 # ---------------------------------------------------------------------------
-# 4. Log events
+# 4. Deduplicatie
+# ---------------------------------------------------------------------------
+
+
+class TestDeduplication:
+    def test_same_day_signal_not_emitted_twice(self, tmp_path: Path) -> None:
+        adapter = make_adapter(_full_returns())
+        ant = make_ant(adapter=adapter, logs_root=tmp_path)
+        ant._tick()
+        ant._tick()
+        log_path = tmp_path / "scouts" / f"{ant.ant_id}.jsonl"
+        records = [json.loads(line) for line in log_path.read_text().splitlines() if line.strip()]
+        # Only _TOP_N signals total — duplicates suppressed
+        assert len(records) == _TOP_N
+
+    def test_signal_id_format(self, tmp_path: Path) -> None:
+        from datetime import date
+        adapter = make_adapter(_full_returns())
+        ant = make_ant(adapter=adapter, logs_root=tmp_path)
+        ant._tick()
+        log_path = tmp_path / "scouts" / f"{ant.ant_id}.jsonl"
+        records = [json.loads(line) for line in log_path.read_text().splitlines() if line.strip()]
+        today = date.today().isoformat()
+        for rec in records:
+            sid = rec["payload"]["signal_id"]
+            assert today in sid
+            assert sid.startswith("sector-")
+
+
+# ---------------------------------------------------------------------------
+# 5. Log events
 # ---------------------------------------------------------------------------
 
 
 class TestLogEvents:
     def test_no_log_when_logs_root_none(self) -> None:
-        adapter = make_adapter_with_returns({"XLK": 0.10, "XLE": -0.05})
+        adapter = make_adapter({"XLK": 0.10, "XLE": -0.05})
         ant = make_ant(adapter=adapter, logs_root=None)
-        ant._tick()  # should not crash
+        ant._tick()
 
     def test_sequence_increments(self, tmp_path: Path) -> None:
-        adapter = make_adapter_with_returns({"XLK": 0.10, "XLE": -0.05})
+        adapter = make_adapter(_full_returns())
         ant = make_ant(adapter=adapter, logs_root=tmp_path)
+        # Clear dedup so second tick emits again
+        ant._emitted_signal_ids.clear()
         ant._tick()
+        ant._emitted_signal_ids.clear()
         ant._tick()
-        log_path = tmp_path / "equities" / "sector_scout" / f"{ant.ant_id}.jsonl"
-        records = [json.loads(l) for l in log_path.read_text().splitlines() if l.strip()]
+        log_path = tmp_path / "scouts" / f"{ant.ant_id}.jsonl"
+        records = [json.loads(line) for line in log_path.read_text().splitlines() if line.strip()]
         seqs = [r["sequence"] for r in records]
         assert seqs == list(range(len(seqs)))
 
 
 # ---------------------------------------------------------------------------
-# 5. Heartbeat
+# 6. Heartbeat
 # ---------------------------------------------------------------------------
 
 
@@ -285,15 +377,13 @@ class TestHeartbeat:
 
 
 # ---------------------------------------------------------------------------
-# 6. Lifecycle
+# 7. Lifecycle
 # ---------------------------------------------------------------------------
 
 
 class TestLifecycle:
     def test_ttl_expiry_returns_completed(self) -> None:
-        adapter = MagicMock(spec=YahooFinanceAdapter)
-        adapter.get_candles.return_value = []
-        ant = make_ant(adapter=adapter)
+        ant = make_ant()
         ant._tick = MagicMock(return_value=[])
 
         with patch("ant_colony.ants.equities.sector_scout_ant.time.sleep"):
@@ -313,3 +403,7 @@ class TestLifecycle:
                 mock_dt.now.return_value = datetime(2026, 1, 1, tzinfo=timezone.utc)
                 status = ant.run()
         assert status == AntStatus.ABORTED
+
+    def test_initial_status_is_idle(self) -> None:
+        ant = make_ant()
+        assert ant._status == AntStatus.IDLE
