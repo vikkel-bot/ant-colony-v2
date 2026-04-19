@@ -5,23 +5,18 @@ IngestionAnt — doorzoekt publieke bronnen naar trading strategieën en
 normaliseert ze naar het interne StrategyCandidate schema.
 
 Verantwoordelijkheden:
-  1. GitHub public search API doorzoeken op vaste zoektermen:
-       "trading strategy", "crypto bot", "mean reversion", "momentum strategy"
+  1. GitHub public search API doorzoeken op vaste zoektermen.
      Maximaal 10 resultaten per zoekterm per tick.
-  2. Per repo kwaliteitsfilter:
-       - ≥ 10 GitHub stars vereist
-       - README aanwezig en leesbaar
-       - Herkenbare entry- én exit-logica in de tekst
-  3. README parsen op strategie-indicatoren (keywords):
-       entry: crossover, momentum, breakout, RSI, EMA, SMA, Bollinger, …
-       exit:  stop-loss, take-profit, trailing stop, sell, …
-  4. Geaccepteerde kandidaten normaliseren naar StrategyCandidate
+  2. Reddit r/algotrading top posts van de week ophalen.
+  3. Dev.to artikelen met tag "trading" ophalen.
+  4. Per bron kwaliteitsfilter op keywords.
+  5. Geaccepteerde kandidaten normaliseren naar StrategyCandidate
      (status=INGESTED, provenance ingevuld, nog niet gebacktest).
-  5. Kandidaten loggen naar ANT_LOGS/ingestion/{ant_id}.jsonl.
-  6. URL-hashes bijhouden om duplicaten te voorkomen — ook over ticks.
-  7. Rate limiting: ≤ 1 GitHub API call per 10 seconden (unauthenticated limit).
-  8. Heartbeat rapporteren aan scheduler na elke tick.
-  9. Zichzelf netjes beëindigen bij TTL expiry.
+  6. Kandidaten loggen naar ANT_LOGS/ingestion/{ant_id}.jsonl.
+  7. URL-hashes bijhouden om duplicaten te voorkomen — ook over ticks.
+  8. Rate limiting per bron: GitHub 10s, Reddit 30s, Dev.to 30s.
+  9. Heartbeat rapporteren aan scheduler na elke tick.
+  10. Zichzelf netjes beëindigen bij TTL expiry.
 
 Regels:
   - Plaatst geen orders, beheert geen kapitaal (P1)
@@ -53,6 +48,9 @@ from ant_colony.schemas.strategy_candidate import (
 )
 
 _GITHUB_API_BASE     = "https://api.github.com"
+_REDDIT_TOP_URL      = "https://www.reddit.com/r/algotrading/top.json?t=week&limit=10"
+_DEVTO_ARTICLES_URL  = "https://dev.to/api/articles?tag=trading&per_page=10"
+
 _SEARCH_TERMS        = [
     "trading strategy",
     "crypto bot",
@@ -65,9 +63,18 @@ _SEARCH_TERMS        = [
 ]
 _RESULTS_PER_TERM    = 10
 _MIN_STARS           = 10
-_API_RATE_LIMIT_SECS  = 10.0   # GitHub unauthenticated: 10 req/min
-_RATE_LIMIT_BACKOFF   = 60.0   # wacht 60s bij 403 rate limit response
+
+# Per-bron rate limits (seconden tussen calls)
+_RATE_LIMITS: dict[str, float] = {
+    "github": 10.0,
+    "reddit": 30.0,
+    "devto":  30.0,
+}
+_RATE_LIMIT_BACKOFF  = 60.0   # wacht 60s bij 403/429 rate limit response
 _README_MAX_BYTES    = 65_536  # 64 KB — genoeg voor keyword-scan
+
+# Keywords voor Reddit/Dev.to kwaliteitsfilter
+_REDDIT_KEYWORDS: frozenset[str] = frozenset({"strategy", "backtest", "bot", "edge"})
 
 _ENTRY_KEYWORDS: frozenset[str] = frozenset({
     "entry", "buy signal", "long", "crossover", "breakout",
@@ -110,7 +117,7 @@ class IngestionAnt:
         self.logs_root = logs_root
 
         self._seen_urls: set[str] = set()
-        self._last_api_call: float = 0.0
+        self._last_call: dict[str, float] = {"github": 0.0, "reddit": 0.0, "devto": 0.0}
         self._log_seq: int = 0
         self._status: AntStatus = AntStatus.IDLE
         self._last_action: str = "init"
@@ -183,11 +190,18 @@ class IngestionAnt:
     # ------------------------------------------------------------------
 
     def _tick(self) -> None:
-        """Één ingestion-cyclus: alle zoektermen doorlopen."""
+        """Één ingestion-cyclus: alle bronnen doorlopen."""
         for term in _SEARCH_TERMS:
             repos = self._search_github(term)
             for repo in repos:
                 self._process_repo(repo)
+
+        for post in self._fetch_reddit():
+            self._process_reddit_post(post)
+
+        for article in self._fetch_devto():
+            self._process_devto_article(article)
+
         self._last_action = "tick"
 
     def _process_repo(self, repo: dict) -> None:
@@ -239,7 +253,7 @@ class IngestionAnt:
 
     def _search_github(self, term: str) -> list[dict]:
         """Zoek repos op GitHub. Retourneert lijst van repo-dicts (leeg bij fout)."""
-        self._rate_limit()
+        self._rate_limit("github")
         try:
             resp = httpx.get(
                 f"{_GITHUB_API_BASE}/search/repositories",
@@ -273,7 +287,7 @@ class IngestionAnt:
         full_name = repo.get("full_name", "")
         if not full_name:
             return None
-        self._rate_limit()
+        self._rate_limit("github")
         try:
             resp = httpx.get(
                 f"{_GITHUB_API_BASE}/repos/{full_name}/readme",
@@ -361,15 +375,193 @@ class IngestionAnt:
             return None
 
     # ------------------------------------------------------------------
+    # Reddit API
+    # ------------------------------------------------------------------
+
+    def _fetch_reddit(self) -> list[dict]:
+        """Haal top posts van r/algotrading op. Retourneert lijst van post-dicts."""
+        self._rate_limit("reddit")
+        try:
+            resp = httpx.get(
+                _REDDIT_TOP_URL,
+                headers={"User-Agent": "ant-colony-ingestion/2.0"},
+                timeout=15.0,
+                follow_redirects=True,
+            )
+            if resp.status_code == 429:
+                self._log.warning("Reddit rate limit (429) — backoff %.0fs", _RATE_LIMIT_BACKOFF)
+                time.sleep(_RATE_LIMIT_BACKOFF)
+                return []
+            if resp.status_code != 200:
+                self._log.warning("Reddit HTTP %d", resp.status_code)
+                return []
+            children = resp.json().get("data", {}).get("children", [])
+            return [c["data"] for c in children if "data" in c]
+        except Exception:
+            self._log.exception("Reddit fetch mislukt")
+            return []
+
+    def _process_reddit_post(self, post: dict) -> None:
+        """Filter en normaliseer één Reddit post naar StrategyCandidate."""
+        title    = post.get("title", "")
+        selftext = post.get("selftext", "")
+        url      = post.get("url", "")
+        permalink = "https://www.reddit.com" + post.get("permalink", "")
+
+        combined = (title + " " + selftext).lower()
+        if not any(kw in combined for kw in _REDDIT_KEYWORDS):
+            self._log.debug("Reddit post overgeslagen — geen keywords: %s", title[:60])
+            return
+
+        source_url = url if url.startswith("http") else permalink
+        if source_url in self._seen_urls:
+            self._log.debug("Reddit duplicaat: %s", source_url)
+            return
+        self._seen_urls.add(source_url)
+
+        extracted = self._extract_strategy(combined, {"description": title})
+        if extracted is None:
+            self._log.debug("Geen herkenbare strategie in Reddit post: %s", title[:60])
+            return
+
+        candidate = self._build_text_candidate(
+            source="reddit",
+            source_url=source_url,
+            name=title[:120],
+            description=title[:500],
+            extracted=extracted,
+            extra={"permalink": permalink, "score": post.get("score", 0)},
+        )
+        if candidate is None:
+            return
+
+        self._write_candidate(candidate)
+        self._last_action = f"ingested:reddit:{title[:40]}"
+        self._log.info(
+            "KANDIDAAT INGESTED | reddit | %s  score=%d",
+            title[:60], post.get("score", 0),
+        )
+
+    # ------------------------------------------------------------------
+    # Dev.to API
+    # ------------------------------------------------------------------
+
+    def _fetch_devto(self) -> list[dict]:
+        """Haal trading-artikelen van Dev.to op. Retourneert lijst van artikel-dicts."""
+        self._rate_limit("devto")
+        try:
+            resp = httpx.get(
+                _DEVTO_ARTICLES_URL,
+                headers={"Accept": "application/json"},
+                timeout=15.0,
+                follow_redirects=True,
+            )
+            if resp.status_code == 429:
+                self._log.warning("Dev.to rate limit (429) — backoff %.0fs", _RATE_LIMIT_BACKOFF)
+                time.sleep(_RATE_LIMIT_BACKOFF)
+                return []
+            if resp.status_code != 200:
+                self._log.warning("Dev.to HTTP %d", resp.status_code)
+                return []
+            return resp.json() if isinstance(resp.json(), list) else []
+        except Exception:
+            self._log.exception("Dev.to fetch mislukt")
+            return []
+
+    def _process_devto_article(self, article: dict) -> None:
+        """Filter en normaliseer één Dev.to artikel naar StrategyCandidate."""
+        title       = article.get("title", "")
+        description = article.get("description", "")
+        url         = article.get("url", "")
+
+        if not url:
+            return
+
+        combined = (title + " " + description).lower()
+        if not any(kw in combined for kw in _REDDIT_KEYWORDS):
+            self._log.debug("Dev.to artikel overgeslagen — geen keywords: %s", title[:60])
+            return
+
+        if url in self._seen_urls:
+            self._log.debug("Dev.to duplicaat: %s", url)
+            return
+        self._seen_urls.add(url)
+
+        extracted = self._extract_strategy(combined, {"description": description})
+        if extracted is None:
+            self._log.debug("Geen herkenbare strategie in Dev.to artikel: %s", title[:60])
+            return
+
+        candidate = self._build_text_candidate(
+            source="devto",
+            source_url=url,
+            name=title[:120],
+            description=(description or title)[:500],
+            extracted=extracted,
+            extra={"reactions": article.get("positive_reactions_count", 0)},
+        )
+        if candidate is None:
+            return
+
+        self._write_candidate(candidate)
+        self._last_action = f"ingested:devto:{title[:40]}"
+        self._log.info("KANDIDAAT INGESTED | devto | %s", title[:60])
+
+    # ------------------------------------------------------------------
+    # Generieke kandidaat-builder voor tekst-bronnen
+    # ------------------------------------------------------------------
+
+    def _build_text_candidate(
+        self,
+        source: str,
+        source_url: str,
+        name: str,
+        description: str,
+        extracted: dict,
+        extra: dict,
+    ) -> StrategyCandidate | None:
+        """Bouw StrategyCandidate voor niet-GitHub bronnen (Reddit, Dev.to)."""
+        try:
+            return StrategyCandidate(
+                candidate_id=str(uuid.uuid5(uuid.NAMESPACE_URL, source_url)),
+                name=name,
+                source=source,
+                source_url=source_url,
+                biome=self.mission.market_scope.biome,
+                market_scope={"symbols": self.mission.market_scope.symbols},
+                logic_summary=description,
+                parameters=extra,
+                entry_conditions={"keywords": extracted["entry_keywords"]},
+                exit_conditions={"keywords": extracted["exit_keywords"]},
+                status=CandidateStatus.INGESTED,
+                provenance=[
+                    ProvenanceEntry(
+                        actor=self.ant_id,
+                        action="ingested",
+                        details={
+                            "source":   source,
+                            "url":      source_url,
+                            "found_at": datetime.now(tz=timezone.utc).isoformat(),
+                            **extra,
+                        },
+                    )
+                ],
+            )
+        except Exception:
+            self._log.exception("Kan StrategyCandidate niet bouwen voor %s", source_url)
+            return None
+
+    # ------------------------------------------------------------------
     # Rate limiting
     # ------------------------------------------------------------------
 
-    def _rate_limit(self) -> None:
-        """Blokkeer tot minstens _API_RATE_LIMIT_SECS zijn verstreken."""
-        elapsed = time.monotonic() - self._last_api_call
-        if elapsed < _API_RATE_LIMIT_SECS:
-            time.sleep(_API_RATE_LIMIT_SECS - elapsed)
-        self._last_api_call = time.monotonic()
+    def _rate_limit(self, source: str) -> None:
+        """Blokkeer tot de per-bron rate limit is verstreken."""
+        limit   = _RATE_LIMITS.get(source, 10.0)
+        elapsed = time.monotonic() - self._last_call.get(source, 0.0)
+        if elapsed < limit:
+            time.sleep(limit - elapsed)
+        self._last_call[source] = time.monotonic()
 
     # ------------------------------------------------------------------
     # Log events
