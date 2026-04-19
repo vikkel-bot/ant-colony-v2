@@ -221,6 +221,59 @@ execution gate blokkeert live orders tot Queen expliciete toestemming geeft.
 
 ---
 
+## FASE 10 — EQUITIES & ETF BIOME (IN BOUW)
+
+### Architectuur uitbreiding
+De colony breidt uit van crypto naar drie asset klassen:
+- crypto biome (operationeel)
+- equities biome (in bouw) — aandelen via IBKR of DeGiro
+- etf biome (in bouw) — sector ETFs via zelfde adapter
+
+### Drie bewezen trading setups
+
+**Setup 1 — Sector Rotatie (ETFs)**
+- Monitor 11 SPDR sector ETFs
+- Relatief momentum over 3 maanden
+- Top 3 sectoren long, zwakste short
+- Herbalanceer maandelijks
+- Mieren: SectorScoutAnt, MomentumRankAnt, RotationAnt
+
+**Setup 2 — Fundamenteel + Technisch Hybride (Aandelen)**
+- Piotroski F-Score >= 7 als kwaliteitsfilter
+- 12-maands momentum positief
+- Entry bij 52-weeks high breakout
+- Stop loss 8% onder entry
+- Mieren: FundamentalAnt, PiotroskiAnt, BreakoutAnt
+
+**Setup 3 — Defensief Dividend + Volatiliteit Hedge**
+- 70% dividend aristocrats
+- 20% laag-volatiliteit ETFs
+- 10% VIX hedge bij hoge marktspanning
+- Herbalanceer kwartaals
+- Mieren: DividendScoutAnt, VolatilityAnt, RebalanceAnt
+
+### Bouwvolgorde
+1. Equities biome adapter (IBKR of DeGiro)
+2. Setup 1: SectorScoutAnt + MomentumRankAnt + RotationAnt
+3. Setup 2: FundamentalAnt + PiotroskiAnt + BreakoutAnt
+4. Setup 3: DividendScoutAnt + VolatilityAnt + RebalanceAnt
+5. Dashboard integratie — nieuwe kolom voor equities biome
+6. Queen uitbreiden — cross-biome kapitaalallocatie
+
+### Data bronnen
+- Yahoo Finance API (gratis, geen auth vereist)
+- IBKR API (gevalideerde toegang beschikbaar)
+- DeGiro API (gevalideerde toegang beschikbaar)
+- Alpha Vantage (backup voor fundamentele data)
+
+### Gate voor live trading equities
+- Paper trading bewezen over minimaal 30 handelsdagen
+- Sharpe > 0.5 in backtest over 5 jaar
+- Max drawdown < 25%
+- Queen goedkeuring vereist
+
+---
+
 ## Environment variabelen
 
 Zet deze in een `.env` bestand of in de Windows omgevingsvariabelen op PC2:
@@ -246,4 +299,4 @@ ClaudeAnt de rate limit naar 1 call/uur. Bij 100% stopt ClaudeAnt zichzelf.
 ---
 
 *Dit bestand bijhouden bij elke fase-overgang.*
-*Laatste update: 2026-04-19 — ClaudeAnt budget + aan/uit schakelaar toegevoegd*
+*Laatste update: 2026-04-19 — Equities & ETF biome sectie toegevoegd (fase 10 roadmap)*
