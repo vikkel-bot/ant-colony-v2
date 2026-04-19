@@ -73,6 +73,7 @@ class RotationAnt:
         biome_registry: BiomeRegistry,
         logs_root: Path | None = None,
         min_shift: int = _MIN_SHIFT,
+        **kwargs,
     ) -> None:
         self.ant_id         = ant_id
         self.mission        = mission

@@ -66,6 +66,7 @@ class PiotroskiAnt:
         logs_root: Path | None = None,
         min_f_score: int = _MIN_PIOTROSKI_SCORE,
         research_log_dir: Path | None = None,
+        **kwargs,
     ) -> None:
         self.ant_id          = ant_id
         self.mission         = mission

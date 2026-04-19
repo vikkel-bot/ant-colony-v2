@@ -74,6 +74,7 @@ class BreakoutAnt:
         breakout_margin: float = _BREAKOUT_MARGIN,
         tp_pct: float = _TP_PCT,
         sl_pct: float = _SL_PCT,
+        **kwargs,
     ) -> None:
         self.ant_id         = ant_id
         self.mission        = mission

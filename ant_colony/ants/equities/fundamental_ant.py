@@ -86,6 +86,7 @@ class FundamentalAnt:
         biome_registry: BiomeRegistry,
         logs_root: Path | None = None,
         min_f_score: int = _MIN_PIOTROSKI_SCORE,
+        **kwargs,
     ) -> None:
         self.ant_id         = ant_id
         self.mission        = mission

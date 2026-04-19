@@ -34,6 +34,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ant_colony.biome.adapters.yahoo_finance_adapter import YahooFinanceAdapter
+from ant_colony.biome.biome_registry import BiomeRegistry
 from ant_colony.colony.scheduler.colony_scheduler import ColonyScheduler
 from ant_colony.schemas.ant import AntStatus
 from ant_colony.schemas.audit_event import AuditEvent, AuditEventType
@@ -75,14 +76,24 @@ class DividendScoutAnt:
         ant_id: str,
         mission: Mission,
         scheduler: ColonyScheduler,
+        biome_registry: BiomeRegistry | None = None,
         adapter: YahooFinanceAdapter | None = None,
         logs_root: Path | None = None,
+        **kwargs,
     ) -> None:
         self.ant_id    = ant_id
         self.mission   = mission
         self.scheduler = scheduler
-        self.adapter   = adapter or YahooFinanceAdapter()
         self.logs_root = logs_root
+
+        # Explicit adapter wins; then try registry; then create standalone YF adapter.
+        if adapter is not None:
+            self.adapter: YahooFinanceAdapter = adapter
+        elif biome_registry is not None:
+            _reg = biome_registry.get("equities")
+            self.adapter = _reg if isinstance(_reg, YahooFinanceAdapter) else YahooFinanceAdapter()
+        else:
+            self.adapter = YahooFinanceAdapter()
 
         self._log_seq: int = 0
         self._status: AntStatus = AntStatus.IDLE
