@@ -20,6 +20,8 @@ class AntType(str, Enum):
     SECTOR_SCOUT   = "sector_scout_ant"
     FUNDAMENTAL    = "fundamental_ant"
     DIVIDEND_SCOUT = "dividend_scout_ant"
+    PIOTROSKI      = "piotroski_ant"
+    BREAKOUT       = "breakout_ant"
 
 
 class AntStatus(str, Enum):

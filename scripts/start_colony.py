@@ -1078,14 +1078,19 @@ def main() -> None:
             from ant_colony.ants.equities.sector_scout_ant import SectorScoutAnt
             from ant_colony.ants.equities.fundamental_ant import FundamentalAnt
             from ant_colony.ants.equities.dividend_scout_ant import DividendScoutAnt
+            from ant_colony.ants.equities.piotroski_ant import PiotroskiAnt
+            from ant_colony.ants.equities.breakout_ant import BreakoutAnt
             from ant_colony.biome.adapters.yahoo_finance_adapter import YahooFinanceAdapter
+            from ant_colony.biome.biome_registry import BiomeRegistry
             from ant_colony.colony.scheduler.colony_scheduler import AgentRecord
             from ant_colony.schemas.mission import (
                 AbortConditions, MarketScope, Mission, RiskLimits, SuccessConditions,
             )
 
-            _ts_eq     = datetime.now(tz=timezone.utc).strftime("%Y%m%d-%H%M%S")
+            _ts_eq      = datetime.now(tz=timezone.utc).strftime("%Y%m%d-%H%M%S")
             _yf_adapter = YahooFinanceAdapter()
+            _eq_registry = BiomeRegistry()
+            _eq_registry.register(_yf_adapter)
             _obs_risk_eq = RiskLimits(
                 max_drawdown_pct=0.01, max_position_size=1.0,
                 daily_loss_limit=1.0, stop_loss_required=False,
@@ -1138,12 +1143,42 @@ def main() -> None:
                         description="Screen Dividend Aristocrats en geef VIX hedge-signaal.",
                     ),
                 ),
+                Mission(
+                    mission_id=f"piotroski-{_ts_eq}",
+                    ant_type="piotroski_ant",
+                    allowed_node=args.node_id,
+                    allowed_actions=["read_data", "report"],
+                    market_scope=MarketScope(biome="equities", symbols=["AAPL"]),
+                    capital_limit=0.0,
+                    risk_limits=_obs_risk_eq,
+                    ttl=86400,
+                    heartbeat_interval=3600,
+                    success_conditions=SuccessConditions(
+                        description="Hervalideer Piotroski F-Score en stuur kandidaten door naar BreakoutAnt.",
+                    ),
+                ),
+                Mission(
+                    mission_id=f"breakout-{_ts_eq}",
+                    ant_type="breakout_ant",
+                    allowed_node=args.node_id,
+                    allowed_actions=["read_data", "report"],
+                    market_scope=MarketScope(biome="equities", symbols=["AAPL"]),
+                    capital_limit=0.0,
+                    risk_limits=_obs_risk_eq,
+                    ttl=86400,
+                    heartbeat_interval=3600,
+                    success_conditions=SuccessConditions(
+                        description="Bevestig 52-weeks high breakout en emitteer entry-signalen.",
+                    ),
+                ),
             ]
 
             _eq_ant_classes = {
-                "sector_scout_ant":   (SectorScoutAnt, {"adapter": _yf_adapter}),
-                "fundamental_ant":    (FundamentalAnt, {"adapter": _yf_adapter}),
-                "dividend_scout_ant": (DividendScoutAnt, {"adapter": _yf_adapter}),
+                "sector_scout_ant":   (SectorScoutAnt,   {"biome_registry": _eq_registry}),
+                "fundamental_ant":    (FundamentalAnt,   {"biome_registry": _eq_registry}),
+                "dividend_scout_ant": (DividendScoutAnt, {"biome_registry": _eq_registry}),
+                "piotroski_ant":      (PiotroskiAnt,     {"biome_registry": _eq_registry}),
+                "breakout_ant":       (BreakoutAnt,      {"biome_registry": _eq_registry}),
             }
 
             for eq_mission in _eq_missions:
