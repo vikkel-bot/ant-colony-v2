@@ -93,6 +93,7 @@ class MetricsResponse(BaseModel):
     capital_total: float
     capital_allocated: float
     capital_available: float
+    capital_in_use: float | None = None   # echte waarde: entry_price × qty open posities
     active_ants: int
     utilization_pct: float
 
@@ -221,6 +222,29 @@ class V1PositionEntry(BaseModel):
 class V1PositionsResponse(BaseModel):
     positions: list[V1PositionEntry]
     scanned_at: str
+
+
+class ChartPoint(BaseModel):
+    time: str
+    pnl: float
+
+
+class PerformanceChartResponse(BaseModel):
+    points: list[ChartPoint]
+    total_pnl: float
+
+
+class QueenStrategyEntry(BaseModel):
+    strategy_type: str
+    symbol: str
+    sharpe: float
+    best_regime: str
+
+
+class QueenStatusResponse(BaseModel):
+    regime: str | None
+    top_strategies: list[QueenStrategyEntry]
+    last_decision: dict[str, Any] | None
 
 
 class AntStatsEntry(BaseModel):
@@ -483,10 +507,14 @@ def create_router(ctx: ColonyContext) -> APIRouter:
         active    = len(ctx.queen.active_missions)
         util      = round(allocated / total * 100.0, 1) if total > 0 else 0.0
 
+        # Echte inzet: som van entry_price × quantity voor openstaande paper posities
+        in_use = _read_paper_capital_in_use(ctx.logs_root) if ctx.logs_root else None
+
         return MetricsResponse(
             capital_total=total,
             capital_allocated=allocated,
             capital_available=available,
+            capital_in_use=in_use,
             active_ants=active,
             utilization_pct=util,
         )
@@ -963,6 +991,54 @@ def create_router(ctx: ColonyContext) -> APIRouter:
 
         return AntActivityResponse(ants=result)
 
+    # ------------------------------------------------------------------
+    # GET /api/performance/chart
+    # ------------------------------------------------------------------
+
+    @router.get("/performance/chart", response_model=PerformanceChartResponse)
+    def get_performance_chart() -> PerformanceChartResponse:
+        """Cumulatief PnL verloop van vandaag als tijdsreeks."""
+        if ctx.logs_root is None:
+            return PerformanceChartResponse(points=[], total_pnl=0.0)
+
+        today  = _today_cutoff()
+        trades = _read_all_trades(ctx.logs_root)
+
+        today_trades: list[tuple[datetime, float]] = []
+        for t in trades:
+            closed_at = _parse_ts(t.get("closed_at"))
+            if closed_at and closed_at >= today:
+                today_trades.append((closed_at, float(t.get("realized_pnl") or 0)))
+        today_trades.sort(key=lambda x: x[0])
+
+        points: list[ChartPoint] = []
+        cumulative = 0.0
+        for ts, pnl in today_trades:
+            cumulative = round(cumulative + pnl, 2)
+            points.append(ChartPoint(time=_to_local_str(ts), pnl=cumulative))
+
+        if points:
+            points = [ChartPoint(time=points[0].time, pnl=0.0)] + points
+
+        return PerformanceChartResponse(points=points, total_pnl=round(cumulative, 2))
+
+    # ------------------------------------------------------------------
+    # GET /api/queen/status
+    # ------------------------------------------------------------------
+
+    @router.get("/queen/status", response_model=QueenStatusResponse)
+    def get_queen_status() -> QueenStatusResponse:
+        """Marktregime, top strategieën en laatste Queen beslissing."""
+        if ctx.logs_root is None:
+            return QueenStatusResponse(regime=None, top_strategies=[], last_decision=None)
+
+        data = _read_queen_status_data(ctx.logs_root)
+        return QueenStatusResponse(
+            regime=data["regime"],
+            top_strategies=[QueenStrategyEntry(**s) for s in data["top_strategies"]],
+            last_decision=data["last_decision"],
+        )
+
     return router
 
 
@@ -1359,3 +1435,139 @@ def _build_ant_summary(ant_type: str, all_recs: list[dict], stats: AntStatsEntry
                 break
         return f"Claude Ant · €{month_cost:.2f} gebruikt van €{budget:.2f} budget · {n} analyses"
     return f"Laatste actie: {action}"
+
+
+# ---------------------------------------------------------------------------
+# Intern — paper kapitaal in gebruik
+# ---------------------------------------------------------------------------
+
+def _read_paper_capital_in_use(logs_root: Path) -> float:
+    """
+    Som van entry_price × quantity voor openstaande paper posities (huidige sessie).
+
+    Leest niet-trades JSONL records uit ANT_LOGS/paper/, filtert op vandaag en
+    de meest recente ant_id (sessie), en berekent de marktwaarde van posities die
+    geopend maar nog niet gesloten zijn.
+    """
+    paper_dir = logs_root / "paper"
+    if not paper_dir.exists():
+        return 0.0
+
+    records: list[dict] = []
+    for path in paper_dir.glob("*.jsonl"):
+        if "_trades" in path.name:
+            continue
+        try:
+            with path.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if line:
+                        try:
+                            records.append(json.loads(line))
+                        except json.JSONDecodeError:
+                            pass
+        except OSError:
+            pass
+
+    today = _today_cutoff()
+    today_recs = [
+        r for r in records
+        if (_parse_ts(r.get("timestamp")) or datetime.min.replace(tzinfo=timezone.utc)) >= today
+    ]
+    session_recs = _latest_session_records(today_recs)
+
+    opened: dict[str, dict] = {}
+    for r in session_recs:
+        if _action_of(r) in ("trade_opened", "position_opened"):
+            payload = r.get("payload") or {}
+            pid = payload.get("position_id")
+            if pid:
+                opened[pid] = {
+                    "entry_price": float(payload.get("entry_price") or 0),
+                    "quantity": float(payload.get("quantity") or 0),
+                }
+
+    for r in session_recs:
+        if _action_of(r) in ("trade_closed", "position_closed"):
+            pid = (r.get("payload") or {}).get("position_id")
+            if pid:
+                opened.pop(pid, None)
+
+    return round(sum(v["entry_price"] * v["quantity"] for v in opened.values()), 2)
+
+
+# ---------------------------------------------------------------------------
+# Intern — Queen status
+# ---------------------------------------------------------------------------
+
+def _read_queen_status_data(logs_root: Path) -> dict:
+    """Lees regime, top strategieën en laatste Queen beslissing uit logs."""
+    from collections import Counter
+
+    # Kandidaten uit research logs
+    research_dir = logs_root / "research"
+    candidates: list[dict] = []
+    if research_dir.exists():
+        for path in research_dir.glob("*.jsonl"):
+            try:
+                with path.open("r", encoding="utf-8") as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            rec = json.loads(line)
+                            payload = rec.get("payload") or {}
+                            if payload.get("action") == "candidate_accepted":
+                                candidates.append(payload)
+                        except json.JSONDecodeError:
+                            pass
+            except OSError:
+                pass
+
+    # Regime: meest voorkomend best_regime
+    regime: str | None = None
+    regimes = [c.get("best_regime") for c in candidates if c.get("best_regime")]
+    if regimes:
+        regime = Counter(regimes).most_common(1)[0][0]
+
+    # Top 3 by sharpe
+    scored = sorted(
+        candidates,
+        key=lambda c: float(c.get("sharpe_ratio") or c.get("sharpe") or 0),
+        reverse=True,
+    )
+    top_strategies = [
+        {
+            "strategy_type": c.get("strategy_type") or c.get("strategy") or "unknown",
+            "symbol": c.get("symbol") or "—",
+            "sharpe": round(float(c.get("sharpe_ratio") or c.get("sharpe") or 0), 2),
+            "best_regime": c.get("best_regime") or "—",
+        }
+        for c in scored[:3]
+    ]
+
+    # Laatste Queen beslissing
+    last_decision: dict | None = None
+    queen_dir = logs_root / "queen"
+    if queen_dir.exists():
+        for path in sorted(queen_dir.glob("*.jsonl")):
+            try:
+                last_line: str | None = None
+                with path.open("r", encoding="utf-8") as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if line:
+                            last_line = line
+                if last_line:
+                    rec = json.loads(last_line)
+                    payload = rec.get("payload") or rec
+                    last_decision = {
+                        "timestamp": rec.get("timestamp"),
+                        "action": payload.get("action") or payload.get("decision") or "unknown",
+                        "reason": payload.get("reason") or payload.get("rationale") or "",
+                    }
+            except (OSError, json.JSONDecodeError):
+                pass
+
+    return {"regime": regime, "top_strategies": top_strategies, "last_decision": last_decision}

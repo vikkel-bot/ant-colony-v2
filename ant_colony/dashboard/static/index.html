@@ -53,22 +53,21 @@
       color: var(--text);
       font-size: 13px;
       line-height: 1.5;
-      min-height: 100vh;
+      height: 100vh;
+      overflow: hidden;
+      display: flex; flex-direction: column;
     }
 
-    /* ──────────────────────────────────────────────
-       TOPBAR
-    ────────────────────────────────────────────── */
+    /* ── TOPBAR ── */
 
     #topbar {
       background: var(--top-bg);
       color: var(--top-text);
       display: flex;
       align-items: center;
-      padding: 0 20px;
-      height: 54px;
-      position: sticky;
-      top: 0;
+      padding: 0 16px;
+      height: 50px;
+      flex-shrink: 0;
       z-index: 100;
       box-shadow: 0 2px 12px rgba(0,0,0,0.35);
       gap: 0;
@@ -77,31 +76,30 @@
     .tb-brand {
       display: flex;
       align-items: center;
-      gap: 10px;
-      min-width: 230px;
+      gap: 9px;
+      min-width: 190px;
     }
 
     .queen-orb {
-      width: 34px; height: 34px;
+      width: 30px; height: 30px;
       border-radius: 50%;
       background: var(--queen);
       display: flex; align-items: center; justify-content: center;
-      font-size: 17px;
+      font-size: 15px;
       flex-shrink: 0;
       box-shadow: 0 0 0 3px var(--queen-glow);
     }
 
     .brand-lines { display: flex; flex-direction: column; }
-    .brand-name  { font-size: 13px; font-weight: 700; letter-spacing: 0.4px; color: #f0ede6; }
-    .brand-sub   { font-size: 10px; color: var(--top-muted); letter-spacing: 0.2px; }
+    .brand-name  { font-size: 12px; font-weight: 700; letter-spacing: 0.4px; color: #f0ede6; }
+    .brand-sub   { font-size: 9px; color: var(--top-muted); letter-spacing: 0.2px; }
 
-    /* Heartbeat */
     .tb-heartbeat {
       flex: 1;
       display: flex;
       align-items: center;
       justify-content: center;
-      gap: 9px;
+      gap: 8px;
     }
 
     .hb-ecg {
@@ -116,23 +114,22 @@
     }
 
     .hb-label { font-size: 9px; text-transform: uppercase; letter-spacing: .5px; color: var(--top-muted); }
-    .hb-time  { font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; color: #f0ede6; }
-    .hb-ago   { font-size: 11px; color: var(--top-muted); min-width: 70px; }
+    .hb-time  { font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; color: #f0ede6; }
+    .hb-ago   { font-size: 10px; color: var(--top-muted); min-width: 60px; }
 
-    /* Status + clock */
     .tb-status {
       flex: 1;
       display: flex;
       align-items: center;
       justify-content: center;
-      gap: 12px;
+      gap: 10px;
     }
 
     .pill {
       display: inline-flex; align-items: center; gap: 5px;
-      padding: 3px 11px;
+      padding: 2px 10px;
       border-radius: 20px;
-      font-size: 11px; font-weight: 700;
+      font-size: 10px; font-weight: 700;
       text-transform: uppercase; letter-spacing: .5px;
     }
     .pill-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
@@ -144,45 +141,63 @@
     @keyframes pdot { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.4;transform:scale(.75)} }
 
     .live-clock {
-      font-size: 15px; font-weight: 700;
+      font-size: 14px; font-weight: 700;
       font-variant-numeric: tabular-nums;
       letter-spacing: 1.5px;
       color: #f0ede6;
     }
 
-    /* NOODSTOP */
-    .tb-actions { min-width: 130px; display: flex; justify-content: flex-end; }
+    /* Kill buttons in topbar */
+    .tb-kills {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+
+    .btn-ks-tb {
+      background: rgba(226,75,74,.15);
+      color: #f87171;
+      border: 1px solid rgba(226,75,74,.3);
+      padding: 4px 9px;
+      border-radius: 5px;
+      font-size: 10px; font-weight: 800;
+      letter-spacing: .3px;
+      cursor: pointer; transition: all .15s;
+      white-space: nowrap;
+    }
+    .btn-ks-tb:hover { background: var(--danger); color: #fff; border-color: var(--danger); }
+    .btn-ks-tb:active { transform: scale(.97); }
 
     .btn-noodstop {
       background: var(--danger);
       color: #fff;
       border: none;
-      padding: 7px 15px;
-      border-radius: 6px;
-      font-size: 11px; font-weight: 800;
+      padding: 5px 13px;
+      border-radius: 5px;
+      font-size: 10px; font-weight: 800;
       letter-spacing: .4px;
       text-transform: uppercase;
       cursor: pointer;
+      margin-left: 4px;
       transition: background .15s, transform .1s;
     }
     .btn-noodstop:hover  { background: var(--danger-h); }
     .btn-noodstop:active { transform: scale(.97); }
 
-    /* ──────────────────────────────────────────────
-       LIVE TICKER
-    ────────────────────────────────────────────── */
+    /* ── LIVE TICKER ── */
 
     #ticker {
       background: var(--tick-bg);
-      padding: 7px 20px;
+      padding: 5px 16px;
       display: flex;
       align-items: center;
-      gap: 11px;
+      gap: 10px;
+      flex-shrink: 0;
       border-bottom: 1px solid rgba(255,255,255,.04);
     }
 
     .tick-dot {
-      width: 8px; height: 8px; border-radius: 50%;
+      width: 7px; height: 7px; border-radius: 50%;
       background: var(--tick-green);
       flex-shrink: 0;
       animation: tickpulse 1.6s ease-in-out infinite;
@@ -194,7 +209,7 @@
 
     .tick-text {
       font-family: 'SF Mono','Cascadia Code','Consolas',monospace;
-      font-size: 12px;
+      font-size: 11px;
       color: var(--tick-green);
       flex: 1;
       white-space: nowrap;
@@ -211,137 +226,151 @@
       flex-shrink: 0;
     }
 
-    /* ──────────────────────────────────────────────
-       MAIN
-    ────────────────────────────────────────────── */
+    /* ── MAIN ── */
 
     #main {
-      padding: 16px 20px 28px;
-      max-width: 1640px;
-      margin: 0 auto;
+      flex: 1;
+      overflow: hidden;
+      padding: 10px 14px 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
     }
 
     /* 4 metric cards */
     .metrics-row {
       display: grid;
       grid-template-columns: repeat(4, 1fr);
-      gap: 12px;
-      margin-bottom: 14px;
+      gap: 8px;
+      flex-shrink: 0;
     }
 
     /* two-column */
     .cols {
       display: grid;
       grid-template-columns: 1fr 1fr;
-      gap: 12px;
+      gap: 8px;
+      flex: 1;
+      overflow: hidden;
       align-items: start;
     }
-    .col { display: flex; flex-direction: column; gap: 12px; }
 
-    /* ──────────────────────────────────────────────
-       CARDS
-    ────────────────────────────────────────────── */
+    .col {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      overflow: hidden;
+      max-height: 100%;
+    }
+
+    /* ── CARDS ── */
 
     .card {
       background: var(--card);
       border: .5px solid var(--border);
-      border-radius: 9px;
-      padding: 16px;
-      box-shadow: 0 1px 5px var(--shadow);
+      border-radius: 8px;
+      padding: 11px 13px;
+      box-shadow: 0 1px 4px var(--shadow);
+      flex-shrink: 0;
     }
 
     .card-title {
-      font-size: 10px; font-weight: 700;
+      font-size: 9px; font-weight: 700;
       text-transform: uppercase; letter-spacing: .7px;
       color: var(--muted);
-      margin-bottom: 13px;
+      margin-bottom: 9px;
     }
 
     /* metric card */
-    .mc { padding: 14px 16px; }
+    .mc { padding: 10px 13px; }
     .mc-label {
-      font-size: 10px; font-weight: 600;
+      font-size: 9px; font-weight: 600;
       text-transform: uppercase; letter-spacing: .5px;
-      color: var(--muted); margin-bottom: 4px;
+      color: var(--muted); margin-bottom: 2px;
     }
     .mc-value {
-      font-size: 22px; font-weight: 700;
+      font-size: 19px; font-weight: 700;
       font-variant-numeric: tabular-nums;
       line-height: 1.15;
     }
-    .mc-sub { font-size: 10px; color: var(--faint); margin-top: 2px; }
+    .mc-sub { font-size: 9px; color: var(--faint); margin-top: 1px; }
 
-    /* ──────────────────────────────────────────────
-       PERFORMANCE
-    ────────────────────────────────────────────── */
+    /* ── PNL CHART ── */
 
-    .perf-grid {
-      display: grid;
-      grid-template-columns: repeat(5, 1fr);
-      gap: 8px;
+    .chart-hdr {
+      display: flex; align-items: baseline;
+      justify-content: space-between;
+      margin-bottom: 6px;
     }
 
-    .perf-item {
-      display: flex; flex-direction: column; gap: 4px;
-      padding: 9px 10px;
-      border-radius: 6px;
-      background: #faf9f5;
-      border: .5px solid var(--border);
-    }
-
-    .perf-period {
-      font-size: 9px; font-weight: 700;
-      text-transform: uppercase; letter-spacing: .5px;
-      color: var(--faint);
-    }
-
-    .perf-val {
-      font-size: 14px; font-weight: 700;
+    .chart-pnl-total {
+      font-size: 18px; font-weight: 700;
       font-variant-numeric: tabular-nums;
     }
-    .perf-val.pos  { color: var(--pnl-pos); }
-    .perf-val.neg  { color: var(--pnl-neg); }
-    .perf-val.zero { color: var(--muted); }
+    .chart-pnl-total.pos  { color: var(--pnl-pos); }
+    .chart-pnl-total.neg  { color: var(--pnl-neg); }
+    .chart-pnl-total.zero { color: var(--muted); }
 
-    /* ──────────────────────────────────────────────
-       BIOME BARS
-    ────────────────────────────────────────────── */
-
-    .biome-list { display: flex; flex-direction: column; gap: 13px; }
-
-    .biome-hdr {
-      display: flex; align-items: center;
-      justify-content: space-between;
-      margin-bottom: 5px;
+    .pnl-svg-wrap {
+      width: 100%;
+      height: 60px;
+      position: relative;
     }
 
-    .biome-name-row { display: flex; align-items: center; gap: 7px; }
-    .biome-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
-    .biome-name { font-size: 13px; font-weight: 600; }
-
-    .biome-nums {
-      display: flex; align-items: center; gap: 7px;
-      font-size: 11px; color: var(--muted);
-    }
-    .biome-pct { font-weight: 700; color: var(--text); font-size: 12px; }
-
-    .bar-track {
-      height: 7px; border-radius: 4px;
-      background: #ede9e0; overflow: hidden;
-    }
-    .bar-fill {
-      height: 100%; border-radius: 4px;
-      transition: width .45s ease;
-      min-width: 2px;
+    #pnl-svg {
+      width: 100%; height: 100%;
+      display: block;
+      overflow: visible;
     }
 
-    /* ──────────────────────────────────────────────
-       BADGES
-    ────────────────────────────────────────────── */
+    /* ── QUEEN SECTION ── */
+
+    .regime-pill {
+      display: inline-flex; align-items: center;
+      padding: 2px 10px; border-radius: 20px;
+      font-size: 10px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: .5px;
+    }
+    .regime-bull   { background: #f0fdf4; color: #166534; }
+    .regime-bear   { background: #fef2f2; color: #991b1b; }
+    .regime-neutral{ background: #fffbeb; color: #92400e; }
+    .regime-range  { background: #eff6ff; color: #1d4ed8; }
+    .regime-unknown{ background: #f3f4f6; color: #6b7280; }
+
+    .queen-row {
+      display: flex; align-items: center; gap: 8px;
+      margin-bottom: 7px;
+    }
+
+    .strat-list { margin-bottom: 7px; }
+    .strat-item {
+      display: flex; align-items: center; gap: 5px;
+      padding: 3px 0;
+      border-bottom: .5px solid var(--border-soft);
+      font-size: 11px;
+    }
+    .strat-item:last-child { border-bottom: none; }
+    .strat-rank { font-size: 9px; color: var(--faint); min-width: 14px; }
+    .strat-name { font-weight: 600; flex: 1; }
+    .strat-sym  { font-size: 10px; color: var(--muted); }
+    .strat-sharpe { font-size: 11px; font-weight: 700; font-variant-numeric: tabular-nums; }
+
+    .queen-decision {
+      padding: 5px 8px;
+      background: #faf9f5;
+      border-radius: 5px;
+      border: .5px solid var(--border);
+      font-size: 10px;
+    }
+    .queen-dec-ts  { color: var(--faint); font-size: 9px; }
+    .queen-dec-act { font-weight: 600; margin-top: 1px; }
+    .queen-dec-why { color: var(--muted); margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+    /* ── BADGES ── */
 
     .badge {
       display: inline-flex; align-items: center;
-      padding: 2px 8px; border-radius: 20px;
+      padding: 2px 7px; border-radius: 20px;
       font-size: 9px; font-weight: 800;
       letter-spacing: .3px; text-transform: uppercase;
     }
@@ -351,146 +380,54 @@
     .b-standby  { background: var(--badge-warn-bg); color: var(--badge-warn-txt); }
     .b-disconn  { background: #fee2e2; color: #991b1b; }
 
-    /* ──────────────────────────────────────────────
-       HOLDINGS PANEL  (uitklapbaar per biome)
-    ────────────────────────────────────────────── */
-
-    .holdings-panel { margin-top: 10px; }
-
-    .holdings-panel > summary {
-      cursor: pointer;
-      list-style: none;
-      display: flex; align-items: center; gap: 6px;
-      font-size: 11px; font-weight: 600;
-      color: var(--muted);
-      padding: 5px 0;
-      user-select: none;
-    }
-    .holdings-panel > summary::-webkit-details-marker { display: none; }
-    .holdings-panel > summary .toggle-arrow {
-      font-size: 8px; display: inline-block;
-      transition: transform .15s; color: var(--faint);
-    }
-    .holdings-panel[open] > summary .toggle-arrow { transform: rotate(90deg); }
-
-    .ref-price {
-      margin-left: auto;
-      font-size: 11px; font-weight: 700;
-      color: var(--text);
-      font-variant-numeric: tabular-nums;
-    }
-
-    .holdings-tbl {
-      width: 100%; border-collapse: collapse;
-      margin-top: 6px; font-size: 11px;
-    }
-    .holdings-tbl th {
-      text-align: left;
-      font-size: 9px; font-weight: 700;
-      text-transform: uppercase; letter-spacing: .4px;
-      color: var(--faint);
-      padding: 0 4px 6px 0;
-      border-bottom: .5px solid var(--border);
-    }
-    .holdings-tbl td {
-      padding: 5px 4px 5px 0;
-      border-bottom: .5px solid var(--border-soft);
-      font-variant-numeric: tabular-nums;
-    }
-    .holdings-tbl tr:last-child td { border-bottom: none; }
-    .holdings-tbl td:not(:first-child),
-    .holdings-tbl th:not(:first-child) { text-align: right; }
-    .h-asset { font-weight: 600; font-size: 12px; }
-
-    .holdings-total {
-      display: flex; justify-content: space-between; align-items: center;
-      margin-top: 8px; padding-top: 8px;
-      border-top: .5px solid var(--border);
-      font-size: 12px; font-weight: 700;
-    }
-
-    /* ──────────────────────────────────────────────
-       BROKERS
-    ────────────────────────────────────────────── */
+    /* ── BROKERS ── */
 
     .broker-row {
       display: flex; align-items: center;
       justify-content: space-between;
-      padding: 9px 0;
+      padding: 6px 0;
       border-bottom: .5px solid var(--border-soft);
     }
     .broker-row:last-child { border-bottom: none; }
 
-    .broker-lhs { display: flex; flex-direction: column; gap: 2px; }
-    .broker-nm  { font-size: 13px; font-weight: 500; display: flex; align-items: center; gap: 6px; }
-    .broker-bio { font-size: 10px; color: var(--muted); }
-    .broker-balance {
-      font-size: 11px; color: var(--muted);
-      font-variant-numeric: tabular-nums;
-      margin-top: 1px;
-    }
-    .broker-rhs { display: flex; align-items: center; gap: 10px; }
-    .broker-amt { font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
+    .broker-lhs { display: flex; flex-direction: column; gap: 1px; }
+    .broker-nm  { font-size: 12px; font-weight: 500; display: flex; align-items: center; gap: 5px; }
+    .broker-balance { font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; }
+    .broker-rhs { font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; }
 
-    /* ──────────────────────────────────────────────
-       KILL-SWITCH
-    ────────────────────────────────────────────── */
+    /* ── COLONY V1 ── */
 
-    .ks-grid {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 8px;
-      margin-bottom: 10px;
+    .v1-status-row {
+      display: flex; align-items: center; gap: 8px;
+      padding: 2px 0 7px;
     }
 
-    .btn-ks {
-      display: flex; flex-direction: column;
-      align-items: center; gap: 5px;
-      padding: 11px 8px;
-      border: 1px solid rgba(226,75,74,.25);
-      border-radius: 7px;
-      background: #fff7f7;
-      color: var(--danger);
-      cursor: pointer;
-      font-size: 11px; font-weight: 700;
-      text-align: center;
-      transition: all .15s;
+    .v1-dot {
+      width: 9px; height: 9px; border-radius: 50%;
+      flex-shrink: 0; transition: background .3s;
     }
-    .btn-ks:hover  { background: var(--danger); color: #fff; border-color: var(--danger); }
-    .btn-ks:active { transform: scale(.97); }
+    .v1-dot.ok  { background: #1D9E75; box-shadow: 0 0 0 3px rgba(29,158,117,.18); }
+    .v1-dot.err { background: #E24B4A; box-shadow: 0 0 0 3px rgba(226,75,74,.18); }
 
-    .ks-icon  { font-size: 18px; }
-    .ks-label { font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: .3px; }
-    .ks-lvl   { font-size: 9px; opacity: .65; }
-
-    .ks-warn {
-      padding: 7px 10px;
-      background: #fffbeb;
-      border: .5px solid #fde68a;
-      border-radius: 5px;
-      font-size: 10px; color: #92400e;
-      line-height: 1.4;
-    }
-
-    /* ──────────────────────────────────────────────
-       COLONY v1 POSITIES
-    ────────────────────────────────────────────── */
+    .v1-meta { display: flex; flex-direction: column; gap: 1px; flex: 1; }
+    .v1-component { font-size: 11px; font-weight: 600; }
+    .v1-hb-time   { font-size: 9px; color: var(--muted); font-variant-numeric: tabular-nums; }
 
     .pos-tbl {
       width: 100%; border-collapse: collapse;
-      font-size: 12px;
+      font-size: 11px;
     }
     .pos-tbl th {
       text-align: left;
-      font-size: 9px; font-weight: 700;
+      font-size: 8px; font-weight: 700;
       text-transform: uppercase; letter-spacing: .4px;
       color: var(--faint);
-      padding: 0 10px 9px 0;
+      padding: 0 8px 6px 0;
       border-bottom: .5px solid var(--border);
       white-space: nowrap;
     }
     .pos-tbl td {
-      padding: 9px 10px 9px 0;
+      padding: 5px 8px 5px 0;
       border-bottom: .5px solid var(--border-soft);
       vertical-align: middle;
       font-variant-numeric: tabular-nums;
@@ -499,120 +436,51 @@
     .pos-tbl tr:last-child td { border-bottom: none; }
     .pos-tbl .pnl-pos { color: var(--pnl-pos); font-weight: 600; }
     .pos-tbl .pnl-neg { color: var(--pnl-neg); font-weight: 600; }
-    .pos-tbl .trigger-warn {
-      background: #fffbeb; color: #92400e; font-weight: 700;
-      border-radius: 4px; padding: 2px 6px;
-    }
-    /* ──────────────────────────────────────────────
-       UTILITY
-    ────────────────────────────────────────────── */
 
-    .empty {
-      text-align: center; padding: 18px;
-      color: var(--faint); font-size: 12px;
-    }
-
-    /* ──────────────────────────────────────────────
-       COLONY V1
-    ────────────────────────────────────────────── */
-
-    .v1-status-row {
-      display: flex; align-items: center; gap: 9px;
-      padding: 4px 0 10px;
-    }
-
-    .v1-dot {
-      width: 10px; height: 10px; border-radius: 50%;
-      flex-shrink: 0; transition: background .3s;
-    }
-    .v1-dot.ok  { background: #1D9E75; box-shadow: 0 0 0 3px rgba(29,158,117,.18); }
-    .v1-dot.err { background: #E24B4A; box-shadow: 0 0 0 3px rgba(226,75,74,.18); }
-
-    .v1-meta { display: flex; flex-direction: column; gap: 1px; flex: 1; }
-    .v1-component { font-size: 12px; font-weight: 600; }
-    .v1-hb-time {
-      font-size: 10px; color: var(--muted);
-      font-variant-numeric: tabular-nums;
-    }
-
-    .v1-positions { margin-top: 4px; }
-
-    .v1-pos-hdr {
-      font-size: 9px; font-weight: 700; text-transform: uppercase;
-      letter-spacing: .4px; color: var(--faint);
-      padding-bottom: 6px;
-      border-bottom: .5px solid var(--border);
-      display: grid;
-      grid-template-columns: 1fr auto auto auto;
-      gap: 8px;
-    }
-
-    .v1-pos-row {
-      display: grid;
-      grid-template-columns: 1fr auto auto auto;
-      gap: 8px;
-      padding: 6px 0;
-      border-bottom: .5px solid var(--border-soft);
-      font-size: 12px;
-      font-variant-numeric: tabular-nums;
-      align-items: center;
-    }
-    .v1-pos-row:last-child { border-bottom: none; }
-
-    .v1-sym { font-weight: 600; }
-    .v1-side-buy  { color: #1D9E75; font-weight: 700; font-size: 10px; text-transform: uppercase; }
-    .v1-side-sell { color: #E24B4A; font-weight: 700; font-size: 10px; text-transform: uppercase; }
-    .v1-price { color: var(--muted); }
-
-    /* ──────────────────────────────────────────────
-       MIEREN ACTIVITEIT
-    ────────────────────────────────────────────── */
+    /* ── ANT ACTIVITY (compact) ── */
 
     .activity-grid {
       display: flex; flex-direction: column;
-      gap: 6px;
+      gap: 4px;
+      overflow-y: auto;
+      flex: 1;
     }
 
     .ac-card {
       border: .5px solid var(--border);
-      border-radius: 6px;
-      padding: 9px 11px;
+      border-radius: 5px;
+      padding: 6px 9px;
       background: #faf9f5;
+      flex-shrink: 0;
     }
 
     .ac-hdr {
       display: flex; align-items: center;
-      gap: 7px; margin-bottom: 4px;
+      gap: 6px;
     }
 
     .ac-dot {
-      width: 7px; height: 7px;
+      width: 6px; height: 6px;
       border-radius: 50%; flex-shrink: 0;
     }
 
-    .ac-name { font-size: 12px; font-weight: 600; flex: 1; }
+    .ac-name { font-size: 11px; font-weight: 600; flex: 1; }
 
     .ac-time {
-      font-size: 10px; color: var(--faint);
+      font-size: 9px; color: var(--faint);
       font-variant-numeric: tabular-nums;
       font-family: 'SF Mono','Cascadia Code','Consolas',monospace;
     }
 
-    .ac-summary {
-      font-size: 11px; color: var(--muted);
-      margin-bottom: 5px;
-      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-    }
-
     .ac-stats {
       display: flex; flex-wrap: wrap;
-      gap: 3px; margin-bottom: 5px;
+      gap: 2px; margin-left: 12px;
     }
 
     .stat-b {
       display: inline-flex; align-items: center;
-      padding: 2px 7px; border-radius: 20px;
-      font-size: 10px; font-weight: 700;
+      padding: 1px 6px; border-radius: 20px;
+      font-size: 9px; font-weight: 700;
       background: #ede9e0; color: var(--text);
       font-variant-numeric: tabular-nums;
     }
@@ -620,45 +488,52 @@
     .stat-b.neg  { background: var(--pnl-neg-bg); color: var(--pnl-neg); }
     .stat-b.warn { background: var(--badge-warn-bg); color: var(--badge-warn-txt); }
 
-    .ac-timeline {
-      display: flex; flex-direction: column;
-      gap: 1px;
-      border-top: .5px solid var(--border-soft);
-      padding-top: 5px;
+    .ac-summary {
+      font-size: 10px; color: var(--muted);
+      margin-left: 12px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
 
-    .tl-line {
-      font-family: 'SF Mono','Cascadia Code','Consolas',monospace;
-      font-size: 10px; color: var(--faint);
-      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    /* scrollable ant section */
+    .card-scroll {
+      display: flex;
+      flex-direction: column;
+      flex: 1;
+      overflow: hidden;
+      min-height: 0;
+    }
+
+    /* ── UTILITY ── */
+
+    .empty {
+      text-align: center; padding: 12px;
+      color: var(--faint); font-size: 11px;
     }
 
   </style>
 </head>
 <body>
 
-<!-- ══════════════════════════════════════════════
-     TOPBAR
-══════════════════════════════════════════════ -->
+<!-- ══ TOPBAR ══ -->
 <div id="topbar">
 
   <div class="tb-brand">
     <div class="queen-orb">♛</div>
     <div class="brand-lines">
       <span class="brand-name">ANT COLONY v2</span>
-      <span class="brand-sub">Queen dashboard · PC2 live</span>
+      <span class="brand-sub">Queen dashboard · PC2</span>
     </div>
   </div>
 
   <div class="tb-heartbeat">
     <span class="hb-ecg">
-      <svg viewBox="0 0 64 24" width="52" height="20" fill="none"
+      <svg viewBox="0 0 64 24" width="48" height="18" fill="none"
            stroke="currentColor" stroke-width="1.8"
            stroke-linecap="round" stroke-linejoin="round">
         <polyline points="0,12 10,12 15,3 20,21 25,12 36,12 40,7 44,17 48,12 64,12"/>
       </svg>
     </span>
-    <span class="hb-label">laatste tick</span>
+    <span class="hb-label">tick</span>
     <span class="hb-time" id="hb-time">—:—:—</span>
     <span class="hb-ago"  id="hb-ago"></span>
   </div>
@@ -671,24 +546,23 @@
     <span class="live-clock" id="live-clock">00:00:00</span>
   </div>
 
-  <div class="tb-actions">
-    <button class="btn-noodstop" onclick="noodstop()">⛔&nbsp;NOODSTOP</button>
+  <div class="tb-kills">
+    <button class="btn-ks-tb" onclick="doKill(1)" title="Stop één agent (geeft prompt voor agent ID)">L1 Agent</button>
+    <button class="btn-ks-tb" onclick="doKill(2)" title="Stop node (geeft prompt voor node ID)">L2 Node</button>
+    <button class="btn-ks-tb" onclick="doKill(3)" title="Stop de volledige colony">L3 Colony</button>
+    <button class="btn-noodstop" onclick="noodstop()">⛔ NOODSTOP</button>
   </div>
 
 </div>
 
-<!-- ══════════════════════════════════════════════
-     LIVE TICKER
-══════════════════════════════════════════════ -->
+<!-- ══ LIVE TICKER ══ -->
 <div id="ticker">
   <div class="tick-dot"></div>
   <span class="tick-text" id="tick-text">verbinding maken met colony...</span>
   <span class="tick-badge">audit log</span>
 </div>
 
-<!-- ══════════════════════════════════════════════
-     MAIN
-══════════════════════════════════════════════ -->
+<!-- ══ MAIN ══ -->
 <div id="main">
 
   <!-- 4 metric cards -->
@@ -699,14 +573,14 @@
       <div class="mc-sub"  id="m-util">—% ingezet</div>
     </div>
     <div class="card mc">
-      <div class="mc-label">Ingezet</div>
+      <div class="mc-label">Ingezet (paper)</div>
       <div class="mc-value" id="m-alloc">€ —</div>
-      <div class="mc-sub">actief in missions</div>
+      <div class="mc-sub">entry × qty open posities</div>
     </div>
     <div class="card mc">
       <div class="mc-label">Beschikbaar</div>
       <div class="mc-value" id="m-avail">€ —</div>
-      <div class="mc-sub">vrij te alloceren</div>
+      <div class="mc-sub">totaal − ingezet</div>
     </div>
     <div class="card mc">
       <div class="mc-label">Actieve mieren</div>
@@ -721,38 +595,25 @@
     <!-- ── LEFT ── -->
     <div class="col">
 
-      <!-- Performance -->
+      <!-- PnL Chart -->
       <div class="card">
-        <div class="card-title">Performance</div>
-        <div class="perf-grid">
-          <div class="perf-item">
-            <span class="perf-period">Dag</span>
-            <span class="perf-val zero" id="p-day">€ 0</span>
-          </div>
-          <div class="perf-item">
-            <span class="perf-period">Week</span>
-            <span class="perf-val zero" id="p-week">€ 0</span>
-          </div>
-          <div class="perf-item">
-            <span class="perf-period">Maand</span>
-            <span class="perf-val zero" id="p-month">€ 0</span>
-          </div>
-          <div class="perf-item">
-            <span class="perf-period">Jaar</span>
-            <span class="perf-val zero" id="p-year">€ 0</span>
-          </div>
-          <div class="perf-item">
-            <span class="perf-period">All time</span>
-            <span class="perf-val zero" id="p-all">€ 0</span>
-          </div>
+        <div class="card-title">Paper PnL vandaag</div>
+        <div class="chart-hdr">
+          <span class="chart-pnl-total zero" id="pnl-total">€ 0</span>
+          <span style="font-size:10px;color:var(--faint)" id="pnl-trades-count"></span>
+        </div>
+        <div class="pnl-svg-wrap">
+          <svg id="pnl-svg" viewBox="0 0 500 60" preserveAspectRatio="none">
+            <text x="250" y="34" text-anchor="middle" fill="#9ca3af" font-size="11">Geen gesloten trades vandaag</text>
+          </svg>
         </div>
       </div>
 
-      <!-- Biome allocatie -->
-      <div class="card">
-        <div class="card-title">Biome allocatie</div>
-        <div class="biome-list" id="biome-list">
-          <div class="empty">Geen biomes geconfigureerd</div>
+      <!-- Ant activity (scrollable, compact) -->
+      <div class="card card-scroll">
+        <div class="card-title">Mieren activiteit</div>
+        <div class="activity-grid" id="activity-grid">
+          <div class="empty">Activiteit laden…</div>
         </div>
       </div>
 
@@ -761,11 +622,11 @@
     <!-- ── RIGHT ── -->
     <div class="col">
 
-      <!-- Mieren activiteit -->
+      <!-- Queen section -->
       <div class="card">
-        <div class="card-title">Mieren activiteit</div>
-        <div class="activity-grid" id="activity-grid">
-          <div class="empty">Activiteit laden…</div>
+        <div class="card-title">Queen · Regime &amp; Strategie</div>
+        <div id="queen-content">
+          <div class="empty">Laden...</div>
         </div>
       </div>
 
@@ -785,60 +646,32 @@
         </div>
       </div>
 
-      <!-- Queen kill-switch -->
+      <!-- Operator input -->
       <div class="card">
-        <div class="card-title">Queen kill-switch</div>
-        <div class="ks-grid">
-          <button class="btn-ks" onclick="doKill(1)">
-            <span class="ks-icon">🐜</span>
-            <span class="ks-label">Stop agent</span>
-            <span class="ks-lvl">Level 1</span>
-          </button>
-          <button class="btn-ks" onclick="doKill(2)">
-            <span class="ks-icon">🖥️</span>
-            <span class="ks-label">Stop node</span>
-            <span class="ks-lvl">Level 2</span>
-          </button>
-          <button class="btn-ks" onclick="doKill(3)">
-            <span class="ks-icon">🔴</span>
-            <span class="ks-label">Stop colony</span>
-            <span class="ks-lvl">Level 3</span>
+        <div class="card-title">Geef mier een link of strategie</div>
+        <div style="display:flex;gap:7px;margin-top:6px;align-items:flex-start">
+          <select id="op-type" style="padding:5px 8px;border:1px solid var(--border);border-radius:5px;background:var(--card);font-size:11px;color:var(--text);flex-shrink:0">
+            <option value="url">URL</option>
+            <option value="text">Tekst</option>
+            <option value="code">Code</option>
+          </select>
+          <textarea id="op-content" rows="2"
+            placeholder="GitHub URL, strategie beschrijving of code..."
+            style="flex:1;padding:5px 8px;border:1px solid var(--border);border-radius:5px;background:var(--card);font-size:11px;color:var(--text);resize:vertical;font-family:inherit"></textarea>
+          <button id="op-submit" onclick="sendOperatorInput()"
+            style="padding:5px 12px;background:var(--queen);color:#fff;border:none;border-radius:5px;font-size:11px;font-weight:600;cursor:pointer;flex-shrink:0;align-self:flex-end">
+            Stuur
           </button>
         </div>
-        <div class="ks-warn">
-          ⚠️ Kill-switch acties zijn onomkeerbaar. Level 3 stopt de volledige colony
-          en vereist handmatige herstart door de operator.
-        </div>
+        <div id="op-msg" style="margin-top:4px;font-size:10px;color:var(--muted);min-height:14px"></div>
       </div>
 
     </div>
   </div>
 
-  <!-- Operator input -->
-  <div class="card" style="margin-top:16px">
-    <div class="card-title">Geef mier een link of strategie</div>
-    <div style="display:flex;gap:8px;margin-top:8px;align-items:flex-start">
-      <select id="op-type" style="padding:7px 10px;border:1px solid var(--border);border-radius:6px;background:var(--card);font-size:12px;color:var(--text);flex-shrink:0">
-        <option value="url">URL</option>
-        <option value="text">Tekst</option>
-        <option value="code">Code</option>
-      </select>
-      <textarea id="op-content" rows="3"
-        placeholder="GitHub URL, strategie beschrijving of code..."
-        style="flex:1;padding:7px 10px;border:1px solid var(--border);border-radius:6px;background:var(--card);font-size:12px;color:var(--text);resize:vertical;font-family:inherit"></textarea>
-      <button id="op-submit" onclick="sendOperatorInput()"
-        style="padding:7px 16px;background:var(--queen);color:#fff;border:none;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;flex-shrink:0;align-self:flex-end">
-        Stuur
-      </button>
-    </div>
-    <div id="op-msg" style="margin-top:6px;font-size:11px;color:var(--muted);min-height:16px"></div>
-  </div>
-
 </div>
 
-<!-- ══════════════════════════════════════════════
-     JAVASCRIPT
-══════════════════════════════════════════════ -->
+<!-- ══ JAVASCRIPT ══ -->
 <script>
 'use strict';
 
@@ -846,18 +679,16 @@
 
 const S = {
   status:      { status:'UNKNOWN', last_tick:null, seconds_ago:null },
-  metrics:     { capital_total:0, capital_allocated:0, capital_available:0, active_ants:0, utilization_pct:0 },
-  performance: { day:0, week:0, month:0, year:0, alltime:0 },
-  biomes:      { biomes:[] },
-  ants:        { ants:[] },
+  metrics:     { capital_total:0, capital_allocated:0, capital_available:0, capital_in_use:null, active_ants:0, utilization_pct:0 },
   brokers:     { brokers:[] },
   ticker:      { events:[] },
   v1status:    null,
   v1positions: { positions:[], scanned_at:null },
   v1loaded:    false,
   activity:    { ants:[] },
+  queenStatus: null,
+  perfChart:   { points:[], total_pnl:0 },
   tickerIdx:   0,
-  // heartbeat live-counter
   hbBase:      null,
   hbAt:        null,
 };
@@ -874,6 +705,7 @@ const ANT_COLOR = {
   strategy_ant:  '#06B6D4',
   execution_ant: '#E24B4A',
   operator_ant:  '#64748B',
+  claude_ant:    '#8B5CF6',
 };
 function antColor(t) { return ANT_COLOR[t] || '#9ca3af'; }
 
@@ -882,7 +714,6 @@ function antColor(t) { return ANT_COLOR[t] || '#9ca3af'; }
 function fPrice(v) {
   if (v == null) return '—';
   const n = Number(v);
-  // Auto-decimals: large prices fewer decimals
   const decimals = n >= 1000 ? 2 : n >= 1 ? 4 : 6;
   return '€\u202f' + n.toLocaleString('nl-NL', {minimumFractionDigits: decimals, maximumFractionDigits: decimals});
 }
@@ -897,27 +728,10 @@ function fEUR2(v) {
   return '€\u202f' + Number(v).toLocaleString('nl-NL', {minimumFractionDigits:2, maximumFractionDigits:2});
 }
 
-function fQty(v) {
-  if (v == null) return '—';
-  const n = Number(v);
-  if (n === 0) return '0';
-  if (n >= 1000) return n.toLocaleString('nl-NL', {maximumFractionDigits:2});
-  if (n >= 1)    return n.toLocaleString('nl-NL', {minimumFractionDigits:2, maximumFractionDigits:4});
-  return n.toLocaleString('nl-NL', {minimumFractionDigits:4, maximumFractionDigits:6});
-}
-
 function fPnL(v) {
   if (v == null) return '€\u202f0';
   const abs = '€\u202f' + Math.abs(v).toLocaleString('nl-NL', {minimumFractionDigits:2, maximumFractionDigits:2});
   return (v >= 0 ? '+' : '−') + abs;
-}
-
-function fTTL(s) {
-  if (s == null) return '—';
-  if (s <= 0) return '00:00';
-  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
-  if (h > 0) return `${h}:${pad(m)}:${pad(sec)}`;
-  return `${pad(m)}:${pad(sec)}`;
 }
 
 function pad(n) { return String(n).padStart(2,'0'); }
@@ -932,10 +746,11 @@ function pnlCls(v) { return v > 0 ? 'pos' : v < 0 ? 'neg' : 'zero'; }
 
 async function fetchAll() {
   const get = url => fetch(url).then(r => r.json()).catch(() => null);
-  const [st, me, pe, bi, an, br, ti, v1s, v1p, act] = await Promise.all([
-    get('/api/status'), get('/api/metrics'), get('/api/performance'),
-    get('/api/biomes'), get('/api/ants'),    get('/api/brokers'), get('/api/ticker'),
+  const [st, me, br, ti, v1s, v1p, act, qs, pc] = await Promise.all([
+    get('/api/status'), get('/api/metrics'),
+    get('/api/brokers'), get('/api/ticker'),
     get('/api/v1status'), get('/api/v1positions'), get('/api/ants/activity'),
+    get('/api/queen/status'), get('/api/performance/chart'),
   ]);
 
   if (st) {
@@ -943,14 +758,13 @@ async function fetchAll() {
     if (st.seconds_ago != null) { S.hbBase = st.seconds_ago; S.hbAt = Date.now(); }
   }
   if (me)  S.metrics     = me;
-  if (pe)  S.performance = pe;
-  if (bi)  S.biomes      = bi;
-  if (an)  S.ants        = an;
   if (br)  S.brokers     = br;
   if (ti)  S.ticker      = ti;
   if (v1s) S.v1status    = v1s;
   if (v1p) { S.v1positions = v1p; S.v1loaded = true; }
   if (act) S.activity    = act;
+  if (qs)  S.queenStatus = qs;
+  if (pc)  S.perfChart   = pc;
 
   render();
 }
@@ -960,120 +774,150 @@ async function fetchAll() {
 function render() {
   renderStatus();
   renderMetrics();
-  renderPerf();
-  renderBiomes();
+  renderPnlChart();
   renderActivity();
   renderBrokers();
   renderV1();
+  renderQueen();
 }
 
 function renderStatus() {
   const raw = (S.status.status || 'UNKNOWN').toLowerCase();
-  const lbl = raw.toUpperCase();
   const pill = document.getElementById('status-pill');
   pill.className = 'pill ' + raw;
-  document.getElementById('status-txt').textContent = lbl;
+  document.getElementById('status-txt').textContent = raw.toUpperCase();
   document.getElementById('hb-time').textContent = S.status.last_tick || '—:—:—';
 }
 
 function renderMetrics() {
   const m = S.metrics;
   document.getElementById('m-total').textContent = fEUR(m.capital_total);
-  document.getElementById('m-alloc').textContent = fEUR(m.capital_allocated);
-  document.getElementById('m-avail').textContent = fEUR(m.capital_available);
-  document.getElementById('m-ants').textContent  = m.active_ants ?? '—';
-  document.getElementById('m-util').textContent  = (m.utilization_pct ?? 0).toFixed(1) + '% ingezet';
+
+  // Ingezet: gebruik echte paper waarde als beschikbaar, anders queen allocated
+  const inUse = m.capital_in_use != null ? m.capital_in_use : m.capital_allocated;
+  document.getElementById('m-alloc').textContent = fEUR2(inUse);
+
+  // Beschikbaar: totaal − ingezet
+  const avail = m.capital_in_use != null
+    ? Math.max(0, m.capital_total - m.capital_in_use)
+    : m.capital_available;
+  document.getElementById('m-avail').textContent = fEUR2(avail);
+
+  document.getElementById('m-ants').textContent = m.active_ants ?? '—';
+  document.getElementById('m-util').textContent = (m.utilization_pct ?? 0).toFixed(1) + '% ingezet';
 }
 
-function renderPerf() {
-  const p = S.performance;
-  setPnL('p-day',   p.day);
-  setPnL('p-week',  p.week);
-  setPnL('p-month', p.month);
-  setPnL('p-year',  p.year);
-  setPnL('p-all',   p.alltime);
+// ── PnL Chart ─────────────────────────────────
+
+function renderPnlChart() {
+  const chart     = S.perfChart || {};
+  const points    = chart.points || [];
+  const totalPnl  = chart.total_pnl || 0;
+  const totalEl   = document.getElementById('pnl-total');
+  const countEl   = document.getElementById('pnl-trades-count');
+  const svgEl     = document.getElementById('pnl-svg');
+
+  totalEl.textContent = fPnL(totalPnl);
+  totalEl.className   = 'chart-pnl-total ' + pnlCls(totalPnl);
+
+  const trades = Math.max(0, points.length - 1);
+  countEl.textContent = trades ? trades + ' trade' + (trades !== 1 ? 's' : '') : '';
+
+  if (points.length < 2) {
+    svgEl.innerHTML = '<text x="250" y="34" text-anchor="middle" fill="#9ca3af" font-size="11" font-family="sans-serif">Geen gesloten trades vandaag</text>';
+    return;
+  }
+
+  const W = 500, H = 60, PAD = 4;
+  const pnls   = points.map(p => p.pnl);
+  const minPnl = Math.min(...pnls);
+  const maxPnl = Math.max(...pnls);
+  const range  = maxPnl - minPnl || 0.01;
+
+  function toY(pnl) {
+    return H - PAD - ((pnl - minPnl) / range) * (H - 2 * PAD);
+  }
+  function toX(i) {
+    return (i / (points.length - 1)) * W;
+  }
+
+  const ptStr = points.map((p, i) => `${toX(i).toFixed(1)},${toY(p.pnl).toFixed(1)}`).join(' ');
+  const lastY = toY(pnls[pnls.length - 1]).toFixed(1);
+
+  const color = totalPnl >= 0 ? '#166534' : '#991b1b';
+  const fillColor = totalPnl >= 0 ? 'rgba(22,101,52,.08)' : 'rgba(153,27,27,.08)';
+
+  // Zero line (only if range spans zero)
+  let zeroLine = '';
+  if (minPnl < 0 && maxPnl > 0) {
+    const zy = toY(0).toFixed(1);
+    zeroLine = `<line x1="0" y1="${zy}" x2="${W}" y2="${zy}" stroke="#d1d5db" stroke-width=".5" stroke-dasharray="3,3"/>`;
+  }
+
+  // Area fill path
+  const areaPath = `M0,${toY(0).toFixed(1)} L${ptStr.replace(/(\d+\.?\d*),(\d+\.?\d*)/g, '$1,$2')} L${W},${toY(0).toFixed(1)} Z`
+    .replace('M0,', 'M0,').replace(' L' + ptStr, ' ' + ptStr.split(' ').map((pt, i) => (i === 0 ? 'L' : '') + pt).join(' '));
+
+  const fillPts = `0,${toY(pnls[0]).toFixed(1)} ` + ptStr + ` ${W},${toY(pnls[pnls.length-1]).toFixed(1)} ${W},${H} 0,${H}`;
+
+  svgEl.innerHTML = `
+    ${zeroLine}
+    <polygon points="${fillPts}" fill="${fillColor}"/>
+    <polyline points="${ptStr}" fill="none" stroke="${color}" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>
+    <circle cx="${W}" cy="${lastY}" r="3" fill="${color}"/>
+  `;
 }
 
-function setPnL(id, v) {
-  const el = document.getElementById(id);
-  el.textContent = fPnL(v);
-  el.className = 'perf-val ' + pnlCls(v);
-}
+// ── Queen ─────────────────────────────────────
 
-function renderBiomes() {
-  const el = document.getElementById('biome-list');
-  const list = S.biomes.biomes || [];
-  if (!list.length) { el.innerHTML = '<div class="empty">Geen biomes geconfigureerd</div>'; return; }
+function renderQueen() {
+  const el = document.getElementById('queen-content');
+  const q  = S.queenStatus;
+  if (!q) { el.innerHTML = '<div class="empty">Geen Queen data</div>'; return; }
 
-  el.innerHTML = list.map(b => {
-    const c   = bcolor(b.biome_id);
-    const pct = Math.min(100, Math.round((b.fraction || 0) * 100));
+  const r = q.regime || 'onbekend';
+  const regimeCls = ['bull','bear','neutral','range'].includes(r) ? 'regime-' + r : 'regime-unknown';
 
-    const positions = b.positions || [];
-    const portfolioTotal = positions.reduce((sum, p) => sum + (p.market_value || 0), 0);
+  const regimeHtml = `<div class="queen-row">
+    <span style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px">Regime</span>
+    <span class="regime-pill ${regimeCls}">${r}</span>
+  </div>`;
 
-    // Referentieprijs (BTC-EUR) rechts in de summary
-    const refHtml = b.reference_price
-      ? `<span class="ref-price">BTC ${fEUR2(b.reference_price)}</span>`
-      : '';
-
-    // Holdings tabel
-    let holdingsHtml = '';
-    if (positions.length > 0) {
-      const rows = positions.map(p => {
-        const asset = p.symbol.replace('-EUR', '');
-        return `<tr>
-          <td class="h-asset">${asset}</td>
-          <td>${fQty(p.quantity)}</td>
-          <td>${fEUR2(p.current_price)}</td>
-          <td>${fEUR2(p.market_value)}</td>
-        </tr>`;
-      }).join('');
-
-      holdingsHtml = `
-        <details class="holdings-panel">
-          <summary>
-            <span class="toggle-arrow">▶</span>
-            ${positions.length} holding${positions.length !== 1 ? 's' : ''}
-            ${refHtml}
-          </summary>
-          <table class="holdings-tbl">
-            <thead><tr>
-              <th>Asset</th><th>Qty</th><th>Prijs</th><th>Waarde</th>
-            </tr></thead>
-            <tbody>${rows}</tbody>
-          </table>
-          <div class="holdings-total">
-            <span>Portfolio totaal</span>
-            <span>${fEUR2(portfolioTotal)}</span>
-          </div>
-        </details>`;
-    } else if (b.reference_price) {
-      holdingsHtml = `<div style="font-size:11px;color:var(--muted);margin-top:8px;font-variant-numeric:tabular-nums">
-        BTC ${fEUR2(b.reference_price)} · geen holdings</div>`;
-    }
-
-    return `
-      <div>
-        <div class="biome-hdr">
-          <div class="biome-name-row">
-            <div class="biome-dot" style="background:${c}"></div>
-            <span class="biome-name">${b.display_name}</span>
-          </div>
-          <div class="biome-nums">
-            <span>${fEUR(b.allocated)}</span>
-            <span style="color:#d1d5db">/</span>
-            <span>${fEUR(b.limit)}</span>
-            <span class="biome-pct">${pct}%</span>
-          </div>
-        </div>
-        <div class="bar-track">
-          <div class="bar-fill" style="width:${pct}%;background:${c}"></div>
-        </div>
-        ${holdingsHtml}
+  const strats = q.top_strategies || [];
+  let stratHtml = '';
+  if (strats.length) {
+    const rows = strats.map((s, i) => {
+      const sc = s.sharpe >= 1.5 ? 'var(--pnl-pos)' : s.sharpe >= 0.8 ? 'var(--text)' : 'var(--faint)';
+      return `<div class="strat-item">
+        <span class="strat-rank">#${i+1}</span>
+        <span class="strat-name">${s.strategy_type}</span>
+        <span class="strat-sym">${s.symbol}</span>
+        <span class="strat-sharpe" style="color:${sc}">${s.sharpe.toFixed(2)}</span>
       </div>`;
-  }).join('');
+    }).join('');
+    stratHtml = `<div class="strat-list" style="margin-bottom:7px">
+      <div style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--faint);margin-bottom:3px">Top strategieën · sharpe</div>
+      ${rows}
+    </div>`;
+  } else {
+    stratHtml = '<div style="font-size:10px;color:var(--faint);margin-bottom:7px">Nog geen gekwalificeerde strategieën</div>';
+  }
+
+  let decisionHtml = '';
+  if (q.last_decision) {
+    const d  = q.last_decision;
+    const ts = d.timestamp ? new Date(d.timestamp).toLocaleTimeString('nl-NL') : '—';
+    decisionHtml = `<div class="queen-decision">
+      <div class="queen-dec-ts">Laatste beslissing · ${ts}</div>
+      <div class="queen-dec-act">${d.action}</div>
+      ${d.reason ? `<div class="queen-dec-why">${d.reason}</div>` : ''}
+    </div>`;
+  }
+
+  el.innerHTML = regimeHtml + stratHtml + decisionHtml;
 }
+
+// ── Brokers ───────────────────────────────────
 
 function renderBrokers() {
   const el   = document.getElementById('broker-list');
@@ -1082,77 +926,61 @@ function renderBrokers() {
 
   el.innerHTML = list.map(b => {
     const c = bcolor(b.biome_id);
-
     const badge = b.status === 'connected'
       ? '<span class="badge b-conn">verbonden</span>'
       : b.status === 'disconnected'
         ? '<span class="badge b-disconn">offline</span>'
         : '<span class="badge b-standby">standby</span>';
 
-    // Portfolio totaal: som van holdings in bijbehorende biome
-    const biomeData = (S.biomes.biomes || []).find(bm => bm.biome_id === b.biome_id);
-    const positions  = (biomeData && biomeData.positions) || [];
-    const portfolioTotal = positions.reduce((sum, p) => sum + (p.market_value || 0), 0);
-
-    // Balance-regel: beschikbaar saldo + portfolio waarde
     let balanceHtml = '';
     if (b.balance_available != null) {
-      const parts = [`${fEUR2(b.balance_available)} beschikbaar`];
+      const parts = [`${fEUR2(b.balance_available)} vrij`];
       if (b.balance_in_orders != null && b.balance_in_orders > 0)
         parts.push(`${fEUR2(b.balance_in_orders)} in orders`);
-      if (portfolioTotal > 0)
-        parts.push(`portfolio ${fEUR2(portfolioTotal)}`);
       balanceHtml = `<div class="broker-balance">${parts.join(' · ')}</div>`;
     }
 
     return `<div class="broker-row">
       <div class="broker-lhs">
         <div class="broker-nm">
-          <div style="width:8px;height:8px;border-radius:50%;background:${c};flex-shrink:0"></div>
-          ${b.name}
-          ${badge}
+          <div style="width:7px;height:7px;border-radius:50%;background:${c};flex-shrink:0"></div>
+          ${b.name} ${badge}
         </div>
-        <div class="broker-bio">${b.biome_id}</div>
         ${balanceHtml}
       </div>
-      <div class="broker-rhs">
-        <span class="broker-amt">${fEUR(b.capital_deployed)} ingezet</span>
-      </div>
+      <div class="broker-rhs">${fEUR2(b.capital_deployed)} ingezet</div>
     </div>`;
   }).join('');
 }
+
+// ── Colony v1 ─────────────────────────────────
 
 function renderV1() {
   const el  = document.getElementById('v1-content');
   const st  = S.v1status;
   const pos = (S.v1positions && S.v1positions.positions) || [];
 
-  // Status header
   let hdrHtml = '';
   if (st) {
     const dotCls    = st.ok ? 'ok' : 'err';
     const component = st.component || 'Colony v1';
-    const hbTime    = st.last_heartbeat
-      ? new Date(st.last_heartbeat).toLocaleTimeString('nl-NL') : '—';
+    const hbTime    = st.last_heartbeat ? new Date(st.last_heartbeat).toLocaleTimeString('nl-NL') : '—';
     const badge     = st.last_status
       ? `<span class="badge ${st.ok ? 'b-conn' : 'b-standby'}">${st.last_status}</span>` : '';
-    const lane      = st.lane ? ` · ${st.lane}` : '';
-    hdrHtml = `
-      <div class="v1-status-row">
-        <div class="v1-dot ${dotCls}"></div>
-        <div class="v1-meta">
-          <span class="v1-component">${component}${lane} ${badge}</span>
-          <span class="v1-hb-time">Heartbeat: ${hbTime}</span>
-        </div>
-      </div>`;
+    hdrHtml = `<div class="v1-status-row">
+      <div class="v1-dot ${dotCls}"></div>
+      <div class="v1-meta">
+        <span class="v1-component">${component} ${badge}</span>
+        <span class="v1-hb-time">Heartbeat: ${hbTime}</span>
+      </div>
+    </div>`;
   }
 
-  // Positions table
   let posHtml = '';
   if (!S.v1loaded) {
     posHtml = '<div class="empty">Laden...</div>';
   } else if (!pos.length) {
-    posHtml = '<div class="empty">Geen open posities — wacht op signaal</div>';
+    posHtml = '<div class="empty" style="padding:6px 0">Geen open posities</div>';
   } else {
     const rows = pos.map(p => {
       const pCls = p.unrealized_pnl > 0 ? 'pnl-pos' : p.unrealized_pnl < 0 ? 'pnl-neg' : '';
@@ -1162,29 +990,16 @@ function renderV1() {
       const pctTxt = p.pnl_pct != null
         ? (p.pnl_pct >= 0 ? '+' : '') + p.pnl_pct.toFixed(2) + '%' : '—';
 
-      const trigCell = trig => {
-        if (trig == null) return '<td style="color:var(--faint)">—</td>';
-        const warn = p.current_price != null && Math.abs(p.current_price - trig) / trig < 0.02;
-        return `<td ${warn ? 'class="trigger-warn"' : ''}>${warn ? '⚠ ' : ''}${fPrice(trig)}</td>`;
-      };
-
       return `<tr>
         <td style="font-weight:600">${p.symbol}</td>
-        <td style="text-transform:uppercase;font-size:11px;color:var(--muted)">${p.side}</td>
         <td>${fPrice(p.entry_price)}</td>
-        <td>${fPrice(p.current_price)}</td>
         <td class="${pCls}">${pnlTxt}</td>
         <td class="${pCls}">${pctTxt}</td>
-        ${trigCell(p.trigger_high)}
-        ${trigCell(p.trigger_low)}
       </tr>`;
     }).join('');
 
     posHtml = `<table class="pos-tbl">
-      <thead><tr>
-        <th>Symbol</th><th>Side</th><th>Entry</th><th>Huidig</th>
-        <th>PnL €</th><th>PnL %</th><th>Trigger ▲</th><th>Trigger ▼</th>
-      </tr></thead>
+      <thead><tr><th>Symbol</th><th>Entry</th><th>PnL €</th><th>PnL %</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>`;
   }
@@ -1192,7 +1007,7 @@ function renderV1() {
   el.innerHTML = hdrHtml + posHtml;
 }
 
-// ── Mieren activiteit ──────────────────────────
+// ── Mieren activiteit (compact) ───────────────
 
 function renderActivity() {
   const el   = document.getElementById('activity-grid');
@@ -1206,13 +1021,12 @@ function renderActivity() {
     const name = fType(a.ant_type);
     const ts   = a.last_seen ? `<span class="ac-time">${a.last_seen}</span>` : '';
 
-    // Stats badges
     const st = a.stats || {};
     const badges = [];
     if (st.signals_found              != null)
-      badges.push(`<span class="stat-b">${st.signals_found} signalen</span>`);
+      badges.push(`<span class="stat-b">${st.signals_found} sig</span>`);
     if (st.candidates_above_threshold != null)
-      badges.push(`<span class="stat-b">${st.candidates_above_threshold} kandidaten</span>`);
+      badges.push(`<span class="stat-b">${st.candidates_above_threshold} kand</span>`);
     if (st.open_trades                != null)
       badges.push(`<span class="stat-b">${st.open_trades} open</span>`);
     if (st.total_pnl != null) {
@@ -1221,41 +1035,30 @@ function renderActivity() {
       badges.push(`<span class="stat-b ${cls}">${sign}€${st.total_pnl.toFixed(2)}</span>`);
     }
     if (st.win_rate != null)
-      badges.push(`<span class="stat-b">${Math.round(st.win_rate * 100)}% wr</span>`);
-    if (st.warnings_today != null) {
-      const cls = st.warnings_today > 0 ? 'warn' : '';
-      badges.push(`<span class="stat-b ${cls}">${st.warnings_today} warn</span>`);
-    }
-    if (st.anomalies_today != null && st.anomalies_today > 0)
-      badges.push(`<span class="stat-b neg">${st.anomalies_today} anomalieën</span>`);
+      badges.push(`<span class="stat-b">${Math.round(st.win_rate * 100)}%wr</span>`);
+    if (st.warnings_today != null && st.warnings_today > 0)
+      badges.push(`<span class="stat-b warn">${st.warnings_today} warn</span>`);
     if (st.repos_ingested    != null)
       badges.push(`<span class="stat-b">${st.repos_ingested} repos</span>`);
     if (st.variants_generated!= null)
-      badges.push(`<span class="stat-b">${st.variants_generated} varianten</span>`);
+      badges.push(`<span class="stat-b">${st.variants_generated} var</span>`);
     if (st.orders_placed     != null)
-      badges.push(`<span class="stat-b">${st.orders_placed} geplaatst</span>`);
+      badges.push(`<span class="stat-b">${st.orders_placed} ord</span>`);
     if (st.orders_rejected   != null && st.orders_rejected > 0)
-      badges.push(`<span class="stat-b neg">${st.orders_rejected} geweigerd</span>`);
+      badges.push(`<span class="stat-b neg">${st.orders_rejected} rej</span>`);
     if (st.inputs_processed  != null)
-      badges.push(`<span class="stat-b">${st.inputs_processed} inputs</span>`);
+      badges.push(`<span class="stat-b">${st.inputs_processed} in</span>`);
 
-    const statsHtml = badges.length
-      ? `<div class="ac-stats">${badges.join('')}</div>` : '';
-
-    const tlHtml = (a.recent_events || []).length
-      ? `<div class="ac-timeline">${a.recent_events.map(e =>
-          `<div class="tl-line">${e}</div>`).join('')}</div>`
-      : '';
+    const statsHtml = badges.length ? `<div class="ac-stats">${badges.join('')}</div>` : '';
 
     return `<div class="ac-card">
       <div class="ac-hdr">
         <div class="ac-dot" style="background:${c}"></div>
         <span class="ac-name">${name}</span>
+        ${statsHtml}
         ${ts}
       </div>
       <div class="ac-summary">${a.summary}</div>
-      ${statsHtml}
-      ${tlHtml}
     </div>`;
   }).join('');
 }
@@ -1290,18 +1093,15 @@ function rotateTicker() {
 // ── Per-second tick ────────────────────────────
 
 function perSecond() {
-  // Live clock
   const now = new Date();
   document.getElementById('live-clock').textContent =
     `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
 
-  // Heartbeat countdown
   if (S.hbBase != null && S.hbAt != null) {
     const elapsed = (Date.now() - S.hbAt) / 1000;
     const total   = Math.round(S.hbBase + elapsed);
-    document.getElementById('hb-ago').textContent = total + 's geleden';
+    document.getElementById('hb-ago').textContent = total + 's';
   }
-
 }
 
 // ── Kill-switch ────────────────────────────────
