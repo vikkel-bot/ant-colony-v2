@@ -1133,7 +1133,7 @@ function renderV1() {
     const dotCls    = st.ok ? 'ok' : 'err';
     const component = st.component || 'Colony v1';
     const hbTime    = st.last_heartbeat
-      ? st.last_heartbeat.replace('T', ' ').slice(0, 19) : '—';
+      ? new Date(st.last_heartbeat).toLocaleTimeString('nl-NL') : '—';
     const badge     = st.last_status
       ? `<span class="badge ${st.ok ? 'b-conn' : 'b-standby'}">${st.last_status}</span>` : '';
     const lane      = st.lane ? ` · ${st.lane}` : '';

@@ -31,6 +31,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any
 
@@ -437,7 +438,7 @@ def create_router(ctx: ColonyContext) -> APIRouter:
                 status="UNKNOWN",
                 last_tick=None,
                 seconds_ago=None,
-                server_time=now.strftime("%H:%M:%S"),
+                server_time=_to_local_str(now),
             )
 
         status = ctx.scheduler.status.value.upper()
@@ -447,13 +448,13 @@ def create_router(ctx: ColonyContext) -> APIRouter:
         last_tick_str: str | None = None
         if last_tick is not None:
             seconds_ago = round((now - last_tick).total_seconds(), 1)
-            last_tick_str = last_tick.strftime("%H:%M:%S")
+            last_tick_str = _to_local_str(last_tick)
 
         return StatusResponse(
             status=status,
             last_tick=last_tick_str,
             seconds_ago=seconds_ago,
-            server_time=now.strftime("%H:%M:%S"),
+            server_time=_to_local_str(now),
         )
 
     # ------------------------------------------------------------------
@@ -706,7 +707,7 @@ def create_router(ctx: ColonyContext) -> APIRouter:
     @router.get("/v1positions", response_model=V1PositionsResponse)
     def get_v1positions() -> V1PositionsResponse:
         """Open posities van Colony v1 — broker artifacts + live Bitvavo prijs."""
-        now_str   = datetime.now(tz=timezone.utc).strftime("%H:%M:%S")
+        now_str   = _to_local_str(datetime.now(tz=timezone.utc))
         live_root = ctx.v1_live_root or _ANT_LIVE_ROOT
 
         open_artifacts = _scan_open_positions(live_root)
@@ -940,7 +941,7 @@ def create_router(ctx: ColonyContext) -> APIRouter:
             else:
                 last_rec  = records[-1]
                 last_ts   = _parse_ts(last_rec.get("timestamp"))
-                last_seen = last_ts.strftime("%H:%M:%S") if last_ts else None
+                last_seen = _to_local_str(last_ts) if last_ts else None
 
                 recent_events = [_event_short(r) for r in records[-3:]]
 
@@ -1092,7 +1093,7 @@ def _read_recent_events(logs_root: Path, limit: int = 20) -> list[TickerEvent]:
         events.append(TickerEvent(
             event_type=rec.get("event_type", "unknown"),
             source=rec.get("source", "unknown"),
-            timestamp=ts.strftime("%H:%M:%S"),
+            timestamp=_to_local_str(ts),
             mission_id=rec.get("mission_id"),
             payload=rec.get("payload", {}),
         ))
@@ -1110,6 +1111,14 @@ def _v1_heartbeat_ok(last_heartbeat_str: str | None, max_age_seconds: float = 30
         return (datetime.now(tz=timezone.utc) - dt).total_seconds() <= max_age_seconds
     except (ValueError, TypeError):
         return False
+
+
+_LOCAL_TZ = ZoneInfo("Europe/Amsterdam")
+
+
+def _to_local_str(dt: datetime) -> str:
+    """Formatteer UTC datetime als HH:MM:SS in Europe/Amsterdam tijdzone."""
+    return dt.astimezone(_LOCAL_TZ).strftime("%H:%M:%S")
 
 
 def _parse_ts(value: str | None) -> datetime | None:
@@ -1183,7 +1192,7 @@ def _action_of(rec: dict) -> str:
 def _event_short(rec: dict) -> str:
     """Formatteer een log record als korte event string voor de tijdlijn."""
     ts      = _parse_ts(rec.get("timestamp"))
-    ts_str  = ts.strftime("%H:%M:%S") if ts else "?"
+    ts_str  = _to_local_str(ts) if ts else "?"
     action  = _action_of(rec).replace("_", " ")
     payload = rec.get("payload") or {}
     symbol  = payload.get("symbol") or ""
