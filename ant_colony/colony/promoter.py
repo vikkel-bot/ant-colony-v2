@@ -21,14 +21,21 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 
 from ant_colony.queen.queen import Queen
+from ant_colony.schemas.mission import MarketScope, Mission, RiskLimits, SuccessConditions
 from ant_colony.schemas.strategy_candidate import CandidateStatus, StrategyCandidate
 
 _SHARPE_THRESHOLD    = 0.7
 _WIN_RATE_THRESHOLD  = 0.55
 _MIN_TRADES          = 20
+
+_PAPER_TTL           = 1_209_600          # 14 dagen in seconden
+_PAPER_CAPITAL       = 100.0              # EUR per kandidaat
+_PAPER_HEARTBEAT     = 300                # 5 minuten
+_PAPER_ALLOWED_ACTIONS = ["read_data", "paper_execute", "report"]
 
 logger = logging.getLogger(__name__)
 
@@ -42,9 +49,15 @@ class StrategyPromoter:
         logs_root:  Pad naar ANT_LOGS. None = geen disk-I/O (tests).
     """
 
-    def __init__(self, queen: Queen, logs_root: Path | None = None) -> None:
+    def __init__(
+        self,
+        queen: Queen,
+        logs_root: Path | None = None,
+        node_id: str = "pc2",
+    ) -> None:
         self._queen     = queen
         self._logs_root = logs_root
+        self._node_id   = node_id
         self._seen_candidate_ids: set[str] = set()
 
     # ------------------------------------------------------------------
@@ -161,6 +174,9 @@ class StrategyPromoter:
             )
             return
 
+        # Stap 1b: automatisch paper_ant missie aanmaken
+        self._issue_paper_mission(result1.candidate)
+
         # Stap 2: PAPER → APPROVED
         result2 = self._queen.promote_candidate(result1.candidate, CandidateStatus.APPROVED)
         if not result2.accepted or result2.candidate is None:
@@ -177,6 +193,56 @@ class StrategyPromoter:
             (approved.backtest_results.sharpe_ratio if approved.backtest_results else 0.0),
         )
         self._write_approved(approved)
+
+    def _issue_paper_mission(self, candidate: StrategyCandidate) -> None:
+        """Geef automatisch een paper_ant missie uit voor de gegeven kandidaat."""
+        ts  = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%S")
+        mid = f"paper-auto-{candidate.candidate_id[:8]}-{ts}"
+
+        market_scope_raw = candidate.market_scope or {}
+        symbol = market_scope_raw.get("symbol") or ""
+        symbols = [symbol] if symbol else list(
+            market_scope_raw.get("symbols") or ["BTC-EUR"]
+        )
+        biome = candidate.biome or "crypto"
+
+        try:
+            mission = Mission(
+                mission_id=mid,
+                ant_type="paper_ant",
+                allowed_node=self._node_id,
+                allowed_actions=_PAPER_ALLOWED_ACTIONS,
+                market_scope=MarketScope(biome=biome, symbols=symbols),
+                capital_limit=_PAPER_CAPITAL,
+                risk_limits=RiskLimits(
+                    max_drawdown_pct=0.20,
+                    max_position_size=_PAPER_CAPITAL,
+                    daily_loss_limit=50.0,
+                    stop_loss_required=True,
+                ),
+                ttl=_PAPER_TTL,
+                heartbeat_interval=_PAPER_HEARTBEAT,
+                success_conditions=SuccessConditions(
+                    description=f"Paper test voor kandidaat {candidate.candidate_id[:8]}"
+                ),
+            )
+        except Exception:
+            logger.exception(
+                "Kan paper missie niet bouwen voor kandidaat %s", candidate.candidate_id
+            )
+            return
+
+        result = self._queen.issue_mission(mission)
+        if result.accepted:
+            logger.info(
+                "Paper missie aangemaakt | mission_id=%s candidate=%s symbols=%s ttl=%dd capital=€%.0f",
+                mid, candidate.candidate_id[:8], symbols, _PAPER_TTL // 86400, _PAPER_CAPITAL,
+            )
+        else:
+            logger.warning(
+                "Paper missie geweigerd | mission_id=%s candidate=%s reden=%s",
+                mid, candidate.candidate_id[:8], result.rejection_reason,
+            )
 
     def _write_approved(self, candidate: StrategyCandidate) -> None:
         """Schrijf APPROVED kandidaat naar ANT_LOGS/approved/{candidate_id}.jsonl."""
