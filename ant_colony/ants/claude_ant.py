@@ -9,13 +9,15 @@ Verantwoordelijkheden:
   3. Parseert de JSON-response en schrijft verbeterde varianten naar ANT_LOGS/ingestion/
      zodat ze door de normale pipeline gaan (ResearchAnt → Promoter → PaperAnt)
   4. Schrijft analyse naar ANT_LOGS/claude/{ant_id}.jsonl
-  5. Rate limit: maximaal 1 API call per 5 minuten
-  6. Logt geschatte kosten per call
+  5. Rate limit: 1 call per 5 minuten (escalatie naar 1/uur bij 80% budget)
+  6. Maandelijks budget: CLAUDE_ANT_MONTHLY_BUDGET_EUR (default €10)
+  7. Logt geschatte kosten per call in ANT_LOGS/claude/costs.jsonl
 
 Regels:
   - Geen orders — alleen analyse en ingestion-voeding (P1)
   - Fail-closed — negeert alle exceptions (P2)
   - Vereist ANTHROPIC_API_KEY environment variabele
+  - CLAUDE_ANT_ENABLED=true vereist om te starten (opt-in)
   - Geen code wordt uitgevoerd bij import (P7)
 """
 
@@ -43,9 +45,11 @@ from ant_colony.schemas.strategy_candidate import (
 _MODEL             = "claude-sonnet-4-6"
 _MAX_TOKENS        = 2000
 _TOP_N_CANDIDATES  = 5
-_RATE_LIMIT_SECS   = 300.0   # 1 call per 5 minuten
+_RATE_LIMIT_FAST   = 300.0    # normaal: 1 call per 5 minuten
+_RATE_LIMIT_SLOW   = 3600.0   # bij 80% budget: 1 call per uur
+_BUDGET_WARN_PCT   = 0.80     # drempel voor rate limit escalatie
 
-# Ruwe kostenschatting: Sonnet $3/M input + $15/M output tokens
+# Kostenschatting in EUR: Sonnet €3/M input + €15/M output tokens
 _COST_PER_M_INPUT  = 3.0
 _COST_PER_M_OUTPUT = 15.0
 
@@ -102,18 +106,79 @@ class ClaudeAnt:
         self.scheduler = scheduler
         self.logs_root = logs_root
 
-        self._api_key        = api_key or os.getenv("ANTHROPIC_API_KEY", "")
-        self._log_seq: int   = 0
-        self._status         = AntStatus.IDLE
-        self._last_action    = "init"
-        self._last_api_call  = 0.0   # monotonic timestamp van laatste API call
-        self._total_cost_usd = 0.0
+        self._api_key       = api_key or os.getenv("ANTHROPIC_API_KEY", "")
+        self._log_seq: int  = 0
+        self._status        = AntStatus.IDLE
+        self._last_action   = "init"
+        self._last_api_call = 0.0   # monotonic timestamp van laatste API call
+
+        self._budget_eur = float(os.getenv("CLAUDE_ANT_MONTHLY_BUDGET_EUR", "10.0"))
+        self._month_cost_eur = self._load_month_costs()
+        self._total_cost_eur = self._month_cost_eur  # inclusief vorige maanden
 
         self._log = logging.getLogger(f"ant.claude.{ant_id[:8]}")
 
         if self.logs_root is not None:
             for subdir in ("claude", "ingestion"):
                 (self.logs_root / subdir).mkdir(parents=True, exist_ok=True)
+
+    # ------------------------------------------------------------------
+    # Budget helpers
+    # ------------------------------------------------------------------
+
+    @property
+    def _rate_limit(self) -> float:
+        """Effectieve rate limit: langzamer bij ≥80% budget."""
+        if self._budget_eur > 0 and self._month_cost_eur >= _BUDGET_WARN_PCT * self._budget_eur:
+            return _RATE_LIMIT_SLOW
+        return _RATE_LIMIT_FAST
+
+    def _load_month_costs(self) -> float:
+        """Som van kosten in ANT_LOGS/claude/costs.jsonl voor de huidige maand."""
+        if self.logs_root is None:
+            return 0.0
+        costs_path = self.logs_root / "claude" / "costs.jsonl"
+        if not costs_path.exists():
+            return 0.0
+        now = datetime.now(tz=timezone.utc)
+        total = 0.0
+        try:
+            for line in costs_path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                ts_str = rec.get("timestamp", "")
+                try:
+                    ts = datetime.fromisoformat(ts_str)
+                    if ts.year == now.year and ts.month == now.month:
+                        total += rec.get("cost_eur", 0.0)
+                except (ValueError, TypeError):
+                    pass
+        except OSError:
+            pass
+        return total
+
+    def _append_cost_record(self, cost_eur: float) -> None:
+        """Voeg kostenregel toe aan ANT_LOGS/claude/costs.jsonl."""
+        if self.logs_root is None:
+            return
+        costs_path = self.logs_root / "claude" / "costs.jsonl"
+        record = {
+            "timestamp":    datetime.now(tz=timezone.utc).isoformat(),
+            "ant_id":       self.ant_id,
+            "cost_eur":     round(cost_eur, 6),
+            "month_total":  round(self._month_cost_eur, 6),
+            "budget_eur":   self._budget_eur,
+        }
+        try:
+            costs_path.parent.mkdir(parents=True, exist_ok=True)
+            with costs_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record) + "\n")
+        except OSError:
+            self._log.exception("Kon cost record niet schrijven: %s", costs_path)
 
     # ------------------------------------------------------------------
     # Publieke interface
@@ -123,10 +188,11 @@ class ClaudeAnt:
         """Blokkerende tick-loop."""
         self._status = AntStatus.RUNNING
         self._log.info(
-            "ClaudeAnt gestart | mission=%s ttl=%ds model=%s",
+            "ClaudeAnt gestart | mission=%s ttl=%ds model=%s budget=€%.2f",
             self.mission.mission_id,
             self.mission.ttl,
             _MODEL,
+            self._budget_eur,
         )
 
         if not self._api_key:
@@ -153,6 +219,9 @@ class ClaudeAnt:
 
                 self._tick()
 
+                if self._status != AntStatus.RUNNING:
+                    break
+
                 if (now - last_heartbeat).total_seconds() >= self.mission.heartbeat_interval:
                     self._send_heartbeat()
                     last_heartbeat = datetime.now(tz=timezone.utc)
@@ -168,8 +237,8 @@ class ClaudeAnt:
         finally:
             self._send_heartbeat()
             self._log.info(
-                "ClaudeAnt gestopt | status=%s total_cost=$%.4f",
-                self._status.value, self._total_cost_usd,
+                "ClaudeAnt gestopt | status=%s month_cost=€%.4f budget=€%.2f",
+                self._status.value, self._month_cost_eur, self._budget_eur,
             )
 
         return self._status
@@ -181,9 +250,23 @@ class ClaudeAnt:
     def _tick(self) -> None:
         """Één analyse-cyclus: lees top-kandidaten en analyseer via Claude."""
         try:
+            # Budget volledig verbruikt → stop zichzelf
+            if self._budget_eur > 0 and self._month_cost_eur >= self._budget_eur:
+                self._log.error(
+                    "Maandbudget volledig verbruikt (€%.4f / €%.2f) — ClaudeAnt stopt.",
+                    self._month_cost_eur, self._budget_eur,
+                )
+                self._write_claude_log("BUDGET_EXCEEDED", {
+                    "month_cost_eur": round(self._month_cost_eur, 6),
+                    "budget_eur":     self._budget_eur,
+                })
+                self._status = AntStatus.ABORTED
+                return
+
             elapsed_since_call = time.monotonic() - self._last_api_call
-            if elapsed_since_call < _RATE_LIMIT_SECS:
-                remaining = _RATE_LIMIT_SECS - elapsed_since_call
+            effective_limit    = self._rate_limit
+            if elapsed_since_call < effective_limit:
+                remaining = effective_limit - elapsed_since_call
                 self._log.debug(
                     "Rate limit — nog %.0fs wachten voor volgende API call", remaining
                 )
@@ -252,8 +335,8 @@ class ClaudeAnt:
         prompt = _PROMPT_TEMPLATE.format(candidates_json=candidates_json)
 
         self._log.info(
-            "Claude API call | model=%s candidates=%d",
-            _MODEL, len(candidates),
+            "Claude API call | model=%s candidates=%d month_cost=€%.4f/€%.2f",
+            _MODEL, len(candidates), self._month_cost_eur, self._budget_eur,
         )
         self._last_api_call = time.monotonic()
 
@@ -271,15 +354,27 @@ class ClaudeAnt:
         response_text   = message.content[0].text if message.content else ""
         input_tokens    = message.usage.input_tokens  if message.usage else 0
         output_tokens   = message.usage.output_tokens if message.usage else 0
-        cost_usd        = (
+        cost_eur        = (
             (input_tokens  / 1_000_000) * _COST_PER_M_INPUT
             + (output_tokens / 1_000_000) * _COST_PER_M_OUTPUT
         )
-        self._total_cost_usd += cost_usd
+        self._month_cost_eur += cost_eur
+        self._total_cost_eur += cost_eur
+        self._append_cost_record(cost_eur)
+
+        # Waarschuwing bij 80% budget
+        if self._budget_eur > 0:
+            usage_pct = self._month_cost_eur / self._budget_eur
+            if usage_pct >= _BUDGET_WARN_PCT:
+                self._log.warning(
+                    "Budget waarschuwing: %.0f%% van €%.2f verbruikt (€%.4f) — "
+                    "rate limit verlaagd naar 1 call/uur",
+                    usage_pct * 100, self._budget_eur, self._month_cost_eur,
+                )
 
         self._log.info(
-            "Claude response ontvangen | input_tokens=%d output_tokens=%d cost=$%.4f",
-            input_tokens, output_tokens, cost_usd,
+            "Claude response ontvangen | input_tokens=%d output_tokens=%d cost=€%.4f",
+            input_tokens, output_tokens, cost_eur,
         )
 
         analyses = self._parse_response(response_text)
@@ -297,15 +392,19 @@ class ClaudeAnt:
             "variants_written":    variants_written,
             "input_tokens":        input_tokens,
             "output_tokens":       output_tokens,
-            "cost_usd":            round(cost_usd, 6),
-            "total_cost_usd":      round(self._total_cost_usd, 6),
+            "cost_usd":            round(cost_eur, 6),   # naam behouden voor backwards compat tests
+            "cost_eur":            round(cost_eur, 6),
+            "total_cost_usd":      round(self._total_cost_eur, 6),
+            "total_cost_eur":      round(self._total_cost_eur, 6),
+            "month_cost_eur":      round(self._month_cost_eur, 6),
+            "budget_eur":          self._budget_eur,
             "analyses":            analyses,
         })
 
         self._last_action = f"claude:{len(candidates)}cands:{variants_written}variants"
         self._log.info(
-            "Claude analyse klaar | kandidaten=%d varianten_geschreven=%d cost=$%.4f",
-            len(candidates), variants_written, cost_usd,
+            "Claude analyse klaar | kandidaten=%d varianten_geschreven=%d cost=€%.4f",
+            len(candidates), variants_written, cost_eur,
         )
 
     def _parse_response(self, text: str) -> list[dict]:

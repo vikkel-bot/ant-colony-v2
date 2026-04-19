@@ -865,6 +865,88 @@ def main() -> None:
     except Exception:
         log.exception("Mission bootstrap mislukt — colony start toch door.")
 
+    # --- Stap 8c: ClaudeAnt (opt-in, eigen try-blok zodat andere fouten het niet blokkeren) ---
+    try:
+        _claude_enabled = os.getenv("CLAUDE_ANT_ENABLED", "false").lower() == "true"
+        if _claude_enabled:
+            from ant_colony.ants.claude_ant import ClaudeAnt
+            from ant_colony.colony.scheduler.colony_scheduler import AgentRecord
+            from ant_colony.schemas.mission import (
+                AbortConditions,
+                MarketScope,
+                Mission,
+                RiskLimits,
+                SuccessConditions,
+            )
+
+            _ts_claude   = datetime.now(tz=timezone.utc).strftime("%Y%m%d-%H%M%S")
+            _obs_risk_c  = RiskLimits(
+                max_drawdown_pct=0.01, max_position_size=1.0,
+                daily_loss_limit=1.0, stop_loss_required=False,
+            )
+            _crypto_scope_c = MarketScope(
+                biome="crypto",
+                symbols=["BTC-EUR", "ETH-EUR", "SOL-EUR"],
+                timeframes=["1h", "4h", "1d"],
+            )
+            claude_ant_id  = f"ant-claude-{_ts_claude}"
+            claude_mission = Mission(
+                mission_id=f"claude-{_ts_claude}",
+                ant_type="claude_ant",
+                allowed_node=args.node_id,
+                allowed_actions=["read_data", "report"],
+                market_scope=_crypto_scope_c,
+                capital_limit=0.0,
+                risk_limits=_obs_risk_c,
+                ttl=86400,
+                heartbeat_interval=300,
+                success_conditions=SuccessConditions(
+                    description="Analyseer top-kandidaten via Anthropic API en genereer varianten.",
+                ),
+                abort_conditions=AbortConditions(
+                    stale_heartbeat=True,
+                    capital_limit_breach=False,
+                    risk_limit_breach=False,
+                    ttl_expired=True,
+                ),
+            )
+            result = queen.issue_mission(claude_mission)
+            if not result.accepted:
+                log.warning(
+                    "ClaudeAnt missie geweigerd: %s — %s",
+                    result.rejection_reason, result.rejection_detail,
+                )
+            else:
+                claude_ant = ClaudeAnt(
+                    ant_id=claude_ant_id,
+                    mission=claude_mission,
+                    scheduler=scheduler,
+                    logs_root=logs_root,
+                )
+                threading.Thread(
+                    target=claude_ant.run,
+                    name=f"claude-{claude_ant_id[:16]}",
+                    daemon=True,
+                ).start()
+                scheduler.register_agent(AgentRecord(
+                    ant_id=claude_ant_id,
+                    mission_id=claude_mission.mission_id,
+                    node_id=args.node_id,
+                    ant_type="claude_ant",
+                    ttl=claude_mission.ttl,
+                    heartbeat_interval=claude_mission.heartbeat_interval,
+                ))
+                log.info(
+                    "ClaudeAnt gestart | ant_id=%s  budget=€%.2f  ttl=%ds",
+                    claude_ant_id,
+                    float(os.getenv("CLAUDE_ANT_MONTHLY_BUDGET_EUR", "10.0")),
+                    claude_mission.ttl,
+                )
+        else:
+            log.info("ClaudeAnt uitgeschakeld (opt-in vereist — zet CLAUDE_ANT_ENABLED=true).")
+    except Exception:
+        log.exception("ClaudeAnt bootstrap mislukt — colony draait door zonder ClaudeAnt.")
+
     # --- Stap 9: bouw ColonyContext en start dashboard (blocking) ---
     context = ColonyContext(
         queen=queen,

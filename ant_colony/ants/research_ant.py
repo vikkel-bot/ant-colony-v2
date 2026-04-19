@@ -47,8 +47,8 @@ from ant_colony.schemas.strategy_candidate import (
 
 _MIN_CANDLES        = 52    # SMA50 + 2 bars voor crossover detectie
 _CANDLE_LIMIT       = 500   # candles ophalen per symbool per tick (verhoogd voor betrouwbaardere backtests)
-_SHARPE_THRESHOLD   = 0.30
-_WIN_RATE_THRESHOLD = 0.50
+_SHARPE_THRESHOLD   = 0.15
+_WIN_RATE_THRESHOLD = 0.45
 _TP_PCT             = 0.06  # 6 % take-profit voor backtests
 _SL_PCT             = 0.03  # 3 % stop-loss voor backtests
 _MAX_BARS_HELD      = 10

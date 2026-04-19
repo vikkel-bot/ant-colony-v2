@@ -219,5 +219,31 @@ execution gate blokkeert live orders tot Queen expliciete toestemming geeft.
 
 ---
 
+---
+
+## Environment variabelen
+
+Zet deze in een `.env` bestand of in de Windows omgevingsvariabelen op PC2:
+
+```
+# Bitvavo
+BITVAVO_API_KEY=...
+BITVAVO_API_SECRET=...
+BITVAVO_PAPER_MODE=true
+
+# Claude Ant (opt-in, default uitgeschakeld)
+ANTHROPIC_API_KEY=...
+CLAUDE_ANT_ENABLED=false
+CLAUDE_ANT_MONTHLY_BUDGET_EUR=10.00
+```
+
+**CLAUDE_ANT_ENABLED**: Zet op `true` om ClaudeAnt te starten. Default `false` (opt-in,
+nooit per ongeluk aan). Bij `false` toont het dashboard Claude Ant als uitgeschakeld.
+
+**CLAUDE_ANT_MONTHLY_BUDGET_EUR**: Maandelijks kostenlimiet in EUR. Bij 80% verlaagt
+ClaudeAnt de rate limit naar 1 call/uur. Bij 100% stopt ClaudeAnt zichzelf.
+
+---
+
 *Dit bestand bijhouden bij elke fase-overgang.*
-*Laatste update: 2026-04-16 — fases 0–9 afgesloten, fase 10 gestart*
+*Laatste update: 2026-04-19 — ClaudeAnt budget + aan/uit schakelaar toegevoegd*

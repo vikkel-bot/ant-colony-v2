@@ -31,6 +31,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from ant_colony.ants.claude_ant import ClaudeAnt
+from ant_colony.schemas.ant import AntStatus
 from ant_colony.schemas.mission import (
     AbortConditions,
     MarketScope,
@@ -358,3 +359,124 @@ def test_parse_response_dict_wrapped_in_list(tmp_path: Path) -> None:
     single = json.dumps({"candidate_id": "x", "confidence": 5, "improved_variant": {}})
     result = ant._parse_response(single)
     assert len(result) == 1
+
+
+# ---------------------------------------------------------------------------
+# Budget tracking tests
+# ---------------------------------------------------------------------------
+
+def _write_cost_record(tmp_path: Path, cost_eur: float, year: int, month: int) -> None:
+    """Schrijf een kostenregel naar ANT_LOGS/claude/costs.jsonl."""
+    costs_path = tmp_path / "claude" / "costs.jsonl"
+    costs_path.parent.mkdir(parents=True, exist_ok=True)
+    from datetime import datetime, timezone
+    ts = datetime(year, month, 1, tzinfo=timezone.utc).isoformat()
+    record = {"timestamp": ts, "ant_id": "test", "cost_eur": cost_eur, "month_total": cost_eur, "budget_eur": 10.0}
+    with costs_path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record) + "\n")
+
+
+def test_load_month_costs_empty(tmp_path: Path) -> None:
+    """Geen costs.jsonl → 0.0."""
+    ant = make_ant(tmp_path)
+    assert ant._load_month_costs() == 0.0
+
+
+def test_load_month_costs_current_month(tmp_path: Path) -> None:
+    """Kosten in huidige maand worden opgeteld."""
+    from datetime import datetime, timezone
+    now = datetime.now(tz=timezone.utc)
+    _write_cost_record(tmp_path, 2.50, now.year, now.month)
+    _write_cost_record(tmp_path, 1.00, now.year, now.month)
+    ant = make_ant(tmp_path)
+    assert abs(ant._month_cost_eur - 3.50) < 1e-6
+
+
+def test_load_month_costs_ignores_other_months(tmp_path: Path) -> None:
+    """Kosten uit andere maanden worden genegeerd."""
+    from datetime import datetime, timezone
+    now = datetime.now(tz=timezone.utc)
+    prev_month = 12 if now.month == 1 else now.month - 1
+    prev_year  = now.year - 1 if now.month == 1 else now.year
+    _write_cost_record(tmp_path, 9.99, prev_year, prev_month)
+    ant = make_ant(tmp_path)
+    assert ant._month_cost_eur == 0.0
+
+
+def test_append_cost_record_creates_file(tmp_path: Path) -> None:
+    """_append_cost_record schrijft naar costs.jsonl."""
+    ant = make_ant(tmp_path)
+    ant._append_cost_record(0.05)
+    costs_path = tmp_path / "claude" / "costs.jsonl"
+    assert costs_path.exists()
+    rec = json.loads(costs_path.read_text(encoding="utf-8").strip())
+    assert rec["cost_eur"] == 0.05
+
+
+def test_rate_limit_fast_below_budget_warn(tmp_path: Path) -> None:
+    """Onder 80% budget → rate limit = 300s."""
+    ant = make_ant(tmp_path)
+    ant._month_cost_eur = 7.9   # 79% van €10
+    assert ant._rate_limit == 300.0
+
+
+def test_rate_limit_slow_at_budget_warn(tmp_path: Path) -> None:
+    """≥80% budget → rate limit = 3600s."""
+    ant = make_ant(tmp_path)
+    ant._month_cost_eur = 8.0   # 80% van €10
+    assert ant._rate_limit == 3600.0
+
+
+def test_budget_exceeded_sets_aborted(tmp_path: Path) -> None:
+    """Bij 100% budget → _tick() zet status op ABORTED."""
+    ant = make_ant(tmp_path)
+    ant._status = AntStatus.RUNNING
+    ant._month_cost_eur = 10.0   # 100% van €10
+    ant._tick()
+    assert ant._status == AntStatus.ABORTED
+
+
+def test_budget_exceeded_writes_log(tmp_path: Path) -> None:
+    """Bij budget overschrijding wordt BUDGET_EXCEEDED gelogd."""
+    ant = make_ant(tmp_path)
+    ant._status = AntStatus.RUNNING
+    ant._month_cost_eur = 10.0
+    ant._tick()
+    logs = read_claude_log(tmp_path, ant.ant_id)
+    assert any(r.get("payload", {}).get("action") == "BUDGET_EXCEEDED" for r in logs)
+
+
+def test_cost_appended_after_api_call(tmp_path: Path) -> None:
+    """Na een succesvolle API call wordt kostenregel geschreven naar costs.jsonl."""
+    ant = make_ant(tmp_path)
+    write_research_record(tmp_path)
+
+    mock_msg = make_mock_anthropic_response(_VALID_ANALYSIS_JSON)
+
+    with patch("anthropic.Anthropic") as mock_cls:
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.messages.create.return_value = mock_msg
+        ant._analyse_with_claude(ant._read_top_candidates())
+
+    costs_path = tmp_path / "claude" / "costs.jsonl"
+    assert costs_path.exists()
+
+
+def test_budget_info_in_claude_log(tmp_path: Path) -> None:
+    """claude log bevat month_cost_eur en budget_eur na analyse."""
+    ant = make_ant(tmp_path)
+    write_research_record(tmp_path)
+
+    mock_msg = make_mock_anthropic_response(_VALID_ANALYSIS_JSON)
+
+    with patch("anthropic.Anthropic") as mock_cls:
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.messages.create.return_value = mock_msg
+        ant._analyse_with_claude(ant._read_top_candidates())
+
+    logs = read_claude_log(tmp_path, ant.ant_id)
+    payload = logs[0]["payload"]
+    assert "month_cost_eur" in payload
+    assert "budget_eur"     in payload

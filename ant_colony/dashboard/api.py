@@ -1308,5 +1308,18 @@ def _build_ant_summary(ant_type: str, all_recs: list[dict], stats: AntStatsEntry
         return f"{n} inputs verwerkt vandaag — laatste: {action}"
     if ant_type == "claude_ant":
         n = stats.variants_generated or 0
-        return f"{n} Claude-analyses vandaag — laatste: {action}"
+        # Toon budget info uit meest recente log record
+        month_cost = 0.0
+        budget = 10.0
+        for r in reversed(all_recs):
+            p = r.get("payload") or {}
+            if "month_cost_eur" in p:
+                month_cost = p["month_cost_eur"]
+                budget     = p.get("budget_eur", budget)
+                break
+            if "total_cost_usd" in p:
+                month_cost = p.get("month_cost_eur", p.get("total_cost_usd", 0.0))
+                budget     = p.get("budget_eur", budget)
+                break
+        return f"Claude Ant · €{month_cost:.2f} gebruikt van €{budget:.2f} budget · {n} analyses"
     return f"Laatste actie: {action}"
