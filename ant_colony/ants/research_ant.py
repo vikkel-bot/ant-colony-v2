@@ -342,12 +342,21 @@ class ResearchAnt:
             else "1h"
         )
 
+        all_files = sorted(ingestion_dir.glob("*.jsonl"))
+        self._log.info(
+            "research — tick debug | ingestion_path=%s files=%d candidates_new=? candidates_seen=%d",
+            ingestion_dir, len(all_files), len(self._seen_ingestion_ids),
+        )
+
         new_count = 0
-        for path in sorted(ingestion_dir.glob("*.jsonl")):
+        for path in all_files:
             try:
-                for line in path.read_text(encoding="utf-8").splitlines():
-                    if not line.strip():
-                        continue
+                lines = [l for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
+                self._log.info(
+                    "research — tick debug | bestand=%s regels=%d", path.name, len(lines)
+                )
+                candidates_in_file = 0
+                for line in lines:
                     try:
                         record  = json.loads(line)
                         payload = record.get("payload") or {}
@@ -360,6 +369,7 @@ class ResearchAnt:
                     if payload.get("action") != "candidate_ingested":
                         continue
 
+                    candidates_in_file += 1
                     candidate_id = str(payload.get("candidate_id") or "")
                     if not candidate_id:
                         self._log.info(
@@ -382,14 +392,17 @@ class ResearchAnt:
                     self._seen_ingestion_ids.add(candidate_id)
                     new_count += 1
                     self._backtest_ingested_candidate(candidate_id, payload, biome_id, timeframe)
+
+                self._log.info(
+                    "research — tick debug | bestand=%s kandidaten_na_filter=%d",
+                    path.name, candidates_in_file,
+                )
             except OSError:
                 self._log.warning("Kan ingestion-log niet lezen: %s", path)
 
         self._log.info(
-            "Ingestion scan klaar | nieuw=%d totaal_gezien=%d bestand=%s",
-            new_count,
-            len(self._seen_ingestion_ids),
-            ingestion_dir,
+            "research — tick debug | ingestion_path=%s files=%d candidates_new=%d candidates_seen=%d",
+            ingestion_dir, len(all_files), new_count, len(self._seen_ingestion_ids),
         )
 
     def _backtest_ingested_candidate(
