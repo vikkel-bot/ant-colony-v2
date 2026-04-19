@@ -35,6 +35,7 @@ Installatie: pip install "ib_insync>=0.9.70"
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import uuid
@@ -308,10 +309,20 @@ class IBKRAdapter:
             True bij succesvolle verbinding, False bij fout.
         """
         try:
+            # ib_insync gebruikt asyncio intern. Python 3.12+ maakt geen
+            # impliciete event loop aan in worker threads — fix dat hier
+            # zodat ib_insync altijd een bruikbare loop aantreft.
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_closed():
+                    raise RuntimeError("loop is closed")
+            except RuntimeError:
+                asyncio.set_event_loop(asyncio.new_event_loop())
+
             from ib_insync import IB
 
-            host_     = host      or self._host
-            port_     = port      or self._port
+            host_      = host      or self._host
+            port_      = port      or self._port
             client_id_ = client_id or self._client_id
 
             if self._ib is not None:
