@@ -274,6 +274,53 @@ class AntActivityResponse(BaseModel):
     ants: list[AntActivityEntry]
 
 
+class EquitiesSectorEntry(BaseModel):
+    symbol: str
+    sector: str
+    return_3mo: float
+    rank: int
+    signal: str            # "LONG" | "NEUTRAL"
+    emitted_at: str | None = None
+
+
+class EquitiesPiotroskiEntry(BaseModel):
+    symbol: str
+    f_score: int
+    evaluated_at: str | None = None
+
+
+class EquitiesBreakoutEntry(BaseModel):
+    symbol: str
+    entry_price: float
+    sl_price: float
+    tp_price: float
+    distance_to_high: float
+    emitted_at: str | None = None
+
+
+class EquitiesDividendEntry(BaseModel):
+    symbol: str
+    dividend_yield: float
+    consecutive_years: int
+    payout_ratio: float
+    emitted_at: str | None = None
+
+
+class EquitiesStatusResponse(BaseModel):
+    enabled: bool
+    sector_long: list[EquitiesSectorEntry]      # top 3 LONG sectoren
+    sector_neutral: list[EquitiesSectorEntry]   # bottom 3 NEUTRAL
+    piotroski_candidates: list[EquitiesPiotroskiEntry]
+    breakout_signals: list[EquitiesBreakoutEntry]
+    dividend_candidates: list[EquitiesDividendEntry]
+    vix_level: float | None = None
+    vix_signal: str | None = None               # "HEDGE" | "NORMAL" | None
+    last_sector_ts: str | None = None
+    last_piotroski_ts: str | None = None
+    last_breakout_ts: str | None = None
+    last_dividend_ts: str | None = None
+
+
 # ---------------------------------------------------------------------------
 # Colony v1 — scan helpers
 # ---------------------------------------------------------------------------
@@ -1043,6 +1090,39 @@ def create_router(ctx: ColonyContext) -> APIRouter:
             last_decision=data["last_decision"],
         )
 
+    # ------------------------------------------------------------------
+    # GET /api/equities/status
+    # ------------------------------------------------------------------
+
+    @router.get("/equities/status", response_model=EquitiesStatusResponse)
+    def get_equities_status() -> EquitiesStatusResponse:
+        """Equities biome status: sector rotatie, Piotroski, breakout en dividend."""
+        import os
+        enabled = os.getenv("EQUITIES_ENABLED", "false").lower() == "true"
+
+        if ctx.logs_root is None:
+            return EquitiesStatusResponse(
+                enabled=enabled,
+                sector_long=[], sector_neutral=[],
+                piotroski_candidates=[], breakout_signals=[], dividend_candidates=[],
+            )
+
+        data = _read_equities_data(ctx.logs_root)
+        return EquitiesStatusResponse(
+            enabled=enabled,
+            sector_long=[EquitiesSectorEntry(**e) for e in data["sector_long"]],
+            sector_neutral=[EquitiesSectorEntry(**e) for e in data["sector_neutral"]],
+            piotroski_candidates=[EquitiesPiotroskiEntry(**e) for e in data["piotroski_candidates"]],
+            breakout_signals=[EquitiesBreakoutEntry(**e) for e in data["breakout_signals"]],
+            dividend_candidates=[EquitiesDividendEntry(**e) for e in data["dividend_candidates"]],
+            vix_level=data["vix_level"],
+            vix_signal=data["vix_signal"],
+            last_sector_ts=data["last_sector_ts"],
+            last_piotroski_ts=data["last_piotroski_ts"],
+            last_breakout_ts=data["last_breakout_ts"],
+            last_dividend_ts=data["last_dividend_ts"],
+        )
+
     return router
 
 
@@ -1595,3 +1675,179 @@ def _read_queen_status_data(logs_root: Path) -> dict:
             pass
 
     return {"regime": regime, "top_strategies": top_strategies, "last_decision": last_decision}
+
+
+# ---------------------------------------------------------------------------
+# Intern — equities log reader
+# ---------------------------------------------------------------------------
+
+def _scan_jsonl_dir(log_dir: Path, action: str) -> list[dict]:
+    """
+    Lees alle payloads met het gegeven action uit *.jsonl bestanden in log_dir.
+    Retourneert lijst van payload-dicts (ongesorteerd).
+    """
+    results: list[dict] = []
+    if not log_dir.exists():
+        return results
+    try:
+        for path in sorted(log_dir.glob("*.jsonl")):
+            try:
+                with path.open("r", encoding="utf-8") as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            rec = json.loads(line)
+                            payload = rec.get("payload") or {}
+                            if payload.get("action") == action:
+                                results.append(payload)
+                        except json.JSONDecodeError:
+                            pass
+            except OSError:
+                pass
+    except Exception:
+        pass
+    return results
+
+
+def _latest_per_symbol(entries: list[dict], ts_key: str = "emitted_at") -> dict[str, dict]:
+    """Dedupliceer op 'symbol', behoud de meest recente entry per symbol."""
+    latest: dict[str, dict] = {}
+    for e in entries:
+        sym = e.get("symbol", "")
+        if not sym:
+            continue
+        existing = latest.get(sym)
+        if existing is None:
+            latest[sym] = e
+        else:
+            ts_new = _parse_ts(e.get(ts_key))
+            ts_old = _parse_ts(existing.get(ts_key))
+            if ts_new and (ts_old is None or ts_new > ts_old):
+                latest[sym] = e
+    return latest
+
+
+def _read_equities_data(logs_root: Path) -> dict:
+    """
+    Lees sector rotatie, Piotroski, breakout en dividend data uit equities logs.
+
+    Directories:
+      logs_root/scouts/          → opportunity_detected (sector rotatie)
+      logs_root/equities/piotroski/ → piotroski_candidate
+      logs_root/equities/breakout/  → breakout_signal
+      logs_root/equities/dividend/  → dividend_candidate
+    """
+    # ── Sector rotatie ──────────────────────────────────────────────────
+    sector_raw = _scan_jsonl_dir(logs_root / "scouts", "opportunity_detected")
+    sector_by_sym = _latest_per_symbol(sector_raw, ts_key="emitted_at")
+
+    sector_long: list[dict] = []
+    sector_neutral: list[dict] = []
+    last_sector_ts: str | None = None
+
+    for sym, p in sector_by_sym.items():
+        entry = {
+            "symbol":     sym,
+            "sector":     p.get("sector_name") or p.get("sector") or sym,
+            "return_3mo": round(float(p.get("change_pct") or p.get("return_3mo") or 0), 6),
+            "rank":       int(p.get("momentum_rank") or p.get("rank") or 0),
+            "signal":     p.get("signal_type") or p.get("signal") or "NEUTRAL",
+            "emitted_at": p.get("emitted_at"),
+        }
+        if entry["signal"] == "LONG":
+            sector_long.append(entry)
+        else:
+            sector_neutral.append(entry)
+        ts = p.get("emitted_at")
+        if ts and (last_sector_ts is None or ts > last_sector_ts):
+            last_sector_ts = ts
+
+    sector_long    = sorted(sector_long,    key=lambda x: x["rank"])[:3]
+    sector_neutral = sorted(sector_neutral, key=lambda x: x["rank"])[-3:]
+
+    # ── Piotroski ───────────────────────────────────────────────────────
+    piotroski_raw = _scan_jsonl_dir(logs_root / "equities" / "piotroski", "piotroski_candidate")
+    piotroski_by_sym = _latest_per_symbol(piotroski_raw, ts_key="evaluated_at")
+
+    piotroski_candidates: list[dict] = []
+    last_piotroski_ts: str | None = None
+
+    for sym, p in piotroski_by_sym.items():
+        piotroski_candidates.append({
+            "symbol":       sym,
+            "f_score":      int(p.get("f_score") or 0),
+            "evaluated_at": p.get("evaluated_at"),
+        })
+        ts = p.get("evaluated_at")
+        if ts and (last_piotroski_ts is None or ts > last_piotroski_ts):
+            last_piotroski_ts = ts
+
+    piotroski_candidates = sorted(piotroski_candidates, key=lambda x: x["f_score"], reverse=True)
+
+    # ── Breakout ────────────────────────────────────────────────────────
+    breakout_raw = _scan_jsonl_dir(logs_root / "equities" / "breakout", "breakout_signal")
+    breakout_by_sym = _latest_per_symbol(breakout_raw, ts_key="emitted_at")
+
+    breakout_signals: list[dict] = []
+    last_breakout_ts: str | None = None
+
+    for sym, p in breakout_by_sym.items():
+        breakout_signals.append({
+            "symbol":           sym,
+            "entry_price":      float(p.get("entry_price") or 0),
+            "sl_price":         float(p.get("sl_price") or 0),
+            "tp_price":         float(p.get("tp_price") or 0),
+            "distance_to_high": float(p.get("distance_to_high") or 0),
+            "emitted_at":       p.get("emitted_at"),
+        })
+        ts = p.get("emitted_at")
+        if ts and (last_breakout_ts is None or ts > last_breakout_ts):
+            last_breakout_ts = ts
+
+    breakout_signals = sorted(breakout_signals, key=lambda x: x["emitted_at"] or "", reverse=True)
+
+    # ── Dividend ────────────────────────────────────────────────────────
+    dividend_raw = _scan_jsonl_dir(logs_root / "equities" / "dividend", "dividend_candidate")
+    dividend_by_sym = _latest_per_symbol(dividend_raw, ts_key="emitted_at")
+
+    dividend_candidates: list[dict] = []
+    vix_level: float | None = None
+    vix_signal: str | None = None
+    last_dividend_ts: str | None = None
+
+    for sym, p in dividend_by_sym.items():
+        dividend_candidates.append({
+            "symbol":            sym,
+            "dividend_yield":    float(p.get("dividend_yield") or 0),
+            "consecutive_years": int(p.get("consecutive_years") or 0),
+            "payout_ratio":      float(p.get("payout_ratio") or 0),
+            "emitted_at":        p.get("emitted_at"),
+        })
+        # VIX uit willekeurige kandidaat (alle entries hebben dezelfde VIX snapshot)
+        if vix_level is None and p.get("vix_level") is not None:
+            try:
+                vix_level = float(p["vix_level"])
+                vix_signal = str(p.get("vix_signal") or "NORMAL")
+            except (TypeError, ValueError):
+                pass
+        ts = p.get("emitted_at")
+        if ts and (last_dividend_ts is None or ts > last_dividend_ts):
+            last_dividend_ts = ts
+
+    dividend_candidates = sorted(dividend_candidates, key=lambda x: x["dividend_yield"], reverse=True)[:5]
+
+    return {
+        "sector_long":           sector_long,
+        "sector_neutral":        sector_neutral,
+        "piotroski_candidates":  piotroski_candidates,
+        "breakout_signals":      breakout_signals,
+        "dividend_candidates":   dividend_candidates,
+        "vix_level":             vix_level,
+        "vix_signal":            vix_signal,
+        "last_sector_ts":        last_sector_ts,
+        "last_piotroski_ts":     last_piotroski_ts,
+        "last_breakout_ts":      last_breakout_ts,
+        "last_dividend_ts":      last_dividend_ts,
+    }

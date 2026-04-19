@@ -510,6 +510,137 @@
       color: var(--faint); font-size: 11px;
     }
 
+    /* ── TABS ── */
+
+    #tab-bar {
+      display: flex;
+      gap: 2px;
+      padding: 6px 12px 0;
+      background: var(--bg);
+      flex-shrink: 0;
+    }
+
+    .tab-btn {
+      padding: 5px 16px;
+      font-size: 11px;
+      font-weight: 600;
+      border: 1px solid var(--border);
+      border-bottom: none;
+      border-radius: 5px 5px 0 0;
+      background: var(--bg);
+      color: var(--muted);
+      cursor: pointer;
+      letter-spacing: 0.3px;
+      transition: color 0.15s, background 0.15s;
+    }
+
+    .tab-btn.active {
+      background: var(--card);
+      color: var(--text);
+      border-color: var(--border);
+    }
+
+    .tab-btn.eq-tab.active { color: var(--equities); }
+
+    .tab-panel { display: none; flex: 1; overflow: hidden; min-height: 0; }
+    .tab-panel.active { display: flex; flex-direction: column; overflow: hidden; }
+
+    /* ── EQUITIES PANEL ── */
+
+    #panel-equities {
+      padding: 8px 12px 10px;
+      overflow-y: auto;
+      gap: 10px;
+    }
+
+    .eq-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+      align-items: start;
+    }
+
+    .eq-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 8px;
+    }
+
+    .eq-badge {
+      font-size: 9px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      padding: 2px 6px;
+      border-radius: 3px;
+    }
+
+    .eq-badge.actief  { background: #d1fae5; color: #065f46; }
+    .eq-badge.signaal { background: #dbeafe; color: #1e40af; }
+    .eq-badge.wacht   { background: #f3f4f6; color: #6b7280; }
+
+    .eq-enabled-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 8px;
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    .eq-enabled-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--faint);
+    }
+
+    .eq-enabled-dot.on { background: var(--equities); }
+
+    .eq-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 5px 0;
+      border-bottom: 1px solid var(--border-soft);
+      font-size: 12px;
+    }
+
+    .eq-row:last-child { border-bottom: none; }
+
+    .eq-sym  { font-weight: 700; font-size: 12px; min-width: 50px; }
+    .eq-sect { color: var(--muted); font-size: 10px; flex: 1; margin: 0 6px; }
+    .eq-val  { font-size: 11px; font-variant-numeric: tabular-nums; }
+    .eq-pos  { color: var(--pnl-pos); }
+    .eq-neg  { color: var(--pnl-neg); }
+    .eq-mut  { color: var(--muted); }
+
+    .eq-score-pill {
+      font-size: 9px; font-weight: 700;
+      padding: 1px 5px; border-radius: 3px;
+      background: #dbeafe; color: #1e40af;
+    }
+
+    .vix-row {
+      margin-top: 8px;
+      padding: 5px 8px;
+      border-radius: 4px;
+      background: #f9fafb;
+      font-size: 11px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .vix-hedge { background: #fef3c7; color: #92400e; }
+    .vix-normal { background: #d1fae5; color: #065f46; }
+
+    .ts-line {
+      font-size: 9px;
+      color: var(--faint);
+      margin-top: 6px;
+    }
+
   </style>
 </head>
 <body>
@@ -589,6 +720,14 @@
     </div>
   </div>
 
+  <!-- Tab bar -->
+  <div id="tab-bar">
+    <button class="tab-btn active" onclick="switchTab('colony')">Colony</button>
+    <button class="tab-btn eq-tab" onclick="switchTab('equities')">&#9670; Equities</button>
+  </div>
+
+  <!-- ══ COLONY PANEL ══ -->
+  <div id="panel-colony" class="tab-panel active">
   <!-- two columns -->
   <div class="cols">
 
@@ -668,6 +807,14 @@
 
     </div>
   </div>
+  </div><!-- end panel-colony -->
+
+  <!-- ══ EQUITIES PANEL ══ -->
+  <div id="panel-equities" class="tab-panel">
+    <div id="equities-content" style="padding:8px 12px 10px;overflow-y:auto;flex:1">
+      <div class="empty">Laden…</div>
+    </div>
+  </div>
 
 </div>
 
@@ -688,6 +835,8 @@ const S = {
   activity:    { ants:[] },
   queenStatus: null,
   perfChart:   { points:[], total_pnl:0 },
+  equities:    null,
+  activeTab:   'colony',
   tickerIdx:   0,
   hbBase:      null,
   hbAt:        null,
@@ -746,11 +895,12 @@ function pnlCls(v) { return v > 0 ? 'pos' : v < 0 ? 'neg' : 'zero'; }
 
 async function fetchAll() {
   const get = url => fetch(url).then(r => r.json()).catch(() => null);
-  const [st, me, br, ti, v1s, v1p, act, qs, pc] = await Promise.all([
+  const [st, me, br, ti, v1s, v1p, act, qs, pc, eq] = await Promise.all([
     get('/api/status'), get('/api/metrics'),
     get('/api/brokers'), get('/api/ticker'),
     get('/api/v1status'), get('/api/v1positions'), get('/api/ants/activity'),
     get('/api/queen/status'), get('/api/performance/chart'),
+    get('/api/equities/status'),
   ]);
 
   if (st) {
@@ -765,6 +915,7 @@ async function fetchAll() {
   if (act) S.activity    = act;
   if (qs)  S.queenStatus = qs;
   if (pc)  S.perfChart   = pc;
+  if (eq)  S.equities    = eq;
 
   render();
 }
@@ -779,6 +930,7 @@ function render() {
   renderBrokers();
   renderV1();
   renderQueen();
+  renderEquities();
 }
 
 function renderStatus() {
@@ -1187,6 +1339,175 @@ async function sendOperatorInput() {
     btn.disabled = false;
     setTimeout(() => { msgEl.textContent = ''; msgEl.style.color = 'var(--muted)'; }, 5000);
   }
+}
+
+// ── Tab switching ──────────────────────────────
+
+function switchTab(name) {
+  S.activeTab = name;
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+  document.getElementById('panel-' + name).classList.add('active');
+  document.querySelector('.tab-btn.' + (name === 'equities' ? 'eq-tab' : 'tab-btn:not(.eq-tab)')).classList.add('active');
+  // simpler: match by onclick attribute pattern
+  document.querySelectorAll('.tab-btn').forEach(b => {
+    if (b.getAttribute('onclick') === "switchTab('" + name + "')") b.classList.add('active');
+  });
+}
+
+// ── Equities ──────────────────────────────────
+
+function fPct(v) {
+  if (v == null) return '—';
+  const sign = v >= 0 ? '+' : '';
+  return sign + (v * 100).toFixed(2) + '%';
+}
+
+function eqBadge(label, cls) {
+  return `<span class="eq-badge ${cls}">${label}</span>`;
+}
+
+function fTS(ts) {
+  if (!ts) return null;
+  try {
+    return new Date(ts).toLocaleString('nl-NL', {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'});
+  } catch { return null; }
+}
+
+function renderEquities() {
+  const el = document.getElementById('equities-content');
+  const eq = S.equities;
+  if (!eq) { el.innerHTML = '<div class="empty">Equities data laden…</div>'; return; }
+
+  const EQ_COLOR = '#378ADD';
+
+  // EQUITIES_ENABLED toggle
+  const dotCls = eq.enabled ? 'on' : '';
+  const statusTxt = eq.enabled ? 'EQUITIES_ENABLED = true · mieren actief' : 'EQUITIES_ENABLED = false · mieren uitgeschakeld';
+  const enabledHtml = `<div class="eq-enabled-row">
+    <div class="eq-enabled-dot ${dotCls}"></div>
+    <span>${statusTxt}</span>
+  </div>`;
+
+  // ── SECTOR ROTATIE ──────────────────────────
+  const sectorLong    = eq.sector_long    || [];
+  const sectorNeutral = eq.sector_neutral || [];
+  const sectorAll     = [...sectorLong, ...sectorNeutral];
+  const sectorBadge   = sectorLong.length > 0 ? eqBadge('actief', 'actief') : eqBadge('wacht', 'wacht');
+  const sectorTS      = fTS(eq.last_sector_ts);
+
+  let sectorRows = '';
+  if (!sectorAll.length) {
+    sectorRows = '<div class="empty" style="padding:8px 0">Nog geen sector signals</div>';
+  } else {
+    sectorRows = sectorAll.map(s => {
+      const retCls = s.return_3mo >= 0 ? 'eq-pos' : 'eq-neg';
+      const sigStyle = s.signal === 'LONG'
+        ? `color:${EQ_COLOR};font-weight:700`
+        : 'color:var(--faint)';
+      return `<div class="eq-row">
+        <span class="eq-sym">${s.symbol}</span>
+        <span class="eq-sect">${s.sector}</span>
+        <span class="eq-val ${retCls}">${fPct(s.return_3mo)}</span>
+        <span class="eq-val" style="${sigStyle};margin-left:6px;font-size:10px">${s.signal}</span>
+      </div>`;
+    }).join('');
+  }
+
+  const sectorCard = `<div class="card">
+    <div class="eq-header">
+      <div class="card-title" style="margin:0">Sector Rotatie</div>
+      ${sectorBadge}
+    </div>
+    ${sectorRows}
+    ${sectorTS ? `<div class="ts-line">Laatste signal: ${sectorTS}</div>` : ''}
+  </div>`;
+
+  // ── PIOTROSKI + BREAKOUT ─────────────────────
+  const piotList   = eq.piotroski_candidates || [];
+  const brkList    = eq.breakout_signals     || [];
+  const piotBadge  = brkList.length > 0
+    ? eqBadge('signaal', 'signaal')
+    : piotList.length > 0
+      ? eqBadge('actief', 'actief')
+      : eqBadge('wacht', 'wacht');
+
+  let piotRows = '';
+  if (!piotList.length && !brkList.length) {
+    piotRows = '<div class="empty" style="padding:8px 0">Nog geen Piotroski kandidaten</div>';
+  } else {
+    // Breakout signals first
+    if (brkList.length) {
+      piotRows += `<div style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--faint);margin:4px 0 2px">Breakout signalen</div>`;
+      piotRows += brkList.slice(0, 5).map(b => `<div class="eq-row">
+        <span class="eq-sym">${b.symbol}</span>
+        <span class="eq-sect">entry ${fPrice2(b.entry_price)}</span>
+        <span class="eq-val eq-neg">SL ${fPrice2(b.sl_price)}</span>
+        <span class="eq-val eq-pos" style="margin-left:4px">TP ${fPrice2(b.tp_price)}</span>
+      </div>`).join('');
+    }
+    if (piotList.length) {
+      piotRows += `<div style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--faint);margin:6px 0 2px">F-Score kandidaten</div>`;
+      piotRows += piotList.slice(0, 5).map(p => `<div class="eq-row">
+        <span class="eq-sym">${p.symbol}</span>
+        <span class="eq-sect" style="flex:1"></span>
+        <span class="eq-score-pill">F${p.f_score}</span>
+      </div>`).join('');
+    }
+  }
+
+  const piotTS = fTS(eq.last_breakout_ts || eq.last_piotroski_ts);
+  const piotCard = `<div class="card">
+    <div class="eq-header">
+      <div class="card-title" style="margin:0">Piotroski · Breakout</div>
+      ${piotBadge}
+    </div>
+    ${piotRows}
+    ${piotTS ? `<div class="ts-line">Laatste update: ${piotTS}</div>` : ''}
+  </div>`;
+
+  // ── DIVIDEND + VIX ───────────────────────────
+  const divList  = eq.dividend_candidates || [];
+  const divBadge = divList.length > 0 ? eqBadge('actief', 'actief') : eqBadge('wacht', 'wacht');
+
+  let divRows = '';
+  if (!divList.length) {
+    divRows = '<div class="empty" style="padding:8px 0">Nog geen dividend kandidaten</div>';
+  } else {
+    divRows = divList.map(d => `<div class="eq-row">
+      <span class="eq-sym">${d.symbol}</span>
+      <span class="eq-sect">${d.consecutive_years}j</span>
+      <span class="eq-val eq-pos">${fPct(d.dividend_yield)}</span>
+    </div>`).join('');
+  }
+
+  let vixHtml = '';
+  if (eq.vix_level != null) {
+    const vixCls = eq.vix_signal === 'HEDGE' ? 'vix-hedge' : 'vix-normal';
+    const vixLbl = eq.vix_signal === 'HEDGE' ? '⚠ HEDGE' : '✓ NORMAAL';
+    vixHtml = `<div class="vix-row ${vixCls}">
+      <strong>VIX ${eq.vix_level.toFixed(1)}</strong>
+      <span>${vixLbl}</span>
+    </div>`;
+  }
+
+  const divTS = fTS(eq.last_dividend_ts);
+  const divCard = `<div class="card">
+    <div class="eq-header">
+      <div class="card-title" style="margin:0">Dividend Aristocrats</div>
+      ${divBadge}
+    </div>
+    ${divRows}
+    ${vixHtml}
+    ${divTS ? `<div class="ts-line">Laatste scan: ${divTS}</div>` : ''}
+  </div>`;
+
+  el.innerHTML = enabledHtml + `<div class="eq-grid">${sectorCard}${piotCard}${divCard}</div>`;
+}
+
+function fPrice2(v) {
+  if (v == null) return '—';
+  return '$\u202f' + Number(v).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
 }
 
 // ── Bootstrap ─────────────────────────────────
