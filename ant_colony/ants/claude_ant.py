@@ -406,22 +406,31 @@ class ClaudeAnt:
         """Parseer JSON-array uit Claude response. Fail-closed: retourneert [] bij fouten."""
         if not text.strip():
             return []
-        # Claude kan markdown code blocks gebruiken — strip ze
-        clean = text.strip()
-        if clean.startswith("```"):
-            lines = clean.splitlines()
-            clean = "\n".join(
-                l for l in lines
-                if not l.strip().startswith("```")
-            ).strip()
+
+        # Strip markdown code blocks (```json ... ``` of ``` ... ```)
+        clean = text.replace("```json", "").replace("```", "").strip()
+
+        # Fallback: knip alles buiten de eerste [ ... ] (array) of { ... } (object)
+        start = clean.find("[")
+        end   = clean.rfind("]")
+        if start == -1 or end == -1 or end < start:
+            # Probeer object fallback
+            start = clean.find("{")
+            end   = clean.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            clean = clean[start : end + 1]
+
         try:
             parsed = json.loads(clean)
             if isinstance(parsed, list):
                 return parsed
             if isinstance(parsed, dict):
                 return [parsed]
-        except json.JSONDecodeError:
-            self._log.warning("Kon Claude response niet als JSON parsen — overgeslagen")
+        except json.JSONDecodeError as exc:
+            self._log.warning(
+                "Kon Claude response niet als JSON parsen: %s — raw[:200]=%r",
+                exc, text[:200],
+            )
         return []
 
     # ------------------------------------------------------------------

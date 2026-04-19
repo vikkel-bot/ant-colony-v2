@@ -202,11 +202,29 @@ class StrategyAnt:
 
     def _tick(self) -> None:
         """Één generatiecyclus: lezen, muteren, testen, loggen."""
-        sources = self._read_source_candidates()
         emitted = 0
+        sources: list[_SourceCandidate] = []
 
-        if sources:
+        try:
+            research_files = self._count_research_files()
+            self._log.info(
+                "strategy tick start | research_files=%d", research_files
+            )
+
+            sources = self._read_source_candidates()
+            self._log.info(
+                "strategy tick | research_candidates=%d seen_variants=%d",
+                len(sources), len(self._seen_variants),
+            )
+
+            if not sources:
+                self._last_action = "tick_no_sources"
+                return
+
             # --- Mutaties ---
+            self._log.info(
+                "mutaties genereren voor %d kandidaat(en)", len(sources[:_MAX_MUTATIONS_PER_TICK])
+            )
             for c in sources[:_MAX_MUTATIONS_PER_TICK]:
                 for spec in self._generate_mutations(c):
                     if self._try_backtest_and_emit(c.symbol, spec):
@@ -219,6 +237,8 @@ class StrategyAnt:
                 for b in sources[i + 1:]
                 if a.symbol == b.symbol
             ]
+            if pairs:
+                self._log.info("combinaties genereren: %d paar(en)", len(pairs[:_MAX_COMBINATIONS_PER_TICK]))
             for a, b in pairs[:_MAX_COMBINATIONS_PER_TICK]:
                 spec = self._generate_combination(a, b)
                 if self._try_backtest_and_emit(a.symbol, spec):
@@ -230,8 +250,14 @@ class StrategyAnt:
                     if self._try_backtest_and_emit(c.symbol, spec):
                         emitted += 1
 
+        except Exception:
+            self._log.exception(
+                "Fout in strategy tick (sources=%d emitted=%d) — tick afgebroken",
+                len(sources), emitted,
+            )
+
         self._log.info(
-            "strategy tick | research_candidates=%d seen=%d new=%d",
+            "strategy tick klaar | research_candidates=%d seen=%d new=%d",
             len(sources), len(self._seen_variants), emitted,
         )
         self._last_action = f"tick_emitted:{emitted}" if sources else "tick_no_sources"
@@ -239,6 +265,15 @@ class StrategyAnt:
     # ------------------------------------------------------------------
     # Broncandidaten lezen
     # ------------------------------------------------------------------
+
+    def _count_research_files(self) -> int:
+        """Geeft het aantal research JSONL-bestanden terug (voor logging)."""
+        if self.logs_root is None:
+            return 0
+        research_dir = self.logs_root / "research"
+        if not research_dir.exists():
+            return 0
+        return sum(1 for _ in research_dir.glob("*.jsonl"))
 
     def _read_source_candidates(self) -> list[_SourceCandidate]:
         """Lees research + ingestion logs en retourneer genormaliseerde kandidaten."""
