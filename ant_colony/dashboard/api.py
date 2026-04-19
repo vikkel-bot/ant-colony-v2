@@ -1147,6 +1147,7 @@ _ANT_LOG_DIRS: dict[str, str] = {
     "strategy_ant":  "strategy",
     "execution_ant": "execution",
     "operator_ant":  "operator",
+    "claude_ant":    "claude",
 }
 
 
@@ -1195,13 +1196,22 @@ def _event_short(rec: dict) -> str:
     ts_str  = _to_local_str(ts) if ts else "?"
     action  = _action_of(rec).replace("_", " ")
     payload = rec.get("payload") or {}
-    symbol  = payload.get("symbol") or ""
-    sharpe  = payload.get("sharpe")
-    parts   = [ts_str, action]
+    symbol        = payload.get("symbol") or ""
+    sharpe        = payload.get("sharpe")
+    grade         = payload.get("grade") or ""
+    strategy_type = payload.get("strategy_type") or ""
+    best_regime   = payload.get("best_regime") or ""
+    parts = [ts_str, action]
     if symbol:
         parts.append(symbol)
+    if strategy_type:
+        parts.append(strategy_type)
     if sharpe is not None:
         parts.append(f"sharpe={sharpe:.2f}")
+    if grade:
+        parts.append(f"grade={grade}")
+    if best_regime:
+        parts.append(f"regime={best_regime}")
     return " · ".join(parts)
 
 
@@ -1252,6 +1262,10 @@ def _build_ant_stats(ant_type: str, today_recs: list[dict]) -> AntStatsEntry:
         return AntStatsEntry(
             inputs_processed=_count_actions(today_recs, "operator_input_processed"),
         )
+    if ant_type == "claude_ant":
+        return AntStatsEntry(
+            variants_generated=_count_actions(today_recs, "claude_analysis_complete"),
+        )
     return AntStatsEntry()
 
 
@@ -1264,7 +1278,13 @@ def _build_ant_summary(ant_type: str, all_recs: list[dict], stats: AntStatsEntry
         return f"{n} signalen vandaag — laatste: {action}"
     if ant_type == "research_ant":
         n = stats.candidates_above_threshold or 0
-        return f"{n} kandidaten geaccepteerd vandaag — laatste: {action}"
+        grades = {"A": 0, "B": 0, "C": 0}
+        for r in all_recs:
+            g = (r.get("payload") or {}).get("grade") or ""
+            if g in grades:
+                grades[g] += 1
+        grade_str = f"A:{grades['A']} B:{grades['B']} C:{grades['C']}"
+        return f"{n} kandidaten vandaag ({grade_str}) — laatste: {action}"
     if ant_type == "paper_ant":
         pnl  = stats.total_pnl or 0.0
         sign = "+" if pnl >= 0 else ""
@@ -1286,4 +1306,7 @@ def _build_ant_summary(ant_type: str, all_recs: list[dict], stats: AntStatsEntry
     if ant_type == "operator_ant":
         n = stats.inputs_processed or 0
         return f"{n} inputs verwerkt vandaag — laatste: {action}"
+    if ant_type == "claude_ant":
+        n = stats.variants_generated or 0
+        return f"{n} Claude-analyses vandaag — laatste: {action}"
     return f"Laatste actie: {action}"

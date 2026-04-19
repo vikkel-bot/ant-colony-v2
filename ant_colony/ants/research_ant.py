@@ -621,7 +621,20 @@ class ResearchAnt:
         if self.logs_root is None:
             return
 
-        bt = candidate.backtest_results
+        bt        = candidate.backtest_results
+        sharpe    = bt.sharpe_ratio  if bt else None
+        win_rate  = bt.win_rate      if bt else None
+        avg_win   = bt.avg_win       if bt else None
+        avg_loss  = bt.avg_loss      if bt else None
+
+        exp_ret: float | None = None
+        if win_rate is not None and avg_win is not None and avg_loss is not None:
+            exp_ret = round((avg_win * win_rate) - (avg_loss * (1.0 - win_rate)), 4)
+
+        entry_kws     = (candidate.entry_conditions or {}).get("keywords") or []
+        strategy_type = _strategy_type_from_signal(candidate.name or "", entry_kws)
+        grade         = _grade_from_sharpe(sharpe)
+
         event = AuditEvent(
             event_type=AuditEventType.ACTION_EXECUTED,
             source=self.ant_id,
@@ -629,14 +642,21 @@ class ResearchAnt:
             node_id=self.mission.allowed_node,
             sequence=self._log_seq,
             payload={
-                "action":       "candidate_accepted",
-                "candidate_id": candidate.candidate_id,
-                "symbol":       (candidate.market_scope or {}).get("symbol", ""),
-                "sharpe":       round(bt.sharpe_ratio, 3) if bt and bt.sharpe_ratio is not None else None,
-                "win_rate":     round(bt.win_rate, 3) if bt and bt.win_rate is not None else None,
-                "direction":    direction or (candidate.entry_conditions or {}).get("direction", ""),
-                "signal_type":  candidate.name,
-                "biome":        candidate.biome,
+                "action":                  "candidate_accepted",
+                "candidate_id":            candidate.candidate_id,
+                "symbol":                  (candidate.market_scope or {}).get("symbol", ""),
+                "sharpe":                  round(sharpe, 3) if sharpe is not None else None,
+                "win_rate":                round(win_rate, 3) if win_rate is not None else None,
+                "direction":               direction or (candidate.entry_conditions or {}).get("direction", ""),
+                "signal_type":             candidate.name,
+                "biome":                   candidate.biome,
+                "strategy_type":           strategy_type,
+                "grade":                   grade,
+                "expected_return":         exp_ret,
+                "best_streak":             bt.best_streak if bt else None,
+                "worst_drawdown":          round(bt.max_drawdown_pct, 4) if bt and bt.max_drawdown_pct is not None else None,
+                "best_regime":             bt.best_regime if bt else None,
+                "regime_stats":            bt.regime_stats if bt else None,
             },
         )
 
@@ -677,6 +697,42 @@ class ResearchAnt:
 # ---------------------------------------------------------------------------
 # Keyword → BacktestConfig vertaling
 # ---------------------------------------------------------------------------
+
+def _strategy_type_from_signal(signal_type: str, keywords: list[str]) -> str:
+    """Leid strategy_type af uit signal_type en entry_keywords."""
+    st = (signal_type or "").lower()
+    if "sma_crossover" in st or ("sma" in st and "cross" in st):
+        return "sma_crossover"
+    if "rsi" in st:
+        return "rsi_based"
+    if "bollinger" in st or "bb_" in st:
+        return "bollinger"
+    kw = {k.lower() for k in (keywords or [])}
+    if "momentum" in kw or "macd" in kw:
+        return "momentum"
+    if "mean reversion" in " ".join(kw) or "mean_reversion" in kw:
+        return "mean_reversion"
+    if "breakout" in kw:
+        return "breakout"
+    if "rsi" in kw:
+        return "rsi_based"
+    if "sma" in kw or "crossover" in kw or "ema" in kw:
+        return "sma_crossover"
+    if "bollinger" in kw:
+        return "bollinger"
+    return "unknown"
+
+
+def _grade_from_sharpe(sharpe: float | None) -> str:
+    """A = sharpe > 0.5 · B = 0.3–0.5 · C = < 0.3"""
+    if sharpe is None:
+        return "C"
+    if sharpe > 0.5:
+        return "A"
+    if sharpe >= 0.3:
+        return "B"
+    return "C"
+
 
 def _config_from_keywords(keywords: list[str], direction: str) -> BacktestConfig:
     """

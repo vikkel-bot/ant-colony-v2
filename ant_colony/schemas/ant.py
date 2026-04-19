@@ -15,6 +15,7 @@ class AntType(str, Enum):
     INGESTION = "ingestion_ant"
     STRATEGY = "strategy_ant"
     OPERATOR = "operator_ant"
+    CLAUDE   = "claude_ant"
 
 
 class AntStatus(str, Enum):

@@ -38,6 +38,11 @@ class BacktestResults(BaseModel):
     max_drawdown_pct: float | None = None
     total_trades: int | None = None
     win_rate: float | None = None
+    avg_win: float | None = None        # gemiddeld rendement per winnende trade
+    avg_loss: float | None = None       # gemiddeld verlies per verliezende trade (positief getal)
+    best_streak: int | None = None      # langste reeks winstgevende trades
+    regime_stats: dict[str, Any] | None = None   # {bull/bear/sideways: {win_rate, sharpe, trade_count}}
+    best_regime: str | None = None      # regime met de beste sharpe (min 3 trades)
     extra: dict[str, Any] = Field(default_factory=dict)
 
 
