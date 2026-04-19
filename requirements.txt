@@ -7,3 +7,4 @@ tzdata>=2024.1
 anthropic>=0.25.0
 python-dotenv>=1.0.0
 yfinance>=0.2.0
+ib_insync>=0.9.70
