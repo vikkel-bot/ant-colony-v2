@@ -1219,6 +1219,29 @@ def _count_actions(recs: list[dict], *keywords: str) -> int:
     return sum(1 for r in recs if any(kw in _action_of(r) for kw in keywords))
 
 
+def _latest_session_records(records: list[dict]) -> list[dict]:
+    """
+    Filter records op de meest recente source (ant_id).
+
+    Bij een herstart krijgt elke ant een nieuw UUID als ant_id (= source veld).
+    Door alleen de meest recente source te bewaren, tellen zombie-posities van
+    een vorige sessie (geopend maar nooit gesloten) niet mee als 'open'.
+    """
+    if not records:
+        return records
+    latest_ts: datetime = datetime.min.replace(tzinfo=timezone.utc)
+    latest_source: str | None = None
+    for r in records:
+        ts  = _parse_ts(r.get("timestamp"))
+        src = r.get("source")
+        if src and ts and ts > latest_ts:
+            latest_ts = ts
+            latest_source = src
+    if latest_source is None:
+        return records
+    return [r for r in records if r.get("source") == latest_source]
+
+
 def _build_ant_stats(ant_type: str, today_recs: list[dict]) -> AntStatsEntry:
     if ant_type == "scout_ant":
         return AntStatsEntry(
@@ -1229,14 +1252,27 @@ def _build_ant_stats(ant_type: str, today_recs: list[dict]) -> AntStatsEntry:
             candidates_above_threshold=_count_actions(today_recs, "candidate_accepted"),
         )
     if ant_type == "paper_ant":
-        opened      = _count_actions(today_recs, "trade_opened", "position_opened")
+        # Open posities: gebruik alleen huidige sessie (source = meest recente ant_id)
+        # zodat zombie-posities van een vorige sessie niet meetellen.
+        session_recs = _latest_session_records(today_recs)
+        opened_ids = {
+            (r.get("payload") or {}).get("position_id")
+            for r in session_recs
+            if _action_of(r) in ("trade_opened", "position_opened")
+        } - {None}
+        closed_ids = {
+            (r.get("payload") or {}).get("position_id")
+            for r in session_recs
+            if _action_of(r) in ("trade_closed", "position_closed")
+        } - {None}
+        # PnL: alle gesloten trades van vandaag (ook eerdere sessies)
         closed_recs = [r for r in today_recs if _action_of(r) in ("trade_closed", "position_closed")]
         pnl_vals    = [float((r.get("payload") or {}).get("realized_pnl") or 0) for r in closed_recs]
         total_pnl   = round(sum(pnl_vals), 2)
         wins        = sum(1 for v in pnl_vals if v > 0)
         win_rate    = round(wins / len(pnl_vals), 2) if pnl_vals else None
         return AntStatsEntry(
-            open_trades=max(0, opened - len(closed_recs)),
+            open_trades=len(opened_ids - closed_ids),
             total_pnl=total_pnl,
             win_rate=win_rate,
         )
