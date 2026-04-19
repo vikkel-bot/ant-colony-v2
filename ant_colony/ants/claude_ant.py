@@ -68,10 +68,10 @@ def _trim_candidate(c: dict) -> dict:
 
 
 _PROMPT_TEMPLATE = """\
-Analyseer deze trading strategie kandidaten en antwoord ALLEEN in JSON.
+Analyseer deze kandidaten en geef JSON terug.
+Gebruik alleen ASCII tekens. Geen apostrofs in strings.
 {candidates_json}
-Output array (één object per kandidaat):
-[{{"candidate_id":"...","rationale":"1 zin","failure_modes":"1 zin","confidence":7,"improved_variant":{{"entry_keywords":[],"take_profit_pct":0.05,"stop_loss_pct":0.03,"logic_summary":"..."}}}}]"""
+Format: [{{"candidate_id":"...","confidence":7,"improved_tp_pct":0.05,"improved_sl_pct":0.03,"best_regime":"bull"}}]"""
 
 
 class ClaudeAnt:
@@ -376,8 +376,12 @@ class ClaudeAnt:
         variants_written = 0
 
         for analysis in analyses:
-            variant = analysis.get("improved_variant") or {}
-            if variant:
+            # Ondersteunt zowel nieuw flat formaat als oud genest formaat
+            variant = analysis.get("improved_variant") or {
+                "take_profit_pct": analysis.get("improved_tp_pct"),
+                "stop_loss_pct":   analysis.get("improved_sl_pct"),
+            }
+            if variant.get("take_profit_pct") or variant.get("stop_loss_pct"):
                 written = self._write_variant_to_ingestion(analysis, variant)
                 if written:
                     variants_written += 1
