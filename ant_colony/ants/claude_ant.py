@@ -43,10 +43,10 @@ from ant_colony.schemas.strategy_candidate import (
 )
 
 _MODEL             = "claude-sonnet-4-6"
-_MAX_TOKENS        = 800
+_MAX_TOKENS        = 500
 _TOP_N_CANDIDATES  = 3
 _MAX_WORDS_PER_CANDIDATE = 200
-_RATE_LIMIT_FAST   = 300.0    # normaal: 1 call per 5 minuten
+_RATE_LIMIT_FAST   = 600.0    # normaal: 1 call per 10 minuten
 _RATE_LIMIT_SLOW   = 3600.0   # bij 80% budget: 1 call per uur
 _BUDGET_WARN_PCT   = 0.80     # drempel voor rate limit escalatie
 
@@ -68,30 +68,10 @@ def _trim_candidate(c: dict) -> dict:
 
 
 _PROMPT_TEMPLATE = """\
-Je bent een quant analist. Analyseer deze trading strategie kandidaten:
+Analyseer deze trading strategie kandidaten en antwoord ALLEEN in JSON.
 {candidates_json}
-
-Voor elke kandidaat:
-- Waarom werkt deze strategie theoretisch?
-- Wanneer faalt hij waarschijnlijk?
-- Geef een verbeterd variant als JSON met aangepaste parameters
-- Geef een confidence score 0-10
-
-Antwoord alleen in JSON als een array met dit formaat:
-[
-  {{
-    "candidate_id": "...",
-    "rationale": "...",
-    "failure_modes": "...",
-    "confidence": 7,
-    "improved_variant": {{
-      "entry_keywords": ["momentum", "rsi"],
-      "take_profit_pct": 0.08,
-      "stop_loss_pct": 0.04,
-      "logic_summary": "verbeterde versie van ..."
-    }}
-  }}
-]"""
+Output array (één object per kandidaat):
+[{{"candidate_id":"...","rationale":"1 zin","failure_modes":"1 zin","confidence":7,"improved_variant":{{"entry_keywords":[],"take_profit_pct":0.05,"stop_loss_pct":0.03,"logic_summary":"..."}}}}]"""
 
 
 class ClaudeAnt:

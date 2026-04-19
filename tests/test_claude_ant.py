@@ -417,7 +417,7 @@ def test_rate_limit_fast_below_budget_warn(tmp_path: Path) -> None:
     """Onder 80% budget → rate limit = 300s."""
     ant = make_ant(tmp_path)
     ant._month_cost_eur = 7.9   # 79% van €10
-    assert ant._rate_limit == 300.0
+    assert ant._rate_limit == 600.0
 
 
 def test_rate_limit_slow_at_budget_warn(tmp_path: Path) -> None:
