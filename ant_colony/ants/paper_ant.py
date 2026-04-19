@@ -98,6 +98,7 @@ class PaperAnt:
 
         self._processed_signals: set[str] = set()
         self._seen_approved_ids: set[str] = set()
+        self._seen_research_ids: set[str] = set()
 
         self._status: AntStatus = AntStatus.IDLE
         self._budget_used: float = 0.0
@@ -106,13 +107,20 @@ class PaperAnt:
 
         self._log = logging.getLogger(f"ant.paper.{ant_id[:8]}")
 
-        # Symbolen met open posities — geladen uit logs bij herstart zodat
-        # duplicaten geblokkeerd worden ook als de ledger leeg is na herstart.
+        # Scout-posities: per symbool (1 per symbool tegelijk).
         self._open_symbols: set[str] = self._load_open_symbols_from_logs()
-        if self._open_symbols:
+
+        # Research-posities: per (symbool, strategy_type) — meerdere per symbool mogelijk.
+        self._open_research_keys: set[tuple[str, str]]
+        self._pos_id_to_research_key: dict[str, tuple[str, str]]
+        self._open_research_keys, self._pos_id_to_research_key = (
+            self._load_research_keys_from_logs()
+        )
+
+        if self._open_symbols or self._open_research_keys:
             self._log.info(
-                "Herstart gedetecteerd — %d open positie(s) hersteld: %s",
-                len(self._open_symbols), ", ".join(sorted(self._open_symbols)),
+                "Herstart gedetecteerd — %d scout positie(s), %d research positie(s) hersteld",
+                len(self._open_symbols), len(self._open_research_keys),
             )
 
     # ------------------------------------------------------------------
@@ -189,6 +197,7 @@ class PaperAnt:
         self._process_exits()
         self._process_new_signals()
         self._process_approved_candidates()
+        self._process_research_candidates()
         self._last_action = "tick"
 
     # ------------------------------------------------------------------
@@ -214,7 +223,13 @@ class PaperAnt:
             if result.position.is_open():
                 self._ledger.update_open(result.position)
             else:
-                self._open_symbols.discard(result.position.symbol)
+                research_key = self._pos_id_to_research_key.pop(
+                    result.position.position_id, None
+                )
+                if research_key:
+                    self._open_research_keys.discard(research_key)
+                else:
+                    self._open_symbols.discard(result.position.symbol)
                 self._ledger.record_closed(result.position)
                 self._emit_trade_closed(result.position)
                 self._last_action = f"trade_closed:{result.position.symbol}"
@@ -254,11 +269,15 @@ class PaperAnt:
             self._try_open_position(sig)
 
     def _has_open_position(self, symbol: str) -> bool:
-        """True als er al een open positie is (ledger of hersteld uit logs bij herstart)."""
+        """True als er al een scout-positie open is voor dit symbool."""
         return (
             symbol in self._open_symbols
             or any(p.symbol == symbol for p in self._ledger.open_positions)
         )
+
+    def _has_open_research_position(self, symbol: str, strategy_type: str) -> bool:
+        """True als er al een research-positie open is voor (symbool, strategy_type)."""
+        return (symbol, strategy_type) in self._open_research_keys
 
     def _load_open_symbols_from_logs(self) -> set[str]:
         """
@@ -303,8 +322,154 @@ class PaperAnt:
 
         return {sym for pid, sym in opened.items() if pid not in closed_ids}
 
-    def _try_open_position(self, sig: dict) -> None:
-        """Bouw een EntrySignal en probeer een LONG positie te openen via PaperBroker."""
+    def _load_research_keys_from_logs(
+        self,
+    ) -> tuple[set[tuple[str, str]], dict[str, tuple[str, str]]]:
+        """
+        Scan ANT_LOGS/paper/*.jsonl op trade_opened events met strategy_type.
+
+        Retourneert (open_research_keys, pos_id_to_key) voor herstel bij herstart.
+        """
+        keys: set[tuple[str, str]] = set()
+        pos_map: dict[str, tuple[str, str]] = {}
+
+        if self.logs_root is None:
+            return keys, pos_map
+        paper_dir = self.logs_root / "paper"
+        if not paper_dir.exists():
+            return keys, pos_map
+
+        opened: dict[str, tuple[str, str]] = {}  # pos_id → (symbol, strategy_type)
+        closed_ids: set[str] = set()
+
+        for path in paper_dir.glob("*.jsonl"):
+            if path.name.endswith("_trades.jsonl"):
+                continue
+            try:
+                for line in path.read_text(encoding="utf-8").splitlines():
+                    if not line.strip():
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    payload  = record.get("payload") or {}
+                    action   = payload.get("action")
+                    pos_id   = str(payload.get("position_id") or "")
+                    st       = str(payload.get("strategy_type") or "")
+                    if not pos_id or not st:
+                        continue
+                    if action == "trade_opened":
+                        sym = str(payload.get("symbol") or "")
+                        if sym:
+                            opened[pos_id] = (sym, st)
+                    elif action == "trade_closed":
+                        closed_ids.add(pos_id)
+            except OSError:
+                pass
+
+        for pid, key in opened.items():
+            if pid not in closed_ids:
+                keys.add(key)
+                pos_map[pid] = key
+
+        return keys, pos_map
+
+    # ------------------------------------------------------------------
+    # Research-kandidaten verwerken
+    # ------------------------------------------------------------------
+
+    def _process_research_candidates(self) -> None:
+        """Verwerk ACCEPTED StrategyCandidate records uit ANT_LOGS/research/*.jsonl."""
+        if self.logs_root is None:
+            return
+        research_dir = self.logs_root / "research"
+        if not research_dir.exists():
+            return
+
+        for jsonl_path in sorted(research_dir.glob("*.jsonl")):
+            try:
+                for line in jsonl_path.read_text(encoding="utf-8").splitlines():
+                    if not line.strip():
+                        continue
+                    try:
+                        record  = json.loads(line)
+                        payload = record.get("payload") or {}
+                    except json.JSONDecodeError:
+                        continue
+
+                    if payload.get("action") != "candidate_accepted":
+                        continue
+
+                    candidate_id = str(payload.get("candidate_id") or "")
+                    if not candidate_id or candidate_id in self._seen_research_ids:
+                        continue
+                    self._seen_research_ids.add(candidate_id)
+
+                    self._open_from_research_candidate(payload)
+
+            except OSError:
+                self._log.warning("Kan research-log niet lezen: %s", jsonl_path)
+
+    def _open_from_research_candidate(self, payload: dict) -> None:
+        """Open een paper positie op basis van een candidate_accepted research record."""
+        symbol = str(payload.get("symbol") or "")
+        if not symbol:
+            return
+
+        direction = str(payload.get("direction") or "long")
+        if direction != "long":
+            self._log.debug(
+                "Research kandidaat heeft direction=%s — overgeslagen", direction
+            )
+            return
+
+        strategy_type = str(payload.get("strategy_type") or "unknown")
+        tp_pct = float(payload.get("tp_pct") or _TP_PCT)
+        sl_pct = float(payload.get("sl_pct") or _SL_PCT)
+
+        if self._has_open_research_position(symbol, strategy_type):
+            self._log.debug(
+                "Research positie al open voor (%s, %s) — overgeslagen",
+                symbol, strategy_type,
+            )
+            return
+
+        price = self._fetch_price(symbol)
+        if price is None or price <= 0:
+            self._log.debug(
+                "Geen prijs beschikbaar voor research kandidaat %s", symbol
+            )
+            return
+
+        sig = {
+            "symbol":        symbol,
+            "current_price": price,
+            "confidence":    1.0,
+            "biome":         str(payload.get("biome") or self.mission.market_scope.biome),
+            "signal_id":     payload.get("candidate_id"),
+        }
+        self._try_open_position(sig, strategy_type=strategy_type, sl_pct=sl_pct, tp_pct=tp_pct)
+        self._log.info(
+            "Research kandidaat verwerkt | %s strategie=%s tp=%.3f sl=%.3f",
+            symbol, strategy_type, tp_pct, sl_pct,
+        )
+
+    def _try_open_position(
+        self,
+        sig: dict,
+        *,
+        strategy_type: str | None = None,
+        sl_pct: float | None = None,
+        tp_pct: float | None = None,
+    ) -> None:
+        """Bouw een EntrySignal en probeer een LONG positie te openen via PaperBroker.
+
+        strategy_type: als opgegeven, wordt dit als research-positie geregistreerd
+                       (dedup via _open_research_keys). Zonder strategy_type: scout-pad.
+        sl_pct/tp_pct: override voor stop-loss / take-profit percentages.
+                       Valt terug op module-defaults als None.
+        """
         symbol      = sig.get("symbol", "")
         entry_price = sig.get("current_price", 0.0)
 
@@ -312,16 +477,25 @@ class PaperAnt:
             return
 
         # Definitieve guard — blokkeert duplicaten ongeacht aanroeppad
-        if self._has_open_position(symbol):
-            self._log.debug(
-                "_try_open_position: al open positie voor %s — geblokkeerd", symbol
-            )
-            return
+        if strategy_type:
+            if self._has_open_research_position(symbol, strategy_type):
+                self._log.debug(
+                    "_try_open_position: research positie al open voor (%s, %s) — geblokkeerd",
+                    symbol, strategy_type,
+                )
+                return
+        else:
+            if self._has_open_position(symbol):
+                self._log.debug(
+                    "_try_open_position: al open positie voor %s — geblokkeerd", symbol
+                )
+                return
 
         # Globale cap: maximaal _MAX_OPEN_POSITIONS posities tegelijk
-        current_open = len(self._ledger.open_positions) + len(
-            self._open_symbols - {p.symbol for p in self._ledger.open_positions}
-        )
+        in_ledger_symbols = {p.symbol for p in self._ledger.open_positions}
+        scout_extra = len(self._open_symbols - in_ledger_symbols)
+        research_extra = len({s for s, _ in self._open_research_keys} - in_ledger_symbols)
+        current_open = len(self._ledger.open_positions) + scout_extra + research_extra
         if current_open >= _MAX_OPEN_POSITIONS:
             self._log.debug(
                 "_try_open_position: max open posities (%d) bereikt — %s geblokkeerd",
@@ -329,8 +503,10 @@ class PaperAnt:
             )
             return
 
-        sl = entry_price * (1.0 - _SL_PCT)
-        tp = entry_price * (1.0 + _TP_PCT)
+        used_sl_pct = sl_pct if sl_pct is not None else _SL_PCT
+        used_tp_pct = tp_pct if tp_pct is not None else _TP_PCT
+        sl = entry_price * (1.0 - used_sl_pct)
+        tp = entry_price * (1.0 + used_tp_pct)
 
         capital_available = self._ledger.capital_available
         capital_per_trade = capital_available * _TRADE_CAPITAL_FRACTION
@@ -361,13 +537,24 @@ class PaperAnt:
         result = self._broker.open_position(entry_signal, capital_available)
 
         if result.accepted and result.position is not None:
-            self._open_symbols.add(symbol)
+            if strategy_type:
+                key = (symbol, strategy_type)
+                self._open_research_keys.add(key)
+                self._pos_id_to_research_key[result.position.position_id] = key
+            else:
+                self._open_symbols.add(symbol)
             self._ledger.record_opened(result.position)
-            self._emit_trade_opened(result.position, sig)
+            self._emit_trade_opened(
+                result.position, sig,
+                strategy_type=strategy_type,
+                sl_pct=used_sl_pct,
+                tp_pct=used_tp_pct,
+            )
             self._last_action = f"trade_opened:{symbol}"
             self._log.info(
-                "POSITIE GEOPEND | %s LONG %.8f @ %.4f  SL=%.4f  TP=%.4f",
+                "POSITIE GEOPEND | %s LONG %.8f @ %.4f  SL=%.4f  TP=%.4f  strategie=%s",
                 symbol, result.position.quantity, entry_price, sl, tp,
+                strategy_type or "scout",
             )
         else:
             self._log.debug(
@@ -526,19 +713,30 @@ class PaperAnt:
     # Log events
     # ------------------------------------------------------------------
 
-    def _emit_trade_opened(self, position, signal_data: dict) -> None:
+    def _emit_trade_opened(
+        self,
+        position,
+        signal_data: dict,
+        *,
+        strategy_type: str | None = None,
+        sl_pct: float | None = None,
+        tp_pct: float | None = None,
+    ) -> None:
         """Log een trade_opened event naar ANT_LOGS/paper/{ant_id}.jsonl."""
         self._write_log({
-            "action":        "trade_opened",
-            "position_id":   position.position_id,
-            "symbol":        position.symbol,
-            "side":          position.side.value,
-            "entry_price":   position.entry_price,
-            "quantity":      position.quantity,
-            "stop_loss":     position.stop_loss_price,
-            "take_profit":   position.take_profit_price,
+            "action":         "trade_opened",
+            "position_id":    position.position_id,
+            "symbol":         position.symbol,
+            "side":           position.side.value,
+            "entry_price":    position.entry_price,
+            "quantity":       position.quantity,
+            "stop_loss":      position.stop_loss_price,
+            "take_profit":    position.take_profit_price,
             "from_signal_id": signal_data.get("signal_id"),
-            "confidence":    signal_data.get("confidence"),
+            "confidence":     signal_data.get("confidence"),
+            "strategy_type":  strategy_type,
+            "sl_pct":         sl_pct,
+            "tp_pct":         tp_pct,
         })
 
     def _emit_trade_closed(self, position) -> None:

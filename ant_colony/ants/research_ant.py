@@ -580,9 +580,9 @@ class ResearchAnt:
             parameters=parameters,
             entry_conditions=entry_conditions,
             exit_conditions={
-                "take_profit_pct": _TP_PCT,
-                "stop_loss_pct": _SL_PCT,
-                "max_bars_held": _MAX_BARS_HELD,
+                "take_profit_pct": config.take_profit_pct,
+                "stop_loss_pct": config.stop_loss_pct,
+                "max_bars_held": config.max_bars_held,
             },
             backtest_results=results,
             fitness_score=round(sharpe, 4),
@@ -657,6 +657,8 @@ class ResearchAnt:
                 "worst_drawdown":          round(bt.max_drawdown_pct, 4) if bt and bt.max_drawdown_pct is not None else None,
                 "best_regime":             bt.best_regime if bt else None,
                 "regime_stats":            bt.regime_stats if bt else None,
+                "tp_pct":                  (candidate.exit_conditions or {}).get("take_profit_pct"),
+                "sl_pct":                  (candidate.exit_conditions or {}).get("stop_loss_pct"),
             },
         )
 

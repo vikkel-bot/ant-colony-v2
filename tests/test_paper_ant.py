@@ -721,3 +721,191 @@ class TestStartupRecovery:
         (paper_dir / "corrupt.jsonl").write_text("not-json\n", encoding="utf-8")
         ant = make_ant(logs_root=tmp_path)
         assert ant._open_symbols == set()
+
+
+# ---------------------------------------------------------------------------
+# 13. Research-kandidaten verwerken
+# ---------------------------------------------------------------------------
+
+
+def write_research_candidate(
+    research_dir: Path,
+    *,
+    candidate_id: str | None = None,
+    symbol: str = _SYMBOL,
+    strategy_type: str = "sma_crossover",
+    direction: str = "long",
+    tp_pct: float = 0.06,
+    sl_pct: float = 0.03,
+    sharpe: float = 0.8,
+    biome: str = _BIOME,
+    ant_id: str = "ant-research-001",
+    filename: str | None = None,
+) -> str:
+    import uuid as _uuid
+    candidate_id = candidate_id or f"candidate-{_uuid.uuid4().hex[:8]}"
+    research_dir.mkdir(parents=True, exist_ok=True)
+    record = {
+        "event_type": "action_executed",
+        "source": ant_id,
+        "payload": {
+            "action": "candidate_accepted",
+            "candidate_id": candidate_id,
+            "symbol": symbol,
+            "strategy_type": strategy_type,
+            "direction": direction,
+            "tp_pct": tp_pct,
+            "sl_pct": sl_pct,
+            "sharpe": sharpe,
+            "biome": biome,
+        },
+    }
+    fname = filename or f"{ant_id}.jsonl"
+    (research_dir / fname).open("a", encoding="utf-8").write(
+        json.dumps(record) + "\n"
+    )
+    return candidate_id
+
+
+def _make_adapter_with_price_v2(price: float) -> MagicMock:
+    md = MagicMock()
+    md.close = price
+    md.is_valid_price = True
+    md.is_stale.return_value = False
+    adapter = MagicMock()
+    adapter.is_available.return_value = True
+    adapter.get_market_data.return_value = md
+    return adapter
+
+
+class TestResearchCandidates:
+    def test_research_candidate_opens_position(self, tmp_path: Path) -> None:
+        ant = make_ant(logs_root=tmp_path)
+        ant.biome_registry.get.return_value = _make_adapter_with_price_v2(_PRICE)
+        write_research_candidate(tmp_path / "research")
+        ant._tick()
+        assert len(ant._ledger.open_positions) == 1
+
+    def test_research_candidate_uses_tp_pct_from_log(self, tmp_path: Path) -> None:
+        ant = make_ant(logs_root=tmp_path)
+        ant.biome_registry.get.return_value = _make_adapter_with_price_v2(_PRICE)
+        write_research_candidate(tmp_path / "research", tp_pct=0.08, sl_pct=0.04)
+        ant._tick()
+        pos = ant._ledger.open_positions[0]
+        expected_tp = _PRICE * (1.0 + 0.08)
+        assert abs(pos.take_profit_price - expected_tp) < 0.01
+
+    def test_research_candidate_uses_sl_pct_from_log(self, tmp_path: Path) -> None:
+        ant = make_ant(logs_root=tmp_path)
+        ant.biome_registry.get.return_value = _make_adapter_with_price_v2(_PRICE)
+        write_research_candidate(tmp_path / "research", tp_pct=0.08, sl_pct=0.04)
+        ant._tick()
+        pos = ant._ledger.open_positions[0]
+        expected_sl = _PRICE * (1.0 - 0.04)
+        assert abs(pos.stop_loss_price - expected_sl) < 0.01
+
+    def test_research_candidate_dedup(self, tmp_path: Path) -> None:
+        ant = make_ant(logs_root=tmp_path)
+        ant.biome_registry.get.return_value = _make_adapter_with_price_v2(_PRICE)
+        cid = write_research_candidate(tmp_path / "research")
+        ant._tick()
+        assert len(ant._ledger.open_positions) == 1
+        # Same candidate written again in second file
+        write_research_candidate(tmp_path / "research", candidate_id=cid, filename="ant-r2.jsonl")
+        ant._tick()
+        assert len(ant._ledger.open_positions) == 1
+
+    def test_different_strategy_type_allows_second_position(self, tmp_path: Path) -> None:
+        """BTC-EUR met twee verschillende strategy_types mag twee posities openen."""
+        mission = make_mission(capital=50_000.0)
+        ant = make_ant(mission=mission, logs_root=tmp_path)
+        ant.biome_registry.get.return_value = _make_adapter_with_price_v2(_PRICE)
+        write_research_candidate(
+            tmp_path / "research", strategy_type="sma_crossover", filename="r1.jsonl"
+        )
+        write_research_candidate(
+            tmp_path / "research", strategy_type="rsi_based", filename="r2.jsonl"
+        )
+        ant._tick()
+        assert len(ant._ledger.open_positions) == 2
+
+    def test_same_strategy_type_blocks_duplicate(self, tmp_path: Path) -> None:
+        """BTC-EUR met zelfde strategy_type mag maar één keer openen."""
+        ant = make_ant(logs_root=tmp_path)
+        ant.biome_registry.get.return_value = _make_adapter_with_price_v2(_PRICE)
+        write_research_candidate(
+            tmp_path / "research", strategy_type="sma_crossover", filename="r1.jsonl"
+        )
+        ant._tick()
+        assert len(ant._ledger.open_positions) == 1
+        # Verander candidate_id maar zelfde symbool + strategy_type
+        write_research_candidate(
+            tmp_path / "research", strategy_type="sma_crossover", filename="r2.jsonl"
+        )
+        ant._tick()
+        assert len(ant._ledger.open_positions) == 1
+
+    def test_short_direction_skipped(self, tmp_path: Path) -> None:
+        ant = make_ant(logs_root=tmp_path)
+        ant.biome_registry.get.return_value = _make_adapter_with_price_v2(_PRICE)
+        write_research_candidate(tmp_path / "research", direction="short")
+        ant._tick()
+        assert len(ant._ledger.open_positions) == 0
+
+    def test_no_price_skips_candidate(self, tmp_path: Path) -> None:
+        ant = make_ant(logs_root=tmp_path)
+        ant.biome_registry.get.return_value = None  # no adapter
+        write_research_candidate(tmp_path / "research")
+        ant._tick()
+        assert len(ant._ledger.open_positions) == 0
+
+    def test_trade_opened_log_has_strategy_type(self, tmp_path: Path) -> None:
+        ant = make_ant(logs_root=tmp_path)
+        ant.biome_registry.get.return_value = _make_adapter_with_price_v2(_PRICE)
+        write_research_candidate(tmp_path / "research", strategy_type="momentum")
+        ant._tick()
+        log_path = tmp_path / "paper" / f"{ant.ant_id}.jsonl"
+        assert log_path.exists()
+        records = [json.loads(l) for l in log_path.read_text().splitlines() if l.strip()]
+        opened = next(r["payload"] for r in records if r["payload"]["action"] == "trade_opened")
+        assert opened.get("strategy_type") == "momentum"
+
+    def test_trade_opened_log_has_sl_pct_and_tp_pct(self, tmp_path: Path) -> None:
+        ant = make_ant(logs_root=tmp_path)
+        ant.biome_registry.get.return_value = _make_adapter_with_price_v2(_PRICE)
+        write_research_candidate(tmp_path / "research", tp_pct=0.07, sl_pct=0.035)
+        ant._tick()
+        log_path = tmp_path / "paper" / f"{ant.ant_id}.jsonl"
+        records = [json.loads(l) for l in log_path.read_text().splitlines() if l.strip()]
+        opened = next(r["payload"] for r in records if r["payload"]["action"] == "trade_opened")
+        assert abs(opened["tp_pct"] - 0.07) < 1e-9
+        assert abs(opened["sl_pct"] - 0.035) < 1e-9
+
+    def test_research_candidate_closes_and_frees_slot(self, tmp_path: Path) -> None:
+        """Na sluiting van research positie mag dezelfde (symbool, strategy_type) opnieuw."""
+        ant = make_ant(logs_root=tmp_path)
+        ant.biome_registry.get.return_value = _make_adapter_with_price_v2(_PRICE)
+        write_research_candidate(tmp_path / "research", strategy_type="rsi_based")
+        ant._tick()
+        assert len(ant._ledger.open_positions) == 1
+        assert ("BTC-EUR", "rsi_based") in ant._open_research_keys
+
+        # Sluit de positie via take-profit
+        pos = ant._ledger.open_positions[0]
+        ant.biome_registry.get.return_value = _make_adapter_with_price_v2(
+            pos.take_profit_price + 1.0
+        )
+        ant._process_exits()
+        assert len(ant._ledger.open_positions) == 0
+        assert ("BTC-EUR", "rsi_based") not in ant._open_research_keys
+
+    def test_no_research_dir_no_crash(self, tmp_path: Path) -> None:
+        ant = make_ant(logs_root=tmp_path)
+        ant._process_research_candidates()  # research/ does not exist — no crash
+
+    def test_corrupt_research_log_no_crash(self, tmp_path: Path) -> None:
+        research_dir = tmp_path / "research"
+        research_dir.mkdir()
+        (research_dir / "bad.jsonl").write_text("not-json\n", encoding="utf-8")
+        ant = make_ant(logs_root=tmp_path)
+        ant._process_research_candidates()  # should not crash
