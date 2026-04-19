@@ -203,39 +203,38 @@ class StrategyAnt:
     def _tick(self) -> None:
         """Één generatiecyclus: lezen, muteren, testen, loggen."""
         sources = self._read_source_candidates()
-        if not sources:
-            self._log.debug("Geen broncandidaten gevonden — tick overgeslagen")
-            self._last_action = "tick_no_sources"
-            return
-
         emitted = 0
 
-        # --- Mutaties ---
-        for c in sources[:_MAX_MUTATIONS_PER_TICK]:
-            for spec in self._generate_mutations(c):
-                if self._try_backtest_and_emit(c.symbol, spec):
+        if sources:
+            # --- Mutaties ---
+            for c in sources[:_MAX_MUTATIONS_PER_TICK]:
+                for spec in self._generate_mutations(c):
+                    if self._try_backtest_and_emit(c.symbol, spec):
+                        emitted += 1
+
+            # --- Combinaties (paren van kandidaten per symbool) ---
+            pairs = [
+                (a, b)
+                for i, a in enumerate(sources)
+                for b in sources[i + 1:]
+                if a.symbol == b.symbol
+            ]
+            for a, b in pairs[:_MAX_COMBINATIONS_PER_TICK]:
+                spec = self._generate_combination(a, b)
+                if self._try_backtest_and_emit(a.symbol, spec):
                     emitted += 1
 
-        # --- Combinaties (paren van kandidaten per symbool) ---
-        pairs = [
-            (a, b)
-            for i, a in enumerate(sources)
-            for b in sources[i + 1:]
-            if a.symbol == b.symbol
-        ]
-        for a, b in pairs[:_MAX_COMBINATIONS_PER_TICK]:
-            spec = self._generate_combination(a, b)
-            if self._try_backtest_and_emit(a.symbol, spec):
-                emitted += 1
+            # --- Feature expansies ---
+            for c in sources[:_MAX_EXPANSIONS_PER_TICK]:
+                for spec in self._generate_expansions(c):
+                    if self._try_backtest_and_emit(c.symbol, spec):
+                        emitted += 1
 
-        # --- Feature expansies ---
-        for c in sources[:_MAX_EXPANSIONS_PER_TICK]:
-            for spec in self._generate_expansions(c):
-                if self._try_backtest_and_emit(c.symbol, spec):
-                    emitted += 1
-
-        self._last_action = f"tick_emitted:{emitted}"
-        self._log.debug("Tick voltooid — %d nieuwe varianten geëmitteerd", emitted)
+        self._log.info(
+            "strategy tick | research_candidates=%d seen=%d new=%d",
+            len(sources), len(self._seen_variants), emitted,
+        )
+        self._last_action = f"tick_emitted:{emitted}" if sources else "tick_no_sources"
 
     # ------------------------------------------------------------------
     # Broncandidaten lezen
@@ -274,27 +273,44 @@ class StrategyAnt:
     def _parse_research_file(
         self, path: Path, default_symbol: str
     ) -> list[_SourceCandidate]:
-        """Parseer een research JSONL-bestand (elke regel = StrategyCandidate JSON)."""
+        """
+        Parseer een research JSONL-bestand.
+
+        Research logs zijn AuditEvents:
+          {"event_type": "action_executed", "payload": {"action": "candidate_accepted", ...}}
+        Filter: event_type == "action_executed" AND payload.action == "candidate_accepted".
+        """
         candidates: list[_SourceCandidate] = []
         try:
             for line in path.read_text(encoding="utf-8").splitlines():
                 if not line.strip():
                     continue
                 try:
-                    data = json.loads(line)
+                    record = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+
+                # Uitpakken AuditEvent envelope
+                if "event_type" in record:
+                    payload = record.get("payload") or {}
+                    if payload.get("action") != "candidate_accepted":
+                        continue
+                    data = payload
+                else:
+                    # Directe StrategyCandidate JSON (legacy/tests)
+                    data = record
 
                 cid = data.get("candidate_id", "")
                 if not cid:
                     continue
 
+                # Symbol: payload.symbol heeft voorrang op market_scope.symbol
                 ms     = data.get("market_scope") or {}
-                symbol = ms.get("symbol") or default_symbol
+                symbol = data.get("symbol") or ms.get("symbol") or default_symbol
                 if not symbol:
                     continue
 
-                exit_c = data.get("exit_conditions") or {}
+                exit_c  = data.get("exit_conditions") or {}
                 entry_c = data.get("entry_conditions") or {}
 
                 direction = "long"
@@ -315,7 +331,9 @@ class StrategyAnt:
                     exit_conditions  = exit_c,
                     logic_summary    = data.get("logic_summary", ""),
                     source_type      = "research",
-                    fitness_score    = float(data.get("fitness_score") or 0.0),
+                    fitness_score    = float(
+                        data.get("fitness_score") or data.get("sharpe") or 0.0
+                    ),
                 ))
 
         except OSError:
