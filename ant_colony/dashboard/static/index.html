@@ -814,6 +814,26 @@
     </div>
   </div>
 
+  <!-- Operator input -->
+  <div class="card" style="margin-top:16px">
+    <div class="card-title">Geef mier een link of strategie</div>
+    <div style="display:flex;gap:8px;margin-top:8px;align-items:flex-start">
+      <select id="op-type" style="padding:7px 10px;border:1px solid var(--border);border-radius:6px;background:var(--card);font-size:12px;color:var(--text);flex-shrink:0">
+        <option value="url">URL</option>
+        <option value="text">Tekst</option>
+        <option value="code">Code</option>
+      </select>
+      <textarea id="op-content" rows="3"
+        placeholder="GitHub URL, strategie beschrijving of code..."
+        style="flex:1;padding:7px 10px;border:1px solid var(--border);border-radius:6px;background:var(--card);font-size:12px;color:var(--text);resize:vertical;font-family:inherit"></textarea>
+      <button id="op-submit" onclick="sendOperatorInput()"
+        style="padding:7px 16px;background:var(--queen);color:#fff;border:none;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;flex-shrink:0;align-self:flex-end">
+        Stuur
+      </button>
+    </div>
+    <div id="op-msg" style="margin-top:6px;font-size:11px;color:var(--muted);min-height:16px"></div>
+  </div>
+
 </div>
 
 <!-- ══════════════════════════════════════════════
@@ -853,6 +873,7 @@ const ANT_COLOR = {
   ingestion_ant: '#F97316',
   strategy_ant:  '#06B6D4',
   execution_ant: '#E24B4A',
+  operator_ant:  '#64748B',
 };
 function antColor(t) { return ANT_COLOR[t] || '#9ca3af'; }
 
@@ -1215,6 +1236,8 @@ function renderActivity() {
       badges.push(`<span class="stat-b">${st.orders_placed} geplaatst</span>`);
     if (st.orders_rejected   != null && st.orders_rejected > 0)
       badges.push(`<span class="stat-b neg">${st.orders_rejected} geweigerd</span>`);
+    if (st.inputs_processed  != null)
+      badges.push(`<span class="stat-b">${st.inputs_processed} inputs</span>`);
 
     const statsHtml = badges.length
       ? `<div class="ac-stats">${badges.join('')}</div>` : '';
@@ -1322,6 +1345,43 @@ function doKill(level) {
 function noodstop() {
   if (!confirm('⛔  NOODSTOP\n\nLevel 3 Colony kill-switch — stopt ALLE agents.\nVereist handmatige herstart.\n\nActiveren?')) return;
   sendKill(3, null);
+}
+
+// ── Operator input ─────────────────────────────
+
+async function sendOperatorInput() {
+  const type    = document.getElementById('op-type').value;
+  const content = document.getElementById('op-content').value.trim();
+  const msgEl   = document.getElementById('op-msg');
+  const btn     = document.getElementById('op-submit');
+
+  if (!content) { msgEl.textContent = 'Inhoud mag niet leeg zijn.'; return; }
+
+  btn.disabled = true;
+  msgEl.textContent = 'Versturen...';
+
+  try {
+    const r = await fetch('/api/operator/input', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type, content }),
+    });
+    const d = await r.json();
+    if (r.ok && d.accepted) {
+      msgEl.style.color = 'var(--pnl-pos)';
+      msgEl.textContent = '✓ ' + d.message;
+      document.getElementById('op-content').value = '';
+    } else {
+      msgEl.style.color = 'var(--danger)';
+      msgEl.textContent = 'Fout: ' + (d.detail || JSON.stringify(d));
+    }
+  } catch (e) {
+    msgEl.style.color = 'var(--danger)';
+    msgEl.textContent = 'Verbindingsfout: ' + e.message;
+  } finally {
+    btn.disabled = false;
+    setTimeout(() => { msgEl.textContent = ''; msgEl.style.color = 'var(--muted)'; }, 5000);
+  }
 }
 
 // ── Bootstrap ─────────────────────────────────

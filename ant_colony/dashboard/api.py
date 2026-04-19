@@ -173,6 +173,17 @@ class MissionResponse(BaseModel):
     rejection_detail: str = ""
 
 
+class OperatorInputRequest(BaseModel):
+    type: str       # "url", "text", "code"
+    content: str
+
+
+class OperatorInputResponse(BaseModel):
+    accepted: bool
+    filename: str | None = None
+    message: str = ""
+
+
 class KillSwitchRequest(BaseModel):
     level: int              # 1 = agent, 2 = node, 3 = colony
     scope: str | None = None
@@ -223,6 +234,7 @@ class AntStatsEntry(BaseModel):
     variants_generated:         int   | None = None
     orders_placed:              int   | None = None
     orders_rejected:            int   | None = None
+    inputs_processed:           int   | None = None
 
 
 class AntActivityEntry(BaseModel):
@@ -860,6 +872,48 @@ def create_router(ctx: ColonyContext) -> APIRouter:
         )
 
     # ------------------------------------------------------------------
+    # POST /api/operator/input
+    # ------------------------------------------------------------------
+
+    @router.post("/operator/input", response_model=OperatorInputResponse)
+    def post_operator_input(req: OperatorInputRequest) -> OperatorInputResponse:
+        """
+        Schrijf menselijke input naar ANT_LOGS/operator/input/.
+
+        De OperatorAnt pikt het bestand op bij de volgende tick.
+        """
+        if ctx.logs_root is None:
+            raise HTTPException(status_code=503, detail="logs_root niet geconfigureerd")
+
+        input_type = req.type.strip().lower()
+        if input_type not in ("url", "text", "code"):
+            raise HTTPException(status_code=400, detail="type moet url, text of code zijn")
+
+        content = req.content.strip()
+        if not content:
+            raise HTTPException(status_code=400, detail="content mag niet leeg zijn")
+
+        ts       = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%S")
+        filename = f"{ts}_{input_type}.json"
+
+        input_dir = ctx.logs_root / "operator" / "input"
+        try:
+            input_dir.mkdir(parents=True, exist_ok=True)
+            file_path = input_dir / filename
+            with file_path.open("w", encoding="utf-8") as fh:
+                json.dump({"type": input_type, "content": content}, fh, indent=2)
+        except OSError:
+            logger.exception("POST /api/operator/input: kon bestand niet schrijven")
+            raise HTTPException(status_code=500, detail="failed to write input file")
+
+        logger.info("Operator input geschreven | file=%s type=%s", filename, input_type)
+        return OperatorInputResponse(
+            accepted=True,
+            filename=filename,
+            message=f"Input opgeslagen als {filename}",
+        )
+
+    # ------------------------------------------------------------------
     # GET /api/ants/activity
     # ------------------------------------------------------------------
 
@@ -1083,6 +1137,7 @@ _ANT_LOG_DIRS: dict[str, str] = {
     "ingestion_ant": "ingestion",
     "strategy_ant":  "strategy",
     "execution_ant": "execution",
+    "operator_ant":  "operator",
 }
 
 
@@ -1184,6 +1239,10 @@ def _build_ant_stats(ant_type: str, today_recs: list[dict]) -> AntStatsEntry:
             orders_placed=_count_actions(today_recs, "order_placed", "position_opened"),
             orders_rejected=_count_actions(today_recs, "order_rejected", "rejected", "startup_failed"),
         )
+    if ant_type == "operator_ant":
+        return AntStatsEntry(
+            inputs_processed=_count_actions(today_recs, "operator_input_processed"),
+        )
     return AntStatsEntry()
 
 
@@ -1215,4 +1274,7 @@ def _build_ant_summary(ant_type: str, all_recs: list[dict], stats: AntStatsEntry
         p = stats.orders_placed or 0
         r = stats.orders_rejected or 0
         return f"{p} orders geplaatst, {r} geweigerd — laatste: {action}"
+    if ant_type == "operator_ant":
+        n = stats.inputs_processed or 0
+        return f"{n} inputs verwerkt vandaag — laatste: {action}"
     return f"Laatste actie: {action}"
