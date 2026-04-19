@@ -747,7 +747,8 @@ class TestTick:
         log_path = tmp_path / "strategy" / f"{ant.ant_id}.jsonl"
         if log_path.exists():
             records = [json.loads(l) for l in log_path.read_text().splitlines() if l.strip()]
-            mutation_types = {r["payload"]["mutation_type"] for r in records}
+            variant_records = [r for r in records if r["payload"].get("action") == "variant_emitted"]
+            mutation_types = {r["payload"]["mutation_type"] for r in variant_records}
             # At minimum mutations and/or combinations should appear
             assert len(mutation_types) > 0
 

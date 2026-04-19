@@ -265,6 +265,12 @@ class StrategyAnt:
             len(sources), len(self._seen_variants), emitted,
         )
         self._last_action = f"tick_emitted:{emitted}" if sources else "tick_no_sources"
+        self._write_event("tick_summary", {
+            "research_candidates": len(sources),
+            "seen_variants":       len(self._seen_variants),
+            "variants_emitted":    emitted,
+            "last_action":         self._last_action,
+        })
 
     # ------------------------------------------------------------------
     # Broncandidaten lezen
@@ -580,10 +586,6 @@ class StrategyAnt:
         candidate = self._build_candidate(symbol, spec, results)
         self._write_candidate(candidate)
         self._last_action = f"emitted:{spec['mutation_type']}:{symbol}"
-        self._log.info(
-            "VARIANT GEËMITTEERD | %s %s | sharpe=%.3f win_rate=%.3f parents=%s",
-            symbol, spec["mutation_type"], sharpe, win_rate, spec["parent_ids"],
-        )
         return True
 
     def _build_candidate(
@@ -695,39 +697,47 @@ class StrategyAnt:
     # Log events
     # ------------------------------------------------------------------
 
-    def _write_candidate(self, candidate: StrategyCandidate) -> None:
-        """Schrijf kandidaat als JSON-regel naar ANT_LOGS/strategy/{ant_id}.jsonl."""
+    def _write_event(self, action: str, payload: dict) -> None:
+        """Schrijf een AuditEvent naar ANT_LOGS/strategy/{ant_id}.jsonl."""
         if self.logs_root is None:
             return
-
         event = AuditEvent(
             event_type = AuditEventType.ACTION_EXECUTED,
             source     = self.ant_id,
             mission_id = self.mission.mission_id,
             node_id    = self.mission.allowed_node,
             sequence   = self._log_seq,
-            payload    = {
-                "action":           "variant_emitted",
-                "candidate_id":     candidate.candidate_id,
-                "name":             candidate.name,
-                "mutation_type":    candidate.provenance[0].details.get("mutation_type"),
-                "parent_ids":       candidate.provenance[0].details.get("parent_ids"),
-                "symbol":           candidate.provenance[0].details.get("symbol"),
-                "sharpe_ratio":     candidate.backtest_results.sharpe_ratio if candidate.backtest_results else None,
-                "win_rate":         candidate.backtest_results.win_rate if candidate.backtest_results else None,
-                "total_trades":     candidate.backtest_results.total_trades if candidate.backtest_results else None,
-                "status":           candidate.status.value,
-            },
+            payload    = {"action": action, **payload},
         )
         self._log_seq += 1
-
         log_path = self.logs_root / "strategy" / f"{self.ant_id}.jsonl"
         try:
             log_path.parent.mkdir(parents=True, exist_ok=True)
             with log_path.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(event.model_dump(mode="json"), default=str) + "\n")
         except OSError:
-            self._log.exception("Kon variant niet naar disk schrijven: %s", log_path)
+            self._log.exception("Kon event niet naar disk schrijven: %s", log_path)
+
+    def _write_candidate(self, candidate: StrategyCandidate) -> None:
+        """Schrijf variant_emitted event naar ANT_LOGS/strategy/{ant_id}.jsonl."""
+        self._write_event("variant_emitted", {
+            "candidate_id":  candidate.candidate_id,
+            "name":          candidate.name,
+            "mutation_type": candidate.provenance[0].details.get("mutation_type"),
+            "parent_ids":    candidate.provenance[0].details.get("parent_ids"),
+            "symbol":        candidate.provenance[0].details.get("symbol"),
+            "sharpe_ratio":  candidate.backtest_results.sharpe_ratio if candidate.backtest_results else None,
+            "win_rate":      candidate.backtest_results.win_rate if candidate.backtest_results else None,
+            "total_trades":  candidate.backtest_results.total_trades if candidate.backtest_results else None,
+            "status":        candidate.status.value,
+        })
+        self._log.info(
+            "VARIANT GESCHREVEN | %s %s | sharpe=%.3f win_rate=%.3f",
+            candidate.provenance[0].details.get("symbol"),
+            candidate.provenance[0].details.get("mutation_type"),
+            candidate.backtest_results.sharpe_ratio or 0.0 if candidate.backtest_results else 0.0,
+            candidate.backtest_results.win_rate or 0.0 if candidate.backtest_results else 0.0,
+        )
 
     # ------------------------------------------------------------------
     # Heartbeat
