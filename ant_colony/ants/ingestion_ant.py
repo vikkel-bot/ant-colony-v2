@@ -61,7 +61,8 @@ _SEARCH_TERMS        = [
 ]
 _RESULTS_PER_TERM    = 10
 _MIN_STARS           = 10
-_API_RATE_LIMIT_SECS = 10.0   # GitHub unauthenticated: 10 req/min
+_API_RATE_LIMIT_SECS  = 10.0   # GitHub unauthenticated: 10 req/min
+_RATE_LIMIT_BACKOFF   = 60.0   # wacht 60s bij 403 rate limit response
 _README_MAX_BYTES    = 65_536  # 64 KB — genoeg voor keyword-scan
 
 _ENTRY_KEYWORDS: frozenset[str] = frozenset({
@@ -247,6 +248,12 @@ class IngestionAnt:
                 headers=_GITHUB_HEADERS,
                 timeout=15.0,
             )
+            if resp.status_code == 403:
+                self._log.warning(
+                    "GitHub rate limit (403) voor term '%s' — backoff %.0fs", term, _RATE_LIMIT_BACKOFF
+                )
+                time.sleep(_RATE_LIMIT_BACKOFF)
+                return []
             if resp.status_code != 200:
                 self._log.warning(
                     "GitHub search HTTP %d voor term '%s'", resp.status_code, term

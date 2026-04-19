@@ -528,13 +528,21 @@ class ResearchAnt:
         sharpe   = results.sharpe_ratio or 0.0
         win_rate = results.win_rate or 0.0
 
-        self._log.debug(
-            "%s %s | direction=%s sharpe=%.3f win_rate=%.3f trades=%s",
+        if sharpe < _SHARPE_THRESHOLD or win_rate < _WIN_RATE_THRESHOLD:
+            self._log.info(
+                "Kandidaat REJECTED | %s %s | direction=%s sharpe=%.3f (min %.2f)"
+                " win_rate=%.3f (min %.2f) trades=%s",
+                symbol, signal_type, direction,
+                sharpe, _SHARPE_THRESHOLD,
+                win_rate, _WIN_RATE_THRESHOLD,
+                results.total_trades,
+            )
+            return
+
+        self._log.info(
+            "Kandidaat ACCEPTED | %s %s | direction=%s sharpe=%.3f win_rate=%.3f trades=%s",
             symbol, signal_type, direction, sharpe, win_rate, results.total_trades,
         )
-
-        if sharpe < _SHARPE_THRESHOLD or win_rate < _WIN_RATE_THRESHOLD:
-            return
 
         candidate_id = (
             f"candidate-{symbol.lower().replace('-', '')}"
