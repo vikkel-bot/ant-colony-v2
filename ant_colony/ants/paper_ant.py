@@ -228,8 +228,8 @@ class PaperAnt:
             if not symbol:
                 continue
 
-            # Sla over als er al een open positie is voor dit symbool
-            if any(p.symbol == symbol for p in self._ledger.open_positions):
+            # Vroeg afkappen — _try_open_position blokkeert het ook, maar dit bespaart werk
+            if self._has_open_position(symbol):
                 self._log.debug("Al een open positie voor %s — signaal overgeslagen", symbol)
                 continue
 
@@ -242,12 +242,23 @@ class PaperAnt:
 
             self._try_open_position(sig)
 
+    def _has_open_position(self, symbol: str) -> bool:
+        """True als er al een open positie is voor dit symbool."""
+        return any(p.symbol == symbol for p in self._ledger.open_positions)
+
     def _try_open_position(self, sig: dict) -> None:
         """Bouw een EntrySignal en probeer een LONG positie te openen via PaperBroker."""
         symbol      = sig.get("symbol", "")
         entry_price = sig.get("current_price", 0.0)
 
-        if entry_price <= 0:
+        if not symbol or entry_price <= 0:
+            return
+
+        # Definitieve guard — blokkeert duplicaten ongeacht aanroeppad
+        if self._has_open_position(symbol):
+            self._log.debug(
+                "_try_open_position: al open positie voor %s — geblokkeerd", symbol
+            )
             return
 
         sl = entry_price * (1.0 - _SL_PCT)
@@ -330,8 +341,13 @@ class PaperAnt:
 
     def _open_from_candidate(self, record: dict) -> None:
         """Open een paper positie op basis van een APPROVED StrategyCandidate record."""
-        market_scope     = record.get("market_scope") or {}
-        symbol           = str(market_scope.get("symbol") or "")
+        market_scope = record.get("market_scope") or {}
+        # Ondersteunt zowel "symbol": "BTC-EUR" als "symbols": ["BTC-EUR", ...]
+        raw_symbol = market_scope.get("symbol") or ""
+        if not raw_symbol:
+            symbols_list = market_scope.get("symbols") or []
+            raw_symbol = symbols_list[0] if symbols_list else ""
+        symbol = str(raw_symbol)
         if not symbol:
             return
 

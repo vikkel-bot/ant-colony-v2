@@ -20,6 +20,10 @@ Gebruik:
 
 from __future__ import annotations
 
+from pathlib import Path
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
 import argparse
 import logging
 import os
@@ -30,7 +34,6 @@ import threading
 import time
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # Project root op sys.path zetten zodat ant_colony importeerbaar is
@@ -170,6 +173,26 @@ def _kill_port(port: int, log: logging.Logger) -> None:
 
     # Korte pauze zodat de OS-poort vrijkomt
     time.sleep(1)
+
+
+# ---------------------------------------------------------------------------
+# Advisor thread (elke 5 minuten = 60 scheduler-ticks van 5 seconden)
+# ---------------------------------------------------------------------------
+
+_ADVISOR_INTERVAL = 300   # seconden
+
+
+def _run_advisor_loop(advisor, queen, log: logging.Logger) -> None:
+    """Daemon thread: één advies-cyclus per 5 minuten."""
+    log.info("QueenAdvisor thread gestart (interval=%ds).", _ADVISOR_INTERVAL)
+    while True:
+        try:
+            import time as _time
+            _time.sleep(_ADVISOR_INTERVAL)
+            decision = advisor.advise()
+            queen.apply_advisor_decision(decision)
+        except Exception:
+            log.exception("QueenAdvisor loop fout — volgende cyclus over %ds.", _ADVISOR_INTERVAL)
 
 
 # ---------------------------------------------------------------------------
@@ -946,6 +969,21 @@ def main() -> None:
             log.info("ClaudeAnt uitgeschakeld (opt-in vereist — zet CLAUDE_ANT_ENABLED=true).")
     except Exception:
         log.exception("ClaudeAnt bootstrap mislukt — colony draait door zonder ClaudeAnt.")
+
+    # --- Stap 8d: QueenAdvisor (eigen try-blok) ---
+    try:
+        from ant_colony.queen.queen_advisor import QueenAdvisor
+
+        advisor = QueenAdvisor(queen=queen, logs_root=logs_root)
+        threading.Thread(
+            target=_run_advisor_loop,
+            args=(advisor, queen, log),
+            name="queen-advisor",
+            daemon=True,
+        ).start()
+        log.info("QueenAdvisor gestart | interval=%ds", _ADVISOR_INTERVAL)
+    except Exception:
+        log.exception("QueenAdvisor bootstrap mislukt — colony draait door.")
 
     # --- Stap 9: bouw ColonyContext en start dashboard (blocking) ---
     context = ColonyContext(

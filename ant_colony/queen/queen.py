@@ -41,6 +41,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 
@@ -647,6 +648,68 @@ class Queen:
             extra={"reason": reason, "from_status": candidate.status.value},
         )
         return rejected
+
+    # ------------------------------------------------------------------
+    # Advisor integratie
+    # ------------------------------------------------------------------
+
+    def apply_advisor_decision(self, decision) -> None:
+        """
+        Verwerk een QueenDecision van QueenAdvisor.
+
+        Queen heeft altijd veto: acties worden gelogd; allocatie-aanpassingen
+        worden doorgevoerd als het plan geldig is. kapitaal_verhogen/verlagen
+        worden als aanbevelingen gelogd (mission capital is immutable).
+
+        Args:
+            decision: QueenDecision van QueenAdvisor.advise().
+        """
+        from ant_colony.queen.allocator import AllocationPlan
+
+        if decision.is_empty():
+            logger.debug("apply_advisor_decision: lege beslissing — niets te doen")
+            return
+
+        # Allocatie aanpassen als het plan adviezen bevat
+        alloc_result = None
+        if decision.allocatie_aanpassingen:
+            try:
+                plan = AllocationPlan(allocations=decision.allocatie_aanpassingen)
+                alloc_result = self.apply_allocation_plan(plan)
+                logger.info(
+                    "Advisor allocatie toegepast: applied=%s biomes=%s",
+                    alloc_result.applied,
+                    list(decision.allocatie_aanpassingen.keys()),
+                )
+            except Exception:
+                logger.exception("Advisor allocatie kon niet worden toegepast")
+
+        # Log de volledige beslissing
+        self._log_advisor_decision(decision, alloc_result)
+
+    def _log_advisor_decision(self, decision, alloc_result=None) -> None:
+        if self._logs_root is None:
+            return
+        record = {
+            "timestamp":               datetime.now(tz=timezone.utc).isoformat(),
+            "allocatie_aanpassingen":  decision.allocatie_aanpassingen,
+            "prioriteit_kandidaten":   decision.prioriteit_kandidaten,
+            "deprioriteer_kandidaten": decision.deprioriteer_kandidaten,
+            "kapitaal_verhogen":       decision.kapitaal_verhogen,
+            "kapitaal_verlagen":       decision.kapitaal_verlagen,
+            "adviezen_gevolgd":        decision.adviezen_gevolgd,
+            "adviezen_genegeerd":      decision.adviezen_genegeerd,
+            "allocatie_toegepast":     alloc_result.applied if alloc_result else None,
+        }
+        log_path = self._logs_root / "queen" / "decisions.jsonl"
+        self._append_to_log(log_path, record)
+        logger.info(
+            "Advisor beslissing gelogd | gevolgd=%d genegeerd=%d verhogen=%d verlagen=%d",
+            len(decision.adviezen_gevolgd),
+            len(decision.adviezen_genegeerd),
+            len(decision.kapitaal_verhogen),
+            len(decision.kapitaal_verlagen),
+        )
 
     # ------------------------------------------------------------------
     # Kill-switch
