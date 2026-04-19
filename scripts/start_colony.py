@@ -425,7 +425,7 @@ def main() -> None:
                 market_scope=_crypto_scope,
                 capital_limit=0.0,
                 risk_limits=_obs_risk,
-                ttl=3600,
+                ttl=86400,
                 heartbeat_interval=60,
                 success_conditions=SuccessConditions(
                     description="Detecteer en rapporteer minstens één kansrijke marktstructuur "
@@ -448,7 +448,7 @@ def main() -> None:
                 market_scope=_crypto_scope,
                 capital_limit=0.0,
                 risk_limits=_obs_risk,
-                ttl=7200,
+                ttl=86400,
                 heartbeat_interval=120,
                 success_conditions=SuccessConditions(
                     description="Voer minimaal één backtest uit en dien een StrategyCandidate "
@@ -525,7 +525,7 @@ def main() -> None:
                 market_scope=_crypto_scope,
                 capital_limit=0.0,
                 risk_limits=_obs_risk,
-                ttl=3600,
+                ttl=86400,
                 heartbeat_interval=120,
                 success_conditions=SuccessConditions(
                     description="Zoek publieke strategiebronnen en normaliseer naar "
@@ -548,7 +548,7 @@ def main() -> None:
                 market_scope=_crypto_scope,
                 capital_limit=0.0,
                 risk_limits=_obs_risk,
-                ttl=7200,
+                ttl=86400,
                 heartbeat_interval=120,
                 success_conditions=SuccessConditions(
                     description="Genereer en valideer strategie-varianten via walk-forward "
