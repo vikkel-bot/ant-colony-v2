@@ -912,6 +912,11 @@ function renderQueen() {
       <div class="queen-dec-act">${d.action}</div>
       ${d.reason ? `<div class="queen-dec-why">${d.reason}</div>` : ''}
     </div>`;
+  } else {
+    decisionHtml = `<div class="queen-decision">
+      <div class="queen-dec-ts">Laatste beslissing</div>
+      <div class="queen-dec-act" style="color:var(--faint)">Wacht op paper trade data</div>
+    </div>`;
   }
 
   el.innerHTML = regimeHtml + stratHtml + decisionHtml;

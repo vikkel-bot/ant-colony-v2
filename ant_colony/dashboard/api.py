@@ -967,11 +967,15 @@ def create_router(ctx: ColonyContext) -> APIRouter:
             elif not records:
                 summary = "Actief maar nog geen events gelogd."
             else:
-                last_rec  = records[-1]
+                # Gebruik alleen huidige sessie (meest recente ant_id) voor display.
+                # Zo lekken timestamps van vorige sessies niet door in last_seen/summary.
+                session_recs = _latest_session_records(records) or records
+
+                last_rec  = session_recs[-1]
                 last_ts   = _parse_ts(last_rec.get("timestamp"))
                 last_seen = _to_local_str(last_ts) if last_ts else None
 
-                recent_events = [_event_short(r) for r in records[-3:]]
+                recent_events = [_event_short(r) for r in session_recs[-3:]]
 
                 today_recs = [
                     r for r in records
@@ -979,7 +983,7 @@ def create_router(ctx: ColonyContext) -> APIRouter:
                 ]
 
                 stats   = _build_ant_stats(ant_type, today_recs)
-                summary = _build_ant_summary(ant_type, records, stats)
+                summary = _build_ant_summary(ant_type, session_recs, stats)
 
             result.append(AntActivityEntry(
                 ant_type=ant_type,
@@ -1547,27 +1551,47 @@ def _read_queen_status_data(logs_root: Path) -> dict:
         for c in scored[:3]
     ]
 
-    # Laatste Queen beslissing
+    # Laatste Queen beslissing uit ANT_LOGS/queen/decisions.jsonl
     last_decision: dict | None = None
-    queen_dir = logs_root / "queen"
-    if queen_dir.exists():
-        for path in sorted(queen_dir.glob("*.jsonl")):
-            try:
-                last_line: str | None = None
-                with path.open("r", encoding="utf-8") as fh:
-                    for line in fh:
-                        line = line.strip()
-                        if line:
-                            last_line = line
-                if last_line:
-                    rec = json.loads(last_line)
-                    payload = rec.get("payload") or rec
-                    last_decision = {
-                        "timestamp": rec.get("timestamp"),
-                        "action": payload.get("action") or payload.get("decision") or "unknown",
-                        "reason": payload.get("reason") or payload.get("rationale") or "",
-                    }
-            except (OSError, json.JSONDecodeError):
-                pass
+    decisions_path = logs_root / "queen" / "decisions.jsonl"
+    if decisions_path.exists():
+        try:
+            last_line: str | None = None
+            with decisions_path.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if line:
+                        last_line = line
+            if last_line:
+                rec = json.loads(last_line)
+                verhogen   = rec.get("kapitaal_verhogen") or []
+                verlagen   = rec.get("kapitaal_verlagen") or []
+                prioriteit = rec.get("prioriteit_kandidaten") or []
+                gevolgd    = rec.get("adviezen_gevolgd") or []
+                genegeerd  = rec.get("adviezen_genegeerd") or []
+
+                if verhogen:
+                    action = f"Kapitaal verhogen ({len(verhogen)} mission{'s' if len(verhogen) != 1 else ''})"
+                elif verlagen:
+                    action = f"Kapitaal verlagen ({len(verlagen)} mission{'s' if len(verlagen) != 1 else ''})"
+                elif prioriteit:
+                    action = f"Prioriteit aanpassen ({len(prioriteit)} kandidaat{'en' if len(prioriteit) != 1 else ''})"
+                elif gevolgd:
+                    action = "Aanpassingen doorgevoerd"
+                elif genegeerd:
+                    action = "Neutraal — onvoldoende bewijs"
+                else:
+                    action = "Neutraal"
+
+                # Eerste niet-lege reden als toelichting
+                reason = next((s for s in gevolgd + genegeerd if s), "")
+
+                last_decision = {
+                    "timestamp": rec.get("timestamp"),
+                    "action": action,
+                    "reason": reason,
+                }
+        except (OSError, json.JSONDecodeError):
+            pass
 
     return {"regime": regime, "top_strategies": top_strategies, "last_decision": last_decision}
