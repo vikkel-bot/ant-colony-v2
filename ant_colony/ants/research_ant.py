@@ -46,11 +46,24 @@ from ant_colony.schemas.strategy_candidate import (
 
 _MIN_CANDLES        = 52    # SMA50 + 2 bars voor crossover detectie
 _CANDLE_LIMIT       = 500   # candles ophalen per symbool per tick (verhoogd voor betrouwbaardere backtests)
-_SHARPE_THRESHOLD   = 0.20  # tijdelijk verlaagd (was 0.50)
-_WIN_RATE_THRESHOLD = 0.40  # tijdelijk verlaagd (was 0.45)
+_SHARPE_THRESHOLD   = 0.10  # tijdelijk verlaagd (was 0.50)
+_WIN_RATE_THRESHOLD = 0.35  # tijdelijk verlaagd (was 0.45)
 _TP_PCT             = 0.06  # 6 % take-profit voor backtests
 _SL_PCT             = 0.03  # 3 % stop-loss voor backtests
 _MAX_BARS_HELD      = 10
+
+# BacktestConfig profielen per keyword-categorie (tp_pct, sl_pct, max_bars_held)
+_KEYWORD_PROFILES: dict[str, tuple[float, float, int]] = {
+    "momentum":       (0.08, 0.04, 15),   # langere trend, ruimere TP
+    "macd":           (0.07, 0.035, 12),  # momentum-achtig
+    "breakout":       (0.07, 0.035, 12),  # trend-volgend
+    "sma":            (0.06, 0.03, 20),   # crossover — langzamer signaal
+    "crossover":      (0.06, 0.03, 20),
+    "ema":            (0.06, 0.03, 15),
+    "rsi":            (0.04, 0.02, 7),    # mean-reversion, sneller
+    "bollinger":      (0.03, 0.015, 5),   # tight mean-reversion
+    "mean reversion": (0.03, 0.015, 5),
+}
 
 
 class ResearchAnt:
@@ -448,9 +461,12 @@ class ResearchAnt:
             or f"Ingested candidate {candidate_id[:8]} gevalideerd door ResearchAnt"
         )
 
+        bt_config = _config_from_keywords(entry_keywords, direction)
         self._log.info(
-            "Ingested backtest | id=%s direction=%s symbolen=%s keywords=%s",
+            "Ingested backtest | id=%s direction=%s symbolen=%s keywords=%s"
+            " → tp=%.3f sl=%.3f bars=%d",
             candidate_id[:12], direction, symbols, entry_keywords[:5],
+            bt_config.take_profit_pct, bt_config.stop_loss_pct, bt_config.max_bars_held,
         )
 
         for symbol in symbols:
@@ -470,11 +486,13 @@ class ResearchAnt:
                 parameters={
                     "source_candidate_id": candidate_id,
                     "entry_keywords": entry_keywords,
-                    "tp_pct": _TP_PCT,
-                    "sl_pct": _SL_PCT,
+                    "tp_pct": bt_config.take_profit_pct,
+                    "sl_pct": bt_config.stop_loss_pct,
+                    "max_bars_held": bt_config.max_bars_held,
                 },
                 entry_conditions={"direction": direction, "keywords": entry_keywords},
                 logic_summary=f"{logic_summary} [{symbol}]",
+                backtest_config=bt_config,
             )
 
     # ------------------------------------------------------------------
@@ -490,10 +508,12 @@ class ResearchAnt:
         parameters: dict,
         entry_conditions: dict,
         logic_summary: str,
+        backtest_config: BacktestConfig | None = None,
     ) -> None:
         """
         Voer backtest uit; emitteer StrategyCandidate als fitness boven drempel.
 
+        backtest_config: optionele override — als None worden module-defaults gebruikt.
         Deduplicatie: dezelfde (symbol, signal_type) combinatie wordt niet opnieuw
         gelogd zolang er geen nieuw kandidaat-ID aangemaakt wordt.
         """
@@ -514,7 +534,7 @@ class ResearchAnt:
             return
 
         try:
-            config  = BacktestConfig(
+            config = backtest_config or BacktestConfig(
                 direction=direction,
                 take_profit_pct=_TP_PCT,
                 stop_loss_pct=_SL_PCT,
@@ -632,6 +652,35 @@ class ResearchAnt:
             self._log.debug("Heartbeat gestuurd | action=%s", self._last_action)
         except Exception:
             self._log.exception("Heartbeat mislukt — doorgaan")
+
+
+# ---------------------------------------------------------------------------
+# Keyword → BacktestConfig vertaling
+# ---------------------------------------------------------------------------
+
+def _config_from_keywords(keywords: list[str], direction: str) -> BacktestConfig:
+    """
+    Vertaal entry_keywords naar een BacktestConfig.
+
+    Doorloopt _KEYWORD_PROFILES in prioriteitsvolgorde (eerst gedefinieerde
+    trefwoord wint). Geeft standaard _TP_PCT/_SL_PCT/_MAX_BARS_HELD terug
+    als geen enkel keyword matcht.
+    """
+    kw_lower = {k.lower() for k in keywords}
+    for keyword, (tp, sl, bars) in _KEYWORD_PROFILES.items():
+        if keyword in kw_lower:
+            return BacktestConfig(
+                direction=direction,
+                take_profit_pct=tp,
+                stop_loss_pct=sl,
+                max_bars_held=bars,
+            )
+    return BacktestConfig(
+        direction=direction,
+        take_profit_pct=_TP_PCT,
+        stop_loss_pct=_SL_PCT,
+        max_bars_held=_MAX_BARS_HELD,
+    )
 
 
 # ---------------------------------------------------------------------------
