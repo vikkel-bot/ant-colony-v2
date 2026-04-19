@@ -997,6 +997,80 @@ def main() -> None:
     except Exception:
         log.exception("QueenAdvisor bootstrap mislukt — colony draait door.")
 
+    # --- Stap 8e: OperatorAnt (eigen try-blok) ---
+    try:
+        from ant_colony.ants.operator_ant import OperatorAnt
+        from ant_colony.colony.scheduler.colony_scheduler import AgentRecord
+        from ant_colony.schemas.mission import (
+            AbortConditions,
+            MarketScope,
+            Mission,
+            RiskLimits,
+            SuccessConditions,
+        )
+
+        _ts_op     = datetime.now(tz=timezone.utc).strftime("%Y%m%d-%H%M%S")
+        _obs_risk_op = RiskLimits(
+            max_drawdown_pct=0.01, max_position_size=1.0,
+            daily_loss_limit=1.0, stop_loss_required=False,
+        )
+        _crypto_scope_op = MarketScope(
+            biome="crypto",
+            symbols=["BTC-EUR", "ETH-EUR", "SOL-EUR"],
+            timeframes=["1h"],
+        )
+        operator_ant_id  = f"ant-operator-{_ts_op}"
+        operator_mission = Mission(
+            mission_id=f"operator-{_ts_op}",
+            ant_type="operator_ant",
+            allowed_node=args.node_id,
+            allowed_actions=["read_data", "report"],
+            market_scope=_crypto_scope_op,
+            capital_limit=0.0,
+            risk_limits=_obs_risk_op,
+            ttl=86400,
+            heartbeat_interval=60,
+            success_conditions=SuccessConditions(
+                description="Verwerk operator input (URL/tekst/code) naar ingestion-kandidaten.",
+            ),
+            abort_conditions=AbortConditions(
+                stale_heartbeat=True,
+                capital_limit_breach=False,
+                risk_limit_breach=False,
+                ttl_expired=True,
+            ),
+        )
+        op_result = queen.issue_mission(operator_mission)
+        if not op_result.accepted:
+            log.warning(
+                "OperatorAnt missie geweigerd: %s — %s",
+                op_result.rejection_reason, op_result.rejection_detail,
+            )
+        else:
+            operator_ant = OperatorAnt(
+                ant_id=operator_ant_id,
+                mission=operator_mission,
+                scheduler=scheduler,
+                logs_root=logs_root,
+                node_id=args.node_id,
+            )
+            threading.Thread(
+                target=operator_ant.run,
+                name=f"operator-{operator_ant_id[:20]}",
+                daemon=True,
+            ).start()
+            scheduler.register_agent(AgentRecord(
+                ant_id=operator_ant_id,
+                mission_id=operator_mission.mission_id,
+                node_id=args.node_id,
+                ant_type="operator_ant",
+                ttl=operator_mission.ttl,
+                heartbeat_interval=operator_mission.heartbeat_interval,
+            ))
+            log.info("OperatorAnt gestart | ant_id=%s  ttl=%ds", operator_ant_id, operator_mission.ttl)
+    except Exception:
+        log.exception("OperatorAnt bootstrap mislukt — colony draait door zonder OperatorAnt.")
+
     # --- Stap 9: bouw ColonyContext en start dashboard (blocking) ---
     context = ColonyContext(
         queen=queen,

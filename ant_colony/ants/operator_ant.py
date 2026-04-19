@@ -99,6 +99,7 @@ class OperatorAnt:
 
     def run(self) -> AntStatus:
         """Blokkerende tick-loop. Retourneert AntStatus bij afsluiting."""
+        self._log.info("OperatorAnt run() gestart")
         self._status = AntStatus.RUNNING
         self._log.info(
             "OperatorAnt gestart | mission=%s ttl=%ds",
