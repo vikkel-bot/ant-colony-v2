@@ -332,6 +332,7 @@ class ResearchAnt:
             return
         ingestion_dir = self.logs_root / "ingestion"
         if not ingestion_dir.exists():
+            self._log.debug("Ingestion map niet gevonden: %s", ingestion_dir)
             return
 
         biome_id  = self.mission.market_scope.biome
@@ -341,6 +342,7 @@ class ResearchAnt:
             else "1h"
         )
 
+        new_count = 0
         for path in sorted(ingestion_dir.glob("*.jsonl")):
             try:
                 for line in path.read_text(encoding="utf-8").splitlines():
@@ -359,9 +361,21 @@ class ResearchAnt:
                     if not candidate_id or candidate_id in self._seen_ingestion_ids:
                         continue
                     self._seen_ingestion_ids.add(candidate_id)
+                    new_count += 1
                     self._backtest_ingested_candidate(candidate_id, payload, biome_id, timeframe)
             except OSError:
                 self._log.warning("Kan ingestion-log niet lezen: %s", path)
+
+        if new_count:
+            self._log.info(
+                "Ingestion kandidaten gelezen: %d nieuw (totaal gezien: %d)",
+                new_count, len(self._seen_ingestion_ids),
+            )
+        else:
+            self._log.debug(
+                "Geen nieuwe ingestion kandidaten (totaal gezien: %d)",
+                len(self._seen_ingestion_ids),
+            )
 
     def _backtest_ingested_candidate(
         self,
@@ -370,45 +384,70 @@ class ResearchAnt:
         biome_id: str,
         timeframe: str,
     ) -> None:
-        """Haal candles op voor een ingested candidate en emit als backtest slaagt."""
-        symbol    = str(payload.get("market_scope", {}).get("symbol") or "")
-        direction = str(
-            payload.get("entry_conditions", {}).get("direction")
-            or payload.get("parameters", {}).get("direction")
-            or "long"
-        )
-        if not symbol:
-            self._log.debug("Ingested candidate %s heeft geen symbool — overgeslagen", candidate_id)
-            return
+        """
+        Backtest een ingested candidate op alle missie-symbolen.
 
-        candles = self._fetch_candles(symbol, timeframe, biome_id)
-        if len(candles) < _MIN_CANDLES:
-            self._log.debug(
-                "Te weinig candles voor ingested %s/%s (%d/%d)",
-                candidate_id, symbol, len(candles), _MIN_CANDLES,
+        IngestionAnt-payloads bevatten geen specifiek symbool (GitHub repos zijn
+        niet symbool-specifiek). We testen de strategie op alle symbolen uit de
+        missie. Richting leiden we af uit entry_keywords (default: long).
+        """
+        # --- symbolen bepalen ---
+        # Payload heeft geen market_scope veld; gebruik missie-symbolen.
+        market_scope = payload.get("market_scope") or {}
+        symbol_field = market_scope.get("symbol") or market_scope.get("symbols")
+        if isinstance(symbol_field, list):
+            symbols = [str(s) for s in symbol_field if s]
+        elif symbol_field:
+            symbols = [str(symbol_field)]
+        else:
+            symbols = list(self.mission.market_scope.symbols)
+
+        if not symbols:
+            self._log.warning(
+                "Ingested candidate %s: geen symbolen gevonden — overgeslagen", candidate_id
             )
             return
 
-        tp_pct = float(payload.get("parameters", {}).get("take_profit_pct") or _TP_PCT)
-        sl_pct = float(payload.get("parameters", {}).get("stop_loss_pct") or _SL_PCT)
+        # --- richting afleiden uit entry_keywords ---
+        entry_keywords = payload.get("entry_keywords") or []
+        if "short" in entry_keywords and "long" not in entry_keywords:
+            direction = "short"
+        else:
+            direction = "long"
 
-        self._evaluate_and_emit(
-            symbol=symbol,
-            candles=candles,
-            signal_type=f"ingested_{candidate_id[:8]}",
-            direction=direction,
-            parameters={
-                **payload.get("parameters", {}),
-                "source_candidate_id": candidate_id,
-                "tp_pct": tp_pct,
-                "sl_pct": sl_pct,
-            },
-            entry_conditions=payload.get("entry_conditions", {}),
-            logic_summary=(
-                payload.get("logic_summary")
-                or f"Ingested candidate {candidate_id[:8]} gevalideerd door ResearchAnt"
-            ),
+        logic_summary = (
+            payload.get("logic_summary")
+            or f"Ingested candidate {candidate_id[:8]} gevalideerd door ResearchAnt"
         )
+
+        self._log.info(
+            "Ingested backtest | id=%s direction=%s symbolen=%s keywords=%s",
+            candidate_id[:12], direction, symbols, entry_keywords[:5],
+        )
+
+        for symbol in symbols:
+            candles = self._fetch_candles(symbol, timeframe, biome_id)
+            if len(candles) < _MIN_CANDLES:
+                self._log.debug(
+                    "Te weinig candles voor ingested %s/%s (%d/%d)",
+                    candidate_id[:8], symbol, len(candles), _MIN_CANDLES,
+                )
+                continue
+
+            self._evaluate_and_emit(
+                symbol=symbol,
+                candles=candles,
+                signal_type=f"ingested_{candidate_id[:8]}",
+                direction=direction,
+                parameters={
+                    "source_candidate_id": candidate_id,
+                    "entry_keywords": entry_keywords,
+                    "tp_pct": _TP_PCT,
+                    "sl_pct": _SL_PCT,
+                },
+                entry_conditions={"direction": direction, "keywords": entry_keywords},
+                logic_summary=f"{logic_summary} [{symbol}]",
+            )
 
     # ------------------------------------------------------------------
     # Evaluatie + emissie

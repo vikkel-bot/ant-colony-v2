@@ -223,15 +223,17 @@ def test_duplicate_candidate_id_not_reprocessed(tmp_path: Path) -> None:
     assert cid in ant._seen_ingestion_ids
 
 
-def test_payload_without_symbol_skipped(tmp_path: Path) -> None:
-    """Payload zonder symbool → overgeslagen, geen crash."""
+def test_payload_without_symbol_uses_mission_symbols(tmp_path: Path) -> None:
+    """Payload zonder symbool → valt terug op missie-symbolen, backtest wordt uitgevoerd."""
     ant = make_ant(tmp_path)
-    stub_backtester(ant)
+    stub_backtester(ant, sharpe=0.9, win_rate=0.6)
+    # Schrijf event zonder market_scope.symbol
     write_ingestion_event(tmp_path / "ingestion", symbol="")
 
     ant._process_ingestion_candidates()
 
-    assert read_research_log(tmp_path) == []
+    # Missie heeft BTC-EUR → backtest moet uitgevoerd zijn
+    assert ant._backtester.run.called
 
 
 def test_multiple_candidates_each_processed(tmp_path: Path) -> None:
