@@ -56,6 +56,7 @@ _TRADE_CAPITAL_FRACTION = 0.10   # 10% van beschikbaar kapitaal per trade
 _SL_PCT  = 0.02                  # 2% stop-loss onder entry
 _TP_PCT  = 0.03                  # 3% take-profit boven entry
 _SIGNAL_VALIDITY_TICKS = 2       # signal geldig voor heartbeat_interval × 2 seconden
+_MAX_OPEN_POSITIONS    = 3       # maximaal 3 open posities tegelijk (1 per symbool)
 
 
 class PaperAnt:
@@ -104,6 +105,15 @@ class PaperAnt:
         self._log_seq: int = 0
 
         self._log = logging.getLogger(f"ant.paper.{ant_id[:8]}")
+
+        # Symbolen met open posities — geladen uit logs bij herstart zodat
+        # duplicaten geblokkeerd worden ook als de ledger leeg is na herstart.
+        self._open_symbols: set[str] = self._load_open_symbols_from_logs()
+        if self._open_symbols:
+            self._log.info(
+                "Herstart gedetecteerd — %d open positie(s) hersteld: %s",
+                len(self._open_symbols), ", ".join(sorted(self._open_symbols)),
+            )
 
     # ------------------------------------------------------------------
     # Publieke interface
@@ -204,6 +214,7 @@ class PaperAnt:
             if result.position.is_open():
                 self._ledger.update_open(result.position)
             else:
+                self._open_symbols.discard(result.position.symbol)
                 self._ledger.record_closed(result.position)
                 self._emit_trade_closed(result.position)
                 self._last_action = f"trade_closed:{result.position.symbol}"
@@ -243,8 +254,54 @@ class PaperAnt:
             self._try_open_position(sig)
 
     def _has_open_position(self, symbol: str) -> bool:
-        """True als er al een open positie is voor dit symbool."""
-        return any(p.symbol == symbol for p in self._ledger.open_positions)
+        """True als er al een open positie is (ledger of hersteld uit logs bij herstart)."""
+        return (
+            symbol in self._open_symbols
+            or any(p.symbol == symbol for p in self._ledger.open_positions)
+        )
+
+    def _load_open_symbols_from_logs(self) -> set[str]:
+        """
+        Scan ANT_LOGS/paper/*.jsonl op trade_opened / trade_closed events.
+
+        Retourneert de set van symbolen met een open (onafgesloten) positie.
+        Gebruikt bij startup zodat herstart geen duplicate posities opent.
+        """
+        if self.logs_root is None:
+            return set()
+        paper_dir = self.logs_root / "paper"
+        if not paper_dir.exists():
+            return set()
+
+        opened: dict[str, str] = {}   # position_id → symbol
+        closed_ids: set[str] = set()
+
+        for path in paper_dir.glob("*.jsonl"):
+            if path.name.endswith("_trades.jsonl"):
+                continue   # alleen closed trades — niet bruikbaar voor recovery
+            try:
+                for line in path.read_text(encoding="utf-8").splitlines():
+                    if not line.strip():
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    payload = record.get("payload") or {}
+                    action  = payload.get("action")
+                    pos_id  = str(payload.get("position_id") or "")
+                    if not pos_id:
+                        continue
+                    if action == "trade_opened":
+                        sym = str(payload.get("symbol") or "")
+                        if sym:
+                            opened[pos_id] = sym
+                    elif action == "trade_closed":
+                        closed_ids.add(pos_id)
+            except OSError:
+                pass
+
+        return {sym for pid, sym in opened.items() if pid not in closed_ids}
 
     def _try_open_position(self, sig: dict) -> None:
         """Bouw een EntrySignal en probeer een LONG positie te openen via PaperBroker."""
@@ -258,6 +315,17 @@ class PaperAnt:
         if self._has_open_position(symbol):
             self._log.debug(
                 "_try_open_position: al open positie voor %s — geblokkeerd", symbol
+            )
+            return
+
+        # Globale cap: maximaal _MAX_OPEN_POSITIONS posities tegelijk
+        current_open = len(self._ledger.open_positions) + len(
+            self._open_symbols - {p.symbol for p in self._ledger.open_positions}
+        )
+        if current_open >= _MAX_OPEN_POSITIONS:
+            self._log.debug(
+                "_try_open_position: max open posities (%d) bereikt — %s geblokkeerd",
+                _MAX_OPEN_POSITIONS, symbol,
             )
             return
 
@@ -293,6 +361,7 @@ class PaperAnt:
         result = self._broker.open_position(entry_signal, capital_available)
 
         if result.accepted and result.position is not None:
+            self._open_symbols.add(symbol)
             self._ledger.record_opened(result.position)
             self._emit_trade_opened(result.position, sig)
             self._last_action = f"trade_opened:{symbol}"
@@ -373,7 +442,7 @@ class PaperAnt:
             return
 
         # Sla over als er al een open positie is voor dit symbool
-        if any(p.symbol == symbol for p in self._ledger.open_positions):
+        if self._has_open_position(symbol):
             self._log.debug("Al een open positie voor %s — approved candidate overgeslagen", symbol)
             return
 

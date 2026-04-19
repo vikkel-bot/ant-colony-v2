@@ -14,7 +14,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from ant_colony.ants.paper_ant import PaperAnt, _SL_PCT, _TP_PCT, _TRADE_CAPITAL_FRACTION
+from ant_colony.ants.paper_ant import (
+    PaperAnt,
+    _MAX_OPEN_POSITIONS,
+    _SL_PCT,
+    _TP_PCT,
+    _TRADE_CAPITAL_FRACTION,
+)
 from ant_colony.exit_chain.position import PaperPosition, PositionSide, PositionStatus
 from ant_colony.schemas.ant import AntStatus
 from ant_colony.schemas.mission import (
@@ -561,3 +567,157 @@ class TestScoutLogEdgeCases:
         with patch.object(Path, "read_text", side_effect=OSError("perm")):
             ant._tick()
         assert len(ant._ledger.open_positions) == 0
+
+
+# ---------------------------------------------------------------------------
+# 11. Max open posities cap
+# ---------------------------------------------------------------------------
+
+
+class TestMaxOpenPositions:
+    def test_cap_blocks_fourth_position(self, tmp_path: Path) -> None:
+        symbols = ["BTC-EUR", "ETH-EUR", "SOL-EUR", "ADA-EUR"]
+        mission = make_mission(capital=100_000.0, symbols=symbols)
+        ant = make_ant(mission=mission, logs_root=tmp_path)
+
+        for sym in symbols[:_MAX_OPEN_POSITIONS]:
+            write_scout_signal(tmp_path / "scouts", symbol=sym,
+                               price=1_000.0, filename=f"s_{sym}.jsonl")
+        ant._tick()
+        assert len(ant._ledger.open_positions) == _MAX_OPEN_POSITIONS
+
+        # Fourth symbol signal — should be blocked by cap
+        write_scout_signal(tmp_path / "scouts", symbol=symbols[3],
+                           price=1_000.0, filename="s_extra.jsonl")
+        ant._tick()
+        assert len(ant._ledger.open_positions) == _MAX_OPEN_POSITIONS
+
+    def test_cap_allows_open_after_close(self, tmp_path: Path) -> None:
+        symbols = ["BTC-EUR", "ETH-EUR", "SOL-EUR"]
+        mission = make_mission(capital=100_000.0, symbols=symbols + ["ADA-EUR"])
+        ant = make_ant(mission=mission, logs_root=tmp_path)
+
+        for sym in symbols:
+            write_scout_signal(tmp_path / "scouts", symbol=sym,
+                               price=1_000.0, filename=f"s_{sym}.jsonl")
+        ant._tick()
+        assert len(ant._ledger.open_positions) == _MAX_OPEN_POSITIONS
+
+        # Simulate close of one position (BTC-EUR) directly via ledger
+        btc_pos = next(p for p in ant._ledger.open_positions if p.symbol == "BTC-EUR")
+        from ant_colony.exit_chain.position import PositionStatus
+        closed_pos = btc_pos.model_copy(update={
+            "status": PositionStatus.CLOSED_TAKE_PROFIT,
+            "exit_price": btc_pos.take_profit_price + 1.0,
+            "closed_at": datetime.now(tz=timezone.utc),
+        })
+        ant._open_symbols.discard("BTC-EUR")
+        ant._ledger.record_closed(closed_pos)
+        assert len(ant._ledger.open_positions) == _MAX_OPEN_POSITIONS - 1
+
+        # Now a new symbol should open
+        write_scout_signal(tmp_path / "scouts", symbol="ADA-EUR",
+                           price=1_000.0, filename="s_ada.jsonl")
+        ant._tick()
+        assert len(ant._ledger.open_positions) == _MAX_OPEN_POSITIONS
+
+
+# ---------------------------------------------------------------------------
+# 12. Herstart-recovery via _load_open_symbols_from_logs
+# ---------------------------------------------------------------------------
+
+
+def _write_paper_log_event(paper_dir: Path, ant_id: str, action: str,
+                            position_id: str, symbol: str) -> None:
+    """Schrijf een nep trade_opened/trade_closed event naar paper log."""
+    paper_dir.mkdir(parents=True, exist_ok=True)
+    record = {
+        "event_type": "action_executed",
+        "source": ant_id,
+        "payload": {
+            "action": action,
+            "position_id": position_id,
+            "symbol": symbol,
+        },
+    }
+    (paper_dir / f"{ant_id}.jsonl").open("a", encoding="utf-8").write(
+        json.dumps(record) + "\n"
+    )
+
+
+class TestStartupRecovery:
+    def test_open_symbol_recovered_from_log(self, tmp_path: Path) -> None:
+        old_ant_id = str(uuid.uuid4())
+        pos_id = str(uuid.uuid4())
+        _write_paper_log_event(tmp_path / "paper", old_ant_id, "trade_opened", pos_id, "BTC-EUR")
+
+        ant = make_ant(logs_root=tmp_path)
+        assert "BTC-EUR" in ant._open_symbols
+
+    def test_closed_symbol_not_in_recovery(self, tmp_path: Path) -> None:
+        old_ant_id = str(uuid.uuid4())
+        pos_id = str(uuid.uuid4())
+        paper_dir = tmp_path / "paper"
+        _write_paper_log_event(paper_dir, old_ant_id, "trade_opened", pos_id, "BTC-EUR")
+        _write_paper_log_event(paper_dir, old_ant_id, "trade_closed", pos_id, "BTC-EUR")
+
+        ant = make_ant(logs_root=tmp_path)
+        assert "BTC-EUR" not in ant._open_symbols
+
+    def test_recovered_symbol_blocks_new_open(self, tmp_path: Path) -> None:
+        old_ant_id = str(uuid.uuid4())
+        pos_id = str(uuid.uuid4())
+        _write_paper_log_event(tmp_path / "paper", old_ant_id, "trade_opened", pos_id, "BTC-EUR")
+
+        ant = make_ant(logs_root=tmp_path)
+        write_scout_signal(tmp_path / "scouts", symbol="BTC-EUR")
+        ant._tick()
+        # Ledger starts empty; new signal must be blocked by _open_symbols
+        assert len(ant._ledger.open_positions) == 0
+
+    def test_no_logs_root_returns_empty_set(self) -> None:
+        ant = make_ant(logs_root=None)
+        assert ant._open_symbols == set()
+
+    def test_empty_paper_dir_returns_empty_set(self, tmp_path: Path) -> None:
+        (tmp_path / "paper").mkdir()
+        ant = make_ant(logs_root=tmp_path)
+        assert ant._open_symbols == set()
+
+    def test_trades_jsonl_not_scanned(self, tmp_path: Path) -> None:
+        # _trades.jsonl (closed-trades log) must be ignored during recovery
+        paper_dir = tmp_path / "paper"
+        paper_dir.mkdir(parents=True, exist_ok=True)
+        record = {"position_id": str(uuid.uuid4()), "symbol": "BTC-EUR"}
+        (paper_dir / "mission_abc_trades.jsonl").write_text(
+            json.dumps(record) + "\n", encoding="utf-8"
+        )
+        ant = make_ant(logs_root=tmp_path)
+        assert "BTC-EUR" not in ant._open_symbols
+
+    def test_open_symbols_cleared_after_close(self, tmp_path: Path) -> None:
+        ant = make_ant(logs_root=tmp_path)
+        write_scout_signal(tmp_path / "scouts", symbol="BTC-EUR")
+        ant._tick()
+        assert "BTC-EUR" in ant._open_symbols
+
+        pos = ant._ledger.open_positions[0]
+        ant.biome_registry.get.return_value = _make_adapter_with_price(
+            pos.take_profit_price + 1.0
+        )
+        ant._process_exits()
+        assert "BTC-EUR" not in ant._open_symbols
+
+    def test_open_symbols_updated_on_open(self, tmp_path: Path) -> None:
+        ant = make_ant(logs_root=tmp_path)
+        assert "BTC-EUR" not in ant._open_symbols
+        write_scout_signal(tmp_path / "scouts", symbol="BTC-EUR")
+        ant._tick()
+        assert "BTC-EUR" in ant._open_symbols
+
+    def test_corrupt_paper_log_no_crash(self, tmp_path: Path) -> None:
+        paper_dir = tmp_path / "paper"
+        paper_dir.mkdir()
+        (paper_dir / "corrupt.jsonl").write_text("not-json\n", encoding="utf-8")
+        ant = make_ant(logs_root=tmp_path)
+        assert ant._open_symbols == set()
