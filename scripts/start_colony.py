@@ -367,10 +367,13 @@ def main() -> None:
     all_ant_types = [t.value for t in AntType]
     hostname = args.node_hostname or socket.gethostname()
 
+    _equities_enabled = os.getenv("EQUITIES_ENABLED", "false").lower() == "true"
+    _allowed_biomes   = ["crypto", "equities"] if _equities_enabled else ["crypto"]
+
     node = Node(
         node_id=args.node_id,
         hostname=hostname,
-        allowed_biomes=["crypto"],
+        allowed_biomes=_allowed_biomes,
         allowed_ant_types=all_ant_types,
         heartbeat_interval=args.heartbeat_interval,
         status=NodeStatus.ACTIVE,
@@ -385,7 +388,7 @@ def main() -> None:
         "Node geregistreerd — id: %s  hostname: %s  biomes: %s  ant_types: %s",
         args.node_id,
         hostname,
-        ["crypto"],
+        _allowed_biomes,
         all_ant_types,
     )
 
@@ -1073,13 +1076,13 @@ def main() -> None:
 
     # --- Stap 8f: Equities ants (opt-in via EQUITIES_ENABLED=true) ---
     try:
-        _equities_enabled = os.getenv("EQUITIES_ENABLED", "false").lower() == "true"
         if _equities_enabled:
             from ant_colony.ants.equities.sector_scout_ant import SectorScoutAnt
             from ant_colony.ants.equities.fundamental_ant import FundamentalAnt
             from ant_colony.ants.equities.dividend_scout_ant import DividendScoutAnt
             from ant_colony.ants.equities.piotroski_ant import PiotroskiAnt
             from ant_colony.ants.equities.breakout_ant import BreakoutAnt
+            from ant_colony.biome.adapters.ibkr_adapter import IBKRAdapter
             from ant_colony.biome.adapters.yahoo_finance_adapter import YahooFinanceAdapter
             from ant_colony.biome.biome_registry import BiomeRegistry
             from ant_colony.colony.scheduler.colony_scheduler import AgentRecord
@@ -1090,7 +1093,25 @@ def main() -> None:
             _ts_eq      = datetime.now(tz=timezone.utc).strftime("%Y%m%d-%H%M%S")
             _yf_adapter = YahooFinanceAdapter()
             _eq_registry = BiomeRegistry()
-            _eq_registry.register(_yf_adapter)
+            _eq_registry.register(_yf_adapter)   # data-fallback (geen auth vereist)
+
+            # IBKR als primaire equities adapter (overschrijft YF als verbinding lukt)
+            _ibkr_host = os.getenv("IBKR_HOST", "127.0.0.1")
+            _ibkr_port = int(os.getenv("IBKR_PORT", "7497"))
+            _ibkr_adapter = IBKRAdapter(host=_ibkr_host, port=_ibkr_port)
+            _ibkr_connected = _ibkr_adapter.connect()
+            if _ibkr_connected:
+                _eq_registry.register(_ibkr_adapter)
+                log.info(
+                    "IBKRAdapter verbonden | host=%s port=%d",
+                    _ibkr_host, _ibkr_port,
+                )
+            else:
+                log.warning(
+                    "IBKRAdapter niet verbonden | host=%s port=%d"
+                    " — equities ants gebruiken YahooFinance als data-bron",
+                    _ibkr_host, _ibkr_port,
+                )
             _obs_risk_eq = RiskLimits(
                 max_drawdown_pct=0.01, max_position_size=1.0,
                 daily_loss_limit=1.0, stop_loss_required=False,
