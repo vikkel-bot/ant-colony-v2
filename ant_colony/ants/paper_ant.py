@@ -98,7 +98,9 @@ class PaperAnt:
 
         self._processed_signals: set[str] = set()
         self._seen_approved_ids: set[str] = set()
-        self._seen_research_ids: set[str] = set()
+        # Pre-loaden bij startup: alle bestaande candidate_ids als gezien markeren
+        # zodat historische kandidaten niet opnieuw verwerkt worden na herstart.
+        self._seen_research_ids: set[str] = self._preload_seen_research_ids(logs_root)
 
         self._status: AntStatus = AntStatus.IDLE
         self._budget_used: float = 0.0
@@ -379,6 +381,38 @@ class PaperAnt:
     # Research-kandidaten verwerken
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _preload_seen_research_ids(logs_root: Path | None) -> set[str]:
+        """
+        Scan ANT_LOGS/research/*.jsonl bij startup en retourneer alle candidate_ids.
+
+        Doel: voorkomt dat historische kandidaten opnieuw verwerkt worden na herstart.
+        Alleen kandidaten die ná startup binnenkomen worden als 'nieuw' beschouwd.
+        """
+        seen: set[str] = set()
+        if logs_root is None:
+            return seen
+        research_dir = logs_root / "research"
+        if not research_dir.exists():
+            return seen
+        for path in sorted(research_dir.glob("*.jsonl")):
+            try:
+                for line in path.read_text(encoding="utf-8").splitlines():
+                    if not line.strip():
+                        continue
+                    try:
+                        payload = json.loads(line).get("payload") or {}
+                    except json.JSONDecodeError:
+                        continue
+                    if payload.get("action") != "candidate_accepted":
+                        continue
+                    cid = str(payload.get("candidate_id") or "")
+                    if cid:
+                        seen.add(cid)
+            except OSError:
+                pass
+        return seen
+
     def _process_research_candidates(self) -> None:
         """Verwerk ACCEPTED StrategyCandidate records uit ANT_LOGS/research/*.jsonl."""
         if self.logs_root is None:
@@ -450,10 +484,6 @@ class PaperAnt:
             "signal_id":     payload.get("candidate_id"),
         }
         self._try_open_position(sig, strategy_type=strategy_type, sl_pct=sl_pct, tp_pct=tp_pct)
-        self._log.info(
-            "Research kandidaat verwerkt | %s strategie=%s tp=%.3f sl=%.3f",
-            symbol, strategy_type, tp_pct, sl_pct,
-        )
 
     def _try_open_position(
         self,

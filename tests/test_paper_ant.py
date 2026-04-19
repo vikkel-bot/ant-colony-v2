@@ -909,3 +909,29 @@ class TestResearchCandidates:
         (research_dir / "bad.jsonl").write_text("not-json\n", encoding="utf-8")
         ant = make_ant(logs_root=tmp_path)
         ant._process_research_candidates()  # should not crash
+
+    def test_preload_marks_existing_candidates_as_seen(self, tmp_path: Path) -> None:
+        """Kandidaten die al in de log staan vóór startup worden niet verwerkt."""
+        cid = write_research_candidate(tmp_path / "research")
+        # Ant aanmaken ná schrijven → preload markeert cid als gezien
+        ant = make_ant(logs_root=tmp_path)
+        ant.biome_registry.get.return_value = _make_adapter_with_price_v2(_PRICE)
+        assert cid in ant._seen_research_ids
+        ant._tick()
+        # Geen positie — kandidaat was al aanwezig bij startup
+        assert len(ant._ledger.open_positions) == 0
+
+    def test_new_candidate_after_startup_is_processed(self, tmp_path: Path) -> None:
+        """Kandidaat die ná startup arriveert wordt wel verwerkt."""
+        # Ant eerst aanmaken (lege research dir)
+        ant = make_ant(logs_root=tmp_path)
+        ant.biome_registry.get.return_value = _make_adapter_with_price_v2(_PRICE)
+        # Nu een nieuw kandidaat schrijven
+        write_research_candidate(tmp_path / "research")
+        ant._tick()
+        assert len(ant._ledger.open_positions) == 1
+
+    def test_preload_none_logs_root_returns_empty(self) -> None:
+        from ant_colony.ants.paper_ant import PaperAnt
+        seen = PaperAnt._preload_seen_research_ids(None)
+        assert seen == set()
