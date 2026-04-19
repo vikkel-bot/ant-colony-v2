@@ -189,7 +189,7 @@ def test_passing_backtest_writes_research_log(tmp_path: Path) -> None:
 
     records = read_research_log(tmp_path)
     assert len(records) == 1
-    assert records[0]["status"] == "research"
+    assert records[0]["payload"]["action"] == "candidate_accepted"
 
 
 def test_failing_backtest_writes_no_log(tmp_path: Path) -> None:

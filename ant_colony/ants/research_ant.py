@@ -36,6 +36,7 @@ from ant_colony.biome.biome_registry import BiomeRegistry
 from ant_colony.colony.scheduler.colony_scheduler import ColonyScheduler
 from ant_colony.lab.backtester import Backtester, BacktestConfig, OHLCVBar
 from ant_colony.schemas.ant import AntStatus
+from ant_colony.schemas.audit_event import AuditEvent, AuditEventType
 from ant_colony.schemas.heartbeat import Heartbeat, HeartbeatStatus
 from ant_colony.schemas.mission import Mission
 from ant_colony.schemas.strategy_candidate import (
@@ -609,22 +610,41 @@ class ResearchAnt:
             "KANDIDAAT | %s %s | sharpe=%.3f win_rate=%.3f direction=%s id=%s",
             symbol, signal_type, sharpe, win_rate, direction, candidate_id,
         )
-        self._write_candidate_log(candidate)
+        self._write_candidate_log(candidate, direction=direction)
 
     # ------------------------------------------------------------------
     # Disk logging
     # ------------------------------------------------------------------
 
-    def _write_candidate_log(self, candidate: StrategyCandidate) -> None:
-        """Schrijf StrategyCandidate als JSON-regel naar ANT_LOGS/research/{ant_id}.jsonl."""
+    def _write_candidate_log(self, candidate: StrategyCandidate, direction: str = "") -> None:
+        """Schrijf een AuditEvent naar ANT_LOGS/research/{ant_id}.jsonl."""
         if self.logs_root is None:
             return
+
+        bt = candidate.backtest_results
+        event = AuditEvent(
+            event_type=AuditEventType.ACTION_EXECUTED,
+            source=self.ant_id,
+            mission_id=self.mission.mission_id,
+            node_id=self.mission.allowed_node,
+            sequence=self._log_seq,
+            payload={
+                "action":       "candidate_accepted",
+                "candidate_id": candidate.candidate_id,
+                "symbol":       (candidate.market_scope or {}).get("symbol", ""),
+                "sharpe":       round(bt.sharpe_ratio, 3) if bt and bt.sharpe_ratio is not None else None,
+                "win_rate":     round(bt.win_rate, 3) if bt and bt.win_rate is not None else None,
+                "direction":    direction or (candidate.entry_conditions or {}).get("direction", ""),
+                "signal_type":  candidate.name,
+                "biome":        candidate.biome,
+            },
+        )
 
         log_path = self.logs_root / "research" / f"{self.ant_id}.jsonl"
         try:
             log_path.parent.mkdir(parents=True, exist_ok=True)
             with log_path.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(candidate.model_dump(mode="json"), default=str) + "\n")
+                fh.write(json.dumps(event.model_dump(mode="json"), default=str) + "\n")
         except OSError:
             self._log.exception("Kon kandidaat niet naar disk schrijven: %s", log_path)
 

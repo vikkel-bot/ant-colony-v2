@@ -1127,13 +1127,17 @@ def _action_of(rec: dict) -> str:
 
 def _event_short(rec: dict) -> str:
     """Formatteer een log record als korte event string voor de tijdlijn."""
-    ts     = _parse_ts(rec.get("timestamp"))
-    ts_str = ts.strftime("%H:%M:%S") if ts else "?"
-    action = _action_of(rec).replace("_", " ")
-    symbol = (rec.get("payload") or {}).get("symbol") or ""
-    parts  = [ts_str, action]
+    ts      = _parse_ts(rec.get("timestamp"))
+    ts_str  = ts.strftime("%H:%M:%S") if ts else "?"
+    action  = _action_of(rec).replace("_", " ")
+    payload = rec.get("payload") or {}
+    symbol  = payload.get("symbol") or ""
+    sharpe  = payload.get("sharpe")
+    parts   = [ts_str, action]
     if symbol:
         parts.append(symbol)
+    if sharpe is not None:
+        parts.append(f"sharpe={sharpe:.2f}")
     return " · ".join(parts)
 
 
@@ -1148,7 +1152,7 @@ def _build_ant_stats(ant_type: str, today_recs: list[dict]) -> AntStatsEntry:
         )
     if ant_type == "research_ant":
         return AntStatsEntry(
-            candidates_above_threshold=_count_actions(today_recs, "candidate_emitted", "emitted"),
+            candidates_above_threshold=_count_actions(today_recs, "candidate_accepted"),
         )
     if ant_type == "paper_ant":
         opened      = _count_actions(today_recs, "trade_opened", "position_opened")
@@ -1192,7 +1196,7 @@ def _build_ant_summary(ant_type: str, all_recs: list[dict], stats: AntStatsEntry
         return f"{n} signalen vandaag — laatste: {action}"
     if ant_type == "research_ant":
         n = stats.candidates_above_threshold or 0
-        return f"{n} kandidaten geëmit vandaag — laatste: {action}"
+        return f"{n} kandidaten geaccepteerd vandaag — laatste: {action}"
     if ant_type == "paper_ant":
         pnl  = stats.total_pnl or 0.0
         sign = "+" if pnl >= 0 else ""

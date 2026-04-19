@@ -321,9 +321,12 @@ class TestSMACrossover:
         ant._tick()
 
         records = read_jsonl(log_path(tmp_path, ant))
-        sma_records = [r for r in records if r.get("parameters", {}).get("sma_fast") == 20]
+        sma_records = [
+            r for r in records
+            if "SMA_CROSSOVER" in (r.get("payload") or {}).get("signal_type", "").upper()
+        ]
         assert len(sma_records) >= 1
-        assert sma_records[0]["entry_conditions"]["sma20_crosses_sma50"] == "long"
+        assert (sma_records[0].get("payload") or {}).get("direction") == "long"
 
     def test_death_cross_generates_short_candidate(self, tmp_path):
         """Scenario 2: SMA20 kruist onder SMA50 → short kandidaat."""
@@ -335,9 +338,12 @@ class TestSMACrossover:
         ant._tick()
 
         records = read_jsonl(log_path(tmp_path, ant))
-        sma_records = [r for r in records if r.get("parameters", {}).get("sma_fast") == 20]
+        sma_records = [
+            r for r in records
+            if "SMA_CROSSOVER" in (r.get("payload") or {}).get("signal_type", "").upper()
+        ]
         assert len(sma_records) >= 1
-        assert sma_records[0]["entry_conditions"]["sma20_crosses_sma50"] == "short"
+        assert (sma_records[0].get("payload") or {}).get("direction") == "short"
 
     def test_flat_market_no_crossover_candidate(self, tmp_path):
         """Scenario 3: geen crossover → geen SMA kandidaat."""
@@ -349,7 +355,10 @@ class TestSMACrossover:
         ant._tick()
 
         records = read_jsonl(log_path(tmp_path, ant))
-        sma_records = [r for r in records if r.get("parameters", {}).get("sma_fast") == 20]
+        sma_records = [
+            r for r in records
+            if "SMA_CROSSOVER" in (r.get("payload") or {}).get("signal_type", "").upper()
+        ]
         assert len(sma_records) == 0
 
 
@@ -368,9 +377,12 @@ class TestRSIDetection:
         ant._tick()
 
         records = read_jsonl(log_path(tmp_path, ant))
-        rsi_records = [r for r in records if r.get("parameters", {}).get("rsi_period") == 14]
+        rsi_records = [
+            r for r in records
+            if "RSI_OVERSOLD" in (r.get("payload") or {}).get("signal_type", "").upper()
+        ]
         assert len(rsi_records) >= 1
-        assert rsi_records[0]["parameters"]["rsi_value"] < 30
+        assert (rsi_records[0].get("payload") or {}).get("direction") == "long"
 
     def test_rsi_overbought_generates_short_candidate(self, tmp_path):
         """Scenario 5: RSI > 70 → short kandidaat met rsi_overbought."""
@@ -382,9 +394,12 @@ class TestRSIDetection:
         ant._tick()
 
         records = read_jsonl(log_path(tmp_path, ant))
-        rsi_records = [r for r in records if r.get("parameters", {}).get("rsi_period") == 14]
+        rsi_records = [
+            r for r in records
+            if "RSI_OVERBOUGHT" in (r.get("payload") or {}).get("signal_type", "").upper()
+        ]
         assert len(rsi_records) >= 1
-        assert rsi_records[0]["parameters"]["rsi_value"] > 70
+        assert (rsi_records[0].get("payload") or {}).get("direction") == "short"
 
     def test_rsi_neutral_no_candidate(self, tmp_path):
         """Scenario 6: RSI neutraal (≈50) → geen RSI kandidaat."""
@@ -396,7 +411,10 @@ class TestRSIDetection:
         ant._tick()
 
         records = read_jsonl(log_path(tmp_path, ant))
-        rsi_records = [r for r in records if r.get("parameters", {}).get("rsi_period") == 14]
+        rsi_records = [
+            r for r in records
+            if "RSI_" in (r.get("payload") or {}).get("signal_type", "").upper()
+        ]
         assert len(rsi_records) == 0
 
 
@@ -415,9 +433,12 @@ class TestBollingerDetection:
         ant._tick()
 
         records = read_jsonl(log_path(tmp_path, ant))
-        bb_records = [r for r in records if r.get("parameters", {}).get("bb_period") == 20]
+        bb_records = [
+            r for r in records
+            if "BB_LOWER_TOUCH" in (r.get("payload") or {}).get("signal_type", "").upper()
+        ]
         assert len(bb_records) >= 1
-        assert bb_records[0]["entry_conditions"]["band"] == "lower"
+        assert (bb_records[0].get("payload") or {}).get("direction") == "long"
 
     def test_upper_band_touch_generates_short_candidate(self, tmp_path):
         """Scenario 8: prijs raakt bovenband → short kandidaat."""
@@ -429,9 +450,12 @@ class TestBollingerDetection:
         ant._tick()
 
         records = read_jsonl(log_path(tmp_path, ant))
-        bb_records = [r for r in records if r.get("parameters", {}).get("bb_period") == 20]
+        bb_records = [
+            r for r in records
+            if "BB_UPPER_TOUCH" in (r.get("payload") or {}).get("signal_type", "").upper()
+        ]
         assert len(bb_records) >= 1
-        assert bb_records[0]["entry_conditions"]["band"] == "upper"
+        assert (bb_records[0].get("payload") or {}).get("direction") == "short"
 
     def test_price_within_bands_no_candidate(self, tmp_path):
         """Prijs middenin de bands → geen Bollinger kandidaat."""
@@ -443,7 +467,10 @@ class TestBollingerDetection:
         ant._tick()
 
         records = read_jsonl(log_path(tmp_path, ant))
-        bb_records = [r for r in records if r.get("parameters", {}).get("bb_period") == 20]
+        bb_records = [
+            r for r in records
+            if "BB_" in (r.get("payload") or {}).get("signal_type", "").upper()
+        ]
         assert len(bb_records) == 0
 
 
@@ -722,40 +749,43 @@ class TestAuditLog:
         assert len(records) >= 1
 
     def test_log_contains_required_fields(self, tmp_path):
-        """Scenario 18: logrecord bevat alle vereiste StrategyCandidate velden."""
+        """Scenario 18: logrecord heeft AuditEvent structuur met alle payload-velden."""
         candles = make_candles(GOLDEN_CROSS_CLOSES)
         ant = make_ant(tmp_path, registry=make_registry(candles=candles))
         stub_backtester(ant)
         ant._tick()
 
         record = read_jsonl(log_path(tmp_path, ant))[0]
-        for field in (
-            "candidate_id", "name", "source", "biome",
-            "logic_summary", "parameters", "entry_conditions",
-            "exit_conditions", "backtest_results", "fitness_score",
-            "status", "provenance",
-        ):
-            assert field in record, f"Veld '{field}' ontbreekt in logrecord"
+        # AuditEvent top-level velden
+        for field in ("event_type", "source", "timestamp", "mission_id", "payload"):
+            assert field in record, f"AuditEvent veld '{field}' ontbreekt"
+        # payload velden
+        payload = record["payload"]
+        for field in ("action", "candidate_id", "symbol", "sharpe", "win_rate", "direction"):
+            assert field in payload, f"Payload veld '{field}' ontbreekt"
 
     def test_log_candidate_status_is_research(self, tmp_path):
+        """Geaccepteerde kandidaat heeft action=candidate_accepted in payload."""
         candles = make_candles(GOLDEN_CROSS_CLOSES)
         ant = make_ant(tmp_path, registry=make_registry(candles=candles))
         stub_backtester(ant)
         ant._tick()
 
         record = read_jsonl(log_path(tmp_path, ant))[0]
-        assert record["status"] == "research"
+        assert record["payload"]["action"] == "candidate_accepted"
 
     def test_log_provenance_contains_ant_id(self, tmp_path):
+        """source veld in AuditEvent bevat ant_id."""
         candles = make_candles(GOLDEN_CROSS_CLOSES)
         ant = make_ant(tmp_path, registry=make_registry(candles=candles))
         stub_backtester(ant)
         ant._tick()
 
         record = read_jsonl(log_path(tmp_path, ant))[0]
-        assert record["provenance"][0]["actor"] == ant.ant_id
+        assert record["source"] == ant.ant_id
 
     def test_log_provenance_contains_mission_id(self, tmp_path):
+        """mission_id veld in AuditEvent bevat de mission_id."""
         mission = make_mission()
         candles = make_candles(GOLDEN_CROSS_CLOSES)
         ant = make_ant(tmp_path, mission=mission, registry=make_registry(candles=candles))
@@ -763,7 +793,7 @@ class TestAuditLog:
         ant._tick()
 
         record = read_jsonl(log_path(tmp_path, ant))[0]
-        assert record["provenance"][0]["details"]["mission_id"] == mission.mission_id
+        assert record["mission_id"] == mission.mission_id
 
     def test_no_log_when_below_threshold(self, tmp_path):
         """Scenario 19: onder drempel → geen logbestand."""
@@ -803,14 +833,15 @@ class TestAuditLog:
         assert len(records) >= 2
 
     def test_exit_conditions_not_empty(self, tmp_path):
-        """exit_conditions vereist door StrategyCandidate schema — nooit leeg."""
+        """Geaccepteerde kandidaat heeft sharpe en win_rate ingevuld."""
         candles = make_candles(GOLDEN_CROSS_CLOSES)
         ant = make_ant(tmp_path, registry=make_registry(candles=candles))
         stub_backtester(ant)
         ant._tick()
 
         record = read_jsonl(log_path(tmp_path, ant))[0]
-        assert record["exit_conditions"]   # niet leeg
+        assert record["payload"]["sharpe"] is not None
+        assert record["payload"]["win_rate"] is not None
 
     def test_fitness_score_equals_sharpe(self, tmp_path):
         candles = make_candles(GOLDEN_CROSS_CLOSES)
@@ -819,4 +850,4 @@ class TestAuditLog:
         ant._tick()
 
         record = read_jsonl(log_path(tmp_path, ant))[0]
-        assert abs(record["fitness_score"] - 0.75) < 1e-3
+        assert abs(record["payload"]["sharpe"] - 0.75) < 1e-3
