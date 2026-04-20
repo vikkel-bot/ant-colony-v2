@@ -179,8 +179,10 @@ class MissionResponse(BaseModel):
 
 
 class OperatorInputRequest(BaseModel):
-    type: str       # "url", "text", "code"
-    content: str
+    type: str                   # "url", "text", "code", "image"
+    content: str = ""
+    image_data: str | None = None   # base64 encoded image (only for type="image")
+    media_type: str = "image/jpeg"  # MIME type of image
 
 
 class OperatorInputResponse(BaseModel):
@@ -1024,12 +1026,18 @@ def create_router(ctx: ColonyContext) -> APIRouter:
             raise HTTPException(status_code=503, detail="logs_root niet geconfigureerd")
 
         input_type = req.type.strip().lower()
-        if input_type not in ("url", "text", "code"):
-            raise HTTPException(status_code=400, detail="type moet url, text of code zijn")
+        if input_type not in ("url", "text", "code", "image"):
+            raise HTTPException(status_code=400, detail="type moet url, text, code of image zijn")
 
-        content = req.content.strip()
-        if not content:
-            raise HTTPException(status_code=400, detail="content mag niet leeg zijn")
+        if input_type == "image":
+            if not req.image_data:
+                raise HTTPException(status_code=400, detail="image_data vereist voor type=image")
+            payload: dict = {"type": "image", "content": "", "image_data": req.image_data, "media_type": req.media_type}
+        else:
+            content = req.content.strip()
+            if not content:
+                raise HTTPException(status_code=400, detail="content mag niet leeg zijn")
+            payload = {"type": input_type, "content": content}
 
         ts       = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%S")
         filename = f"{ts}_{input_type}.json"
@@ -1039,12 +1047,12 @@ def create_router(ctx: ColonyContext) -> APIRouter:
             input_dir.mkdir(parents=True, exist_ok=True)
             file_path = input_dir / filename
             with file_path.open("w", encoding="utf-8") as fh:
-                json.dump({"type": input_type, "content": content}, fh, indent=2)
+                json.dump(payload, fh, indent=2)
         except OSError:
             logger.exception("POST /api/operator/input: kon bestand niet schrijven")
             raise HTTPException(status_code=500, detail="failed to write input file")
 
-        logger.info("Operator input geschreven | file=%s type=%s", filename, input_type)
+        logger.info("Operator input geschreven | file=%s type=%s", filename, payload["type"])
         return OperatorInputResponse(
             accepted=True,
             filename=filename,

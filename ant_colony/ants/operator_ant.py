@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
 import uuid
@@ -180,6 +181,11 @@ class OperatorAnt:
             return
 
         input_type = (raw.get("type") or _type_from_filename(path.name)).strip().lower()
+
+        if input_type == "image":
+            self._process_image_input(path, raw)
+            return
+
         content    = (raw.get("content") or "").strip()
         if not content:
             self._log.debug("Leeg input bestand — overgeslagen: %s", path.name)
@@ -344,6 +350,146 @@ class OperatorAnt:
             return None
 
     # ------------------------------------------------------------------
+    # Image analyse
+    # ------------------------------------------------------------------
+
+    def _process_image_input(self, path: Path, raw: dict) -> None:
+        """Verwerk een chart screenshot: Claude vision → StrategyCandidate."""
+        image_data = (raw.get("image_data") or "").strip()
+        media_type = (raw.get("media_type") or "image/jpeg").strip()
+
+        if not image_data:
+            self._log.warning("Image input zonder image_data — overgeslagen: %s", path.name)
+            self._write_processed(path.stem, {
+                "result": "error", "message": "Geen image_data in bestand", "input_file": path.name,
+            })
+            return
+
+        self._log.info("Image input | bestand=%s media_type=%s", path.name, media_type)
+
+        analysis = self._analyze_image_with_claude(image_data, media_type)
+        if not analysis:
+            self._write_processed(path.stem, {
+                "result": "error", "message": "Claude image analyse mislukt", "input_file": path.name,
+            })
+            return
+
+        summary        = analysis.get("summary") or analysis.get("entry_suggestion") or "chart analyse"
+        strategy_type  = analysis.get("strategy_type") or "chart_pattern"
+        entry_sug      = analysis.get("entry_suggestion") or ""
+        exit_sug       = analysis.get("exit_suggestion") or ""
+        patterns       = analysis.get("patterns") or []
+
+        cid = str(uuid.uuid5(uuid.NAMESPACE_URL, f"image:{path.stem}:{summary[:80]}"))
+
+        try:
+            candidate = StrategyCandidate(
+                candidate_id=cid,
+                name=f"chart:{strategy_type}:{path.stem[:20]}",
+                source="operator_image",
+                source_url="",
+                biome=self.mission.market_scope.biome,
+                market_scope={"symbols": self.mission.market_scope.symbols},
+                logic_summary=summary[:500],
+                parameters={"input_type": "image", "strategy_type": strategy_type, "patterns": patterns},
+                entry_conditions={"suggestion": entry_sug, "keywords": [kw for kw in _ENTRY_KEYWORDS if kw in (entry_sug + summary).lower()]},
+                exit_conditions={"suggestion": exit_sug, "keywords": [kw for kw in _EXIT_KEYWORDS if kw in (exit_sug + summary).lower()]},
+                status=CandidateStatus.INGESTED,
+                provenance=[
+                    ProvenanceEntry(
+                        actor=self.ant_id,
+                        action="operator_image",
+                        details={
+                            "source":        "operator_image",
+                            "input_type":    "image",
+                            "file":          path.name,
+                            "strategy_type": strategy_type,
+                            "confidence":    analysis.get("confidence", "unknown"),
+                            "found_at":      datetime.now(tz=timezone.utc).isoformat(),
+                        },
+                    )
+                ],
+            )
+        except Exception:
+            self._log.exception("Kan StrategyCandidate niet bouwen voor image input")
+            self._write_processed(path.stem, {
+                "result": "error", "message": "StrategyCandidate bouwen mislukt", "input_file": path.name,
+            })
+            return
+
+        self._write_to_ingestion(candidate)
+        self._write_processed(path.stem, {
+            "result":       "accepted",
+            "message":      f"chart kandidaat ingested | candidate_id={candidate.candidate_id}",
+            "candidate_id": candidate.candidate_id,
+            "input_file":   path.name,
+            "input_type":   "image",
+            "strategy_type": strategy_type,
+        })
+        self._write_operator_log("operator_input_processed", {
+            "input_file":    path.name,
+            "input_type":    "image",
+            "candidate_id":  candidate.candidate_id,
+            "strategy_type": strategy_type,
+        })
+        self._last_action = f"image_ingested:{candidate.candidate_id[:8]}"
+        self._log.info(
+            "Chart kandidaat ingested | candidate_id=%s strategy_type=%s",
+            candidate.candidate_id[:8], strategy_type,
+        )
+
+    def _analyze_image_with_claude(self, image_b64: str, media_type: str) -> dict:
+        """Stuur chart naar Claude Vision. Retourneert gestructureerde analyse of {}."""
+        try:
+            import anthropic
+        except ImportError:
+            self._log.warning("anthropic pakket niet beschikbaar — image analyse overgeslagen")
+            return {}
+
+        api_key = os.getenv("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            self._log.warning("ANTHROPIC_API_KEY niet ingesteld — image analyse overgeslagen")
+            return {}
+
+        prompt = (
+            "Analyseer dit chart patroon. Welke technische patronen zie je? "
+            "Vergelijk met: head and shoulders, double top/bottom, triangle, flag, wedge, "
+            "support/resistance levels. Geef strategy_type en entry/exit suggestie.\n\n"
+            "Antwoord ALLEEN als JSON (geen uitleg erbuiten):\n"
+            '{"strategy_type":"...","patterns":["..."],'
+            '"entry_suggestion":"...","exit_suggestion":"...",'
+            '"summary":"...","confidence":"low|medium|high"}'
+        )
+
+        try:
+            client = anthropic.Anthropic(api_key=api_key)
+            msg = client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=1024,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": image_b64}},
+                        {"type": "text", "text": prompt},
+                    ],
+                }],
+            )
+            text = msg.content[0].text.strip()
+            # strip markdown code fences
+            if text.startswith("```"):
+                parts = text.split("```")
+                text = parts[1] if len(parts) > 1 else parts[0]
+                if text.startswith("json"):
+                    text = text[4:].strip()
+            return json.loads(text)
+        except json.JSONDecodeError:
+            self._log.warning("Claude image analyse: ongeldige JSON ontvangen")
+            return {}
+        except Exception:
+            self._log.exception("Claude image analyse API-call mislukt")
+            return {}
+
+    # ------------------------------------------------------------------
     # Schrijf naar disk
     # ------------------------------------------------------------------
 
@@ -461,7 +607,7 @@ def _type_from_filename(name: str) -> str:
     """Leid type af uit bestandsnaam: {timestamp}_{type}.json"""
     stem = Path(name).stem
     parts = stem.split("_", 1)
-    if len(parts) > 1 and parts[-1] in ("url", "text", "code"):
+    if len(parts) > 1 and parts[-1] in ("url", "text", "code", "image"):
         return parts[-1]
     return "text"
 

@@ -790,14 +790,17 @@
       <div class="card">
         <div class="card-title">Geef mier een link of strategie</div>
         <div style="display:flex;gap:7px;margin-top:6px;align-items:flex-start">
-          <select id="op-type" style="padding:5px 8px;border:1px solid var(--border);border-radius:5px;background:var(--card);font-size:11px;color:var(--text);flex-shrink:0">
+          <select id="op-type" onchange="onOpTypeChange()" style="padding:5px 8px;border:1px solid var(--border);border-radius:5px;background:var(--card);font-size:11px;color:var(--text);flex-shrink:0">
             <option value="url">URL</option>
             <option value="text">Tekst</option>
             <option value="code">Code</option>
+            <option value="image">Afbeelding</option>
           </select>
           <textarea id="op-content" rows="2"
             placeholder="GitHub URL, strategie beschrijving of code..."
             style="flex:1;padding:5px 8px;border:1px solid var(--border);border-radius:5px;background:var(--card);font-size:11px;color:var(--text);resize:vertical;font-family:inherit"></textarea>
+          <input id="op-image-file" type="file" accept="image/jpeg,image/png,image/webp,image/gif"
+            style="display:none;flex:1;font-size:11px;color:var(--text);align-self:center" />
           <button id="op-submit" onclick="sendOperatorInput()"
             style="padding:5px 12px;background:var(--queen);color:#fff;border:none;border-radius:5px;font-size:11px;font-weight:600;cursor:pointer;flex-shrink:0;align-self:flex-end">
             Stuur
@@ -1339,28 +1342,64 @@ function noodstop() {
 
 // ── Operator input ─────────────────────────────
 
-async function sendOperatorInput() {
+function onOpTypeChange() {
   const type    = document.getElementById('op-type').value;
-  const content = document.getElementById('op-content').value.trim();
-  const msgEl   = document.getElementById('op-msg');
-  const btn     = document.getElementById('op-submit');
+  const textarea = document.getElementById('op-content');
+  const fileInput = document.getElementById('op-image-file');
+  if (type === 'image') {
+    textarea.style.display = 'none';
+    fileInput.style.display = 'block';
+  } else {
+    textarea.style.display = '';
+    fileInput.style.display = 'none';
+  }
+}
 
-  if (!content) { msgEl.textContent = 'Inhoud mag niet leeg zijn.'; return; }
+async function sendOperatorInput() {
+  const type   = document.getElementById('op-type').value;
+  const msgEl  = document.getElementById('op-msg');
+  const btn    = document.getElementById('op-submit');
 
-  btn.disabled = true;
+  let body;
+
+  if (type === 'image') {
+    const fileInput = document.getElementById('op-image-file');
+    const file = fileInput.files && fileInput.files[0];
+    if (!file) { msgEl.textContent = 'Selecteer eerst een afbeelding.'; return; }
+
+    btn.disabled = true;
+    msgEl.style.color = 'var(--muted)';
+    msgEl.textContent = 'Afbeelding laden...';
+
+    const b64 = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result.split(',')[1]);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+    body = { type: 'image', content: '', image_data: b64, media_type: file.type || 'image/jpeg' };
+  } else {
+    const content = document.getElementById('op-content').value.trim();
+    if (!content) { msgEl.textContent = 'Inhoud mag niet leeg zijn.'; return; }
+    body = { type, content };
+    btn.disabled = true;
+  }
+
+  msgEl.style.color = 'var(--muted)';
   msgEl.textContent = 'Versturen...';
 
   try {
     const r = await fetch('/api/operator/input', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ type, content }),
+      body: JSON.stringify(body),
     });
     const d = await r.json();
     if (r.ok && d.accepted) {
       msgEl.style.color = 'var(--pnl-pos)';
       msgEl.textContent = '✓ ' + d.message;
       document.getElementById('op-content').value = '';
+      document.getElementById('op-image-file').value = '';
     } else {
       msgEl.style.color = 'var(--danger)';
       msgEl.textContent = 'Fout: ' + (d.detail || JSON.stringify(d));
