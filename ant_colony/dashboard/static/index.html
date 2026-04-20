@@ -711,7 +711,7 @@
     <div class="card mc">
       <div class="mc-label">Beschikbaar</div>
       <div class="mc-value" id="m-avail">€ —</div>
-      <div class="mc-sub">totaal − ingezet</div>
+      <div class="mc-sub" id="m-avail-sub">totaal − ingezet</div>
     </div>
     <div class="card mc">
       <div class="mc-label">Actieve mieren</div>
@@ -950,11 +950,19 @@ function renderMetrics() {
   const inUse = m.capital_in_use != null ? m.capital_in_use : m.capital_allocated;
   document.getElementById('m-alloc').textContent = fEUR2(inUse);
 
-  // Beschikbaar: totaal − ingezet
-  const avail = m.capital_in_use != null
-    ? Math.max(0, m.capital_total - m.capital_in_use)
-    : m.capital_available;
-  document.getElementById('m-avail').textContent = fEUR2(avail);
+  // Beschikbaar: live broker saldo (als beschikbaar) of berekend totaal − ingezet
+  const availEl    = document.getElementById('m-avail');
+  const availSubEl = document.getElementById('m-avail-sub');
+  if (m.live_eur_balance != null) {
+    availEl.textContent    = fEUR2(m.live_eur_balance);
+    availSubEl.textContent = `beschikbaar op ${m.live_eur_source || 'broker'}`;
+  } else {
+    const avail = m.capital_in_use != null
+      ? Math.max(0, m.capital_total - m.capital_in_use)
+      : m.capital_available;
+    availEl.textContent    = fEUR2(avail);
+    availSubEl.textContent = 'totaal − ingezet';
+  }
 
   document.getElementById('m-ants').textContent = m.active_ants ?? '—';
   document.getElementById('m-util').textContent = (m.utilization_pct ?? 0).toFixed(1) + '% ingezet';

@@ -93,9 +93,11 @@ class MetricsResponse(BaseModel):
     capital_total: float
     capital_allocated: float
     capital_available: float
-    capital_in_use: float | None = None   # echte waarde: entry_price × qty open posities
+    capital_in_use: float | None = None   # virtueel: entry_price × qty open paper posities
     active_ants: int
     utilization_pct: float
+    live_eur_balance: float | None = None   # echt EUR saldo bij broker (bijv. Bitvavo)
+    live_eur_source:  str   | None = None   # naam van de broker
 
 
 class PerformanceResponse(BaseModel):
@@ -561,8 +563,22 @@ def create_router(ctx: ColonyContext) -> APIRouter:
         active    = len(ctx.queen.active_missions)
         util      = round(allocated / total * 100.0, 1) if total > 0 else 0.0
 
-        # Echte inzet: som van entry_price × quantity voor openstaande paper posities
+        # Virtuele inzet: entry_price × quantity voor openstaande paper posities
         in_use = _read_paper_capital_in_use(ctx.logs_root) if ctx.logs_root else None
+
+        # Echt EUR saldo: rechtstreeks van de crypto-adapter (Bitvavo)
+        live_eur_balance: float | None = None
+        live_eur_source:  str   | None = None
+        if ctx.biome_registry is not None:
+            _crypto = ctx.biome_registry.get("crypto")
+            if _crypto is not None:
+                try:
+                    _account = _crypto.get_account_state()
+                    if _account is not None:
+                        live_eur_balance = _account.balance
+                        live_eur_source  = ctx.broker_names.get("crypto", "Bitvavo")
+                except Exception:
+                    logger.exception("/api/metrics: live EUR saldo ophalen mislukt")
 
         return MetricsResponse(
             capital_total=total,
@@ -571,6 +587,8 @@ def create_router(ctx: ColonyContext) -> APIRouter:
             capital_in_use=in_use,
             active_ants=active,
             utilization_pct=util,
+            live_eur_balance=live_eur_balance,
+            live_eur_source=live_eur_source,
         )
 
     # ------------------------------------------------------------------

@@ -240,6 +240,49 @@ class TestMetricsEndpoint:
         r = _client(ctx).get("/api/metrics")
         assert r.json()["utilization_pct"] == 25.0
 
+    def test_live_eur_balance_from_crypto_adapter(self):
+        from ant_colony.biome.biome_adapter import AccountState
+        account = AccountState(
+            biome_id="crypto", balance=80.64, positions_value=0.0,
+            timestamp=datetime.now(tz=timezone.utc),
+        )
+        adapter = MagicMock()
+        adapter.is_available.return_value = True
+        adapter.get_account_state.return_value = account
+        registry = MagicMock()
+        registry.get.return_value = adapter
+        ctx = ColonyContext(
+            queen=_make_queen(),
+            scheduler=_make_scheduler(),
+            biome_registry=registry,
+            broker_names={"crypto": "Bitvavo"},
+        )
+        r = _client(ctx).get("/api/metrics")
+        d = r.json()
+        assert d["live_eur_balance"] == pytest.approx(80.64)
+        assert d["live_eur_source"] == "Bitvavo"
+
+    def test_live_eur_balance_none_when_no_registry(self):
+        ctx = ColonyContext(queen=_make_queen(), scheduler=_make_scheduler())
+        r = _client(ctx).get("/api/metrics")
+        d = r.json()
+        assert d["live_eur_balance"] is None
+        assert d["live_eur_source"] is None
+
+    def test_live_eur_balance_none_when_adapter_raises(self):
+        adapter = MagicMock()
+        adapter.get_account_state.side_effect = RuntimeError("API down")
+        registry = MagicMock()
+        registry.get.return_value = adapter
+        ctx = ColonyContext(
+            queen=_make_queen(),
+            scheduler=_make_scheduler(),
+            biome_registry=registry,
+        )
+        r = _client(ctx).get("/api/metrics")
+        d = r.json()
+        assert d["live_eur_balance"] is None
+
 
 # ---------------------------------------------------------------------------
 # TestPerformanceEndpoint
