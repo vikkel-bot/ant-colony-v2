@@ -150,6 +150,7 @@ class BrokerEntry(BaseModel):
     capital_deployed: float
     balance_available: float | None = None   # vrij beschikbaar saldo bij exchange
     balance_in_orders: float | None = None   # vergrendeld in open orders
+    paper_mode: bool | None = None           # True = paper trading, False = live
 
 
 class BrokersResponse(BaseModel):
@@ -694,8 +695,12 @@ def create_router(ctx: ColonyContext) -> APIRouter:
     @router.get("/brokers", response_model=BrokersResponse)
     def get_brokers() -> BrokersResponse:
         """Broker connecties, live saldo en ingezet kapitaal per biome."""
+        import os
+
         if ctx.queen is None:
             return BrokersResponse(brokers=[])
+
+        equities_enabled = os.getenv("EQUITIES_ENABLED", "false").lower() == "true"
 
         snapshot = ctx.queen.allocation_snapshot()
         _DEFAULT_BROKERS = {
@@ -705,6 +710,8 @@ def create_router(ctx: ColonyContext) -> APIRouter:
         }
 
         brokers = []
+        seen_biomes: set[str] = set()
+
         for b in snapshot.biomes:
             name = ctx.broker_names.get(b.biome_id) or _DEFAULT_BROKERS.get(b.biome_id, b.biome_id)
 
@@ -714,6 +721,7 @@ def create_router(ctx: ColonyContext) -> APIRouter:
             status = "connected" if deployed > 0 else "standby"
             balance_available: float | None = None
             balance_in_orders: float | None = None
+            paper_mode: bool | None = None
 
             if ctx.biome_registry is not None:
                 adapter = ctx.biome_registry.get(b.biome_id)
@@ -725,12 +733,12 @@ def create_router(ctx: ColonyContext) -> APIRouter:
                             if account is not None:
                                 balance_available = account.balance
                                 balance_in_orders = account.positions_value
-                                status = "connected"
-                            else:
-                                # API bereikbaar maar auth mislukt (geen keys)
-                                status = "connected"
+                            status = "connected"
                         else:
                             status = "disconnected"
+                        pm = getattr(adapter, "_paper_mode", None)
+                        if pm is not None:
+                            paper_mode = bool(pm)
                     except Exception:
                         logger.exception("/api/brokers: adapter check mislukt voor %s", b.biome_id)
                         status = "disconnected"
@@ -742,7 +750,37 @@ def create_router(ctx: ColonyContext) -> APIRouter:
                 capital_deployed=b.allocated or 0.0,
                 balance_available=balance_available,
                 balance_in_orders=balance_in_orders,
+                paper_mode=paper_mode,
             ))
+            seen_biomes.add(b.biome_id)
+
+        # IBKR extra entry: EQUITIES_ENABLED=true maar equities nog niet in queen snapshot
+        if equities_enabled and "equities" not in seen_biomes and ctx.biome_registry is not None:
+            adapter = ctx.biome_registry.get("equities")
+            if adapter is not None:
+                status = "disconnected"
+                balance_available = None
+                balance_in_orders = None
+                paper_mode = bool(getattr(adapter, "_paper_mode", True))
+                try:
+                    if adapter.is_available():
+                        status = "connected"
+                        account = adapter.get_account_state()
+                        if account is not None:
+                            balance_available = account.balance
+                            balance_in_orders = account.positions_value
+                except Exception:
+                    logger.exception("/api/brokers: IBKR fallback check mislukt")
+
+                brokers.append(BrokerEntry(
+                    name="Interactive Brokers",
+                    biome_id="equities",
+                    status=status,
+                    capital_deployed=0.0,
+                    balance_available=balance_available,
+                    balance_in_orders=balance_in_orders,
+                    paper_mode=paper_mode,
+                ))
 
         return BrokersResponse(brokers=brokers)
 

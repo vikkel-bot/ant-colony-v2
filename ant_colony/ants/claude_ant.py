@@ -51,8 +51,8 @@ _RATE_LIMIT_SLOW   = 3600.0   # bij 80% budget: 1 call per uur
 _BUDGET_WARN_PCT   = 0.80     # drempel voor rate limit escalatie
 
 # Pipeline-gating: minimale pipeline-activiteit voordat Claude API wordt aangeroepen
-_PIPELINE_MIN_RESEARCH      = 10   # minimaal N accepted candidates in laatste 24u
-_PIPELINE_MIN_CLOSED_TRADES = 5    # minimaal N gesloten paper trades
+_PIPELINE_MIN_RESEARCH      = 3    # minimaal N accepted candidates in laatste 24u
+_PIPELINE_MIN_CLOSED_TRADES = 0    # gesloten paper trades vereist (0 = geen eis)
 _PIPELINE_WINDOW_SECS       = 86_400  # 24 uur
 
 # Kostenschatting in EUR: Sonnet €3/M input + €15/M output tokens
@@ -75,8 +75,10 @@ def _trim_candidate(c: dict) -> dict:
 _PROMPT_TEMPLATE = """\
 Analyseer deze kandidaten en geef JSON terug.
 Gebruik alleen ASCII tekens. Geen apostrofs in strings.
+Kies voor elke variant een strategy_type: sma_crossover, rsi_momentum, mean_reversion, breakout of bollinger.
+Geef type-specifieke parameters en passende keywords.
 {candidates_json}
-Format: [{{"candidate_id":"...","confidence":7,"improved_tp_pct":0.05,"improved_sl_pct":0.03,"best_regime":"bull"}}]"""
+Format: [{{"candidate_id":"...","strategy_type":"sma_crossover","improved_tp_pct":0.08,"improved_sl_pct":0.04,"confidence":7,"keywords":["sma","crossover","momentum"]}}]"""
 
 
 class ClaudeAnt:
@@ -562,21 +564,27 @@ class ClaudeAnt:
         if self.logs_root is None:
             return False
 
-        entry_kws = variant.get("entry_keywords") or ["claude", "improved"]
+        strategy_type = analysis.get("strategy_type") or "unknown"
+        entry_kws = (
+            analysis.get("keywords")
+            or variant.get("entry_keywords")
+            or ["claude", "improved"]
+        )
         logic     = variant.get("logic_summary") or (
-            f"Claude-verbeterd variant van {analysis.get('candidate_id', 'onbekend')[:8]}"
+            f"Claude-verbeterd variant van {analysis.get('candidate_id', 'onbekend')[:8]} ({strategy_type})"
         )
 
         try:
             candidate = StrategyCandidate(
                 candidate_id=str(uuid.uuid4()),
-                name=f"claude_variant:{analysis.get('candidate_id', '')[:8]}",
+                name=f"claude_variant:{strategy_type}:{analysis.get('candidate_id', '')[:8]}",
                 source="claude",
                 source_url="",
                 biome=self.mission.market_scope.biome,
                 market_scope={"symbols": self.mission.market_scope.symbols},
                 logic_summary=logic[:500],
                 parameters={
+                    "strategy_type":    strategy_type,
                     "take_profit_pct":  variant.get("take_profit_pct"),
                     "stop_loss_pct":    variant.get("stop_loss_pct"),
                     "confidence":       analysis.get("confidence"),

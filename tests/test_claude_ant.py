@@ -114,16 +114,12 @@ def make_mock_anthropic_response(response_text: str) -> MagicMock:
 
 _VALID_ANALYSIS_JSON = json.dumps([
     {
-        "candidate_id": "test-cand-001",
-        "rationale": "Momentum strategie werkt in trending markten",
-        "failure_modes": "Faalt in sideways markten",
-        "confidence": 7,
-        "improved_variant": {
-            "entry_keywords": ["momentum", "rsi"],
-            "take_profit_pct": 0.08,
-            "stop_loss_pct": 0.04,
-            "logic_summary": "Verbeterde momentum strategie met RSI filter",
-        },
+        "candidate_id":    "test-cand-001",
+        "strategy_type":   "sma_crossover",
+        "improved_tp_pct": 0.08,
+        "improved_sl_pct": 0.04,
+        "confidence":      7,
+        "keywords":        ["sma", "crossover", "momentum"],
     }
 ])
 
@@ -530,10 +526,9 @@ def write_paper_closed(tmp_path: Path, n: int) -> None:
 
 
 def test_pipeline_ready_all_conditions_met(tmp_path: Path) -> None:
-    """Pipeline groen als alle drie voorwaarden voldaan zijn."""
+    """Pipeline groen met >=3 research-kandidaten en 0% budget."""
     ant = make_ant(tmp_path)
-    write_research_recent(tmp_path, 10)
-    write_paper_closed(tmp_path, 5)
+    write_research_recent(tmp_path, 3)
     ant._month_cost_eur = 0.0
     ready, reason = ant._pipeline_ready()
     assert ready is True
@@ -541,32 +536,29 @@ def test_pipeline_ready_all_conditions_met(tmp_path: Path) -> None:
 
 
 def test_pipeline_not_ready_insufficient_research(tmp_path: Path) -> None:
-    """Pipeline niet groen als <10 research-kandidaten."""
+    """Pipeline niet groen als <3 research-kandidaten."""
     ant = make_ant(tmp_path)
-    write_research_recent(tmp_path, 9)  # één te weinig
-    write_paper_closed(tmp_path, 5)
+    write_research_recent(tmp_path, 2)  # één te weinig
     ant._month_cost_eur = 0.0
     ready, reason = ant._pipeline_ready()
     assert ready is False
     assert "research" in reason.lower()
 
 
-def test_pipeline_not_ready_insufficient_closed_trades(tmp_path: Path) -> None:
-    """Pipeline niet groen als <5 gesloten paper trades."""
+def test_pipeline_ready_zero_closed_trades(tmp_path: Path) -> None:
+    """Pipeline groen zonder gesloten paper trades (drempel = 0)."""
     ant = make_ant(tmp_path)
-    write_research_recent(tmp_path, 10)
-    write_paper_closed(tmp_path, 4)  # één te weinig
+    write_research_recent(tmp_path, 3)
     ant._month_cost_eur = 0.0
     ready, reason = ant._pipeline_ready()
-    assert ready is False
-    assert "trade" in reason.lower()
+    assert ready is True
+    assert reason == ""
 
 
 def test_pipeline_not_ready_budget_warning(tmp_path: Path) -> None:
     """Pipeline niet groen bij actieve BUDGET_WARNING (>=80%)."""
     ant = make_ant(tmp_path)
-    write_research_recent(tmp_path, 10)
-    write_paper_closed(tmp_path, 5)
+    write_research_recent(tmp_path, 3)
     ant._month_cost_eur = 8.0  # 80% van €10 → BUDGET_WARNING
     ready, reason = ant._pipeline_ready()
     assert ready is False
@@ -592,7 +584,6 @@ def test_pipeline_not_ready_blocks_api_call(tmp_path: Path) -> None:
     ant._status = AntStatus.RUNNING
     ant._last_api_call = 0.0
     # Geen research kandidaten → pipeline not ready
-    write_paper_closed(tmp_path, 5)
     ant._month_cost_eur = 0.0
 
     mock_client = MagicMock()
@@ -652,10 +643,9 @@ def test_count_closed_paper_trades_ignores_open(tmp_path: Path) -> None:
 
 
 def test_pipeline_exactly_at_threshold_is_ready(tmp_path: Path) -> None:
-    """Exact 10 research + 5 trades + 0% budget → groen."""
+    """Exact 3 research + 0% budget → groen."""
     ant = make_ant(tmp_path)
-    write_research_recent(tmp_path, 10)
-    write_paper_closed(tmp_path, 5)
+    write_research_recent(tmp_path, 3)
     ant._month_cost_eur = 0.0
     ready, _ = ant._pipeline_ready()
     assert ready is True
@@ -665,3 +655,72 @@ def test_rate_limit_is_30_minutes(tmp_path: Path) -> None:
     """Standaard rate limit is 1800 seconden (30 minuten)."""
     from ant_colony.ants.claude_ant import _RATE_LIMIT_FAST
     assert _RATE_LIMIT_FAST == 1800.0
+
+
+# ---------------------------------------------------------------------------
+# Variant diversiteit tests
+# ---------------------------------------------------------------------------
+
+def test_variant_strategy_type_in_ingestion(tmp_path: Path) -> None:
+    """Variant in ingestion bevat strategy_type uit Claude response."""
+    ant = make_ant(tmp_path)
+    write_research_record(tmp_path)
+
+    mock_msg = make_mock_anthropic_response(_VALID_ANALYSIS_JSON)
+
+    with patch("anthropic.Anthropic") as mock_cls:
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.messages.create.return_value = mock_msg
+        ant._analyse_with_claude(ant._read_top_candidates())
+
+    records = read_ingestion_records(tmp_path, ant.ant_id)
+    assert len(records) == 1
+    payload = records[0]["payload"]
+    # strategy_type zit in de ingestion parameters
+    assert "sma_crossover" in payload.get("name", "")
+
+
+def test_variant_keywords_in_ingestion(tmp_path: Path) -> None:
+    """Variant in ingestion gebruikt type-specifieke keywords uit Claude response."""
+    ant = make_ant(tmp_path)
+    write_research_record(tmp_path)
+
+    mock_msg = make_mock_anthropic_response(_VALID_ANALYSIS_JSON)
+
+    with patch("anthropic.Anthropic") as mock_cls:
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.messages.create.return_value = mock_msg
+        ant._analyse_with_claude(ant._read_top_candidates())
+
+    records = read_ingestion_records(tmp_path, ant.ant_id)
+    assert len(records) == 1
+    entry_keywords = records[0]["payload"].get("entry_keywords", [])
+    assert "sma" in entry_keywords
+    assert "claude" not in entry_keywords  # niet de generieke fallback
+
+
+def test_variant_different_strategy_types(tmp_path: Path) -> None:
+    """Meerdere varianten met verschillende strategy_types geven unieke namen."""
+    ant = make_ant(tmp_path)
+    write_research_record(tmp_path)
+
+    multi_response = json.dumps([
+        {"candidate_id": "c1", "strategy_type": "sma_crossover",  "improved_tp_pct": 0.08, "improved_sl_pct": 0.04, "confidence": 7, "keywords": ["sma", "crossover"]},
+        {"candidate_id": "c2", "strategy_type": "rsi_momentum",   "improved_tp_pct": 0.06, "improved_sl_pct": 0.03, "confidence": 6, "keywords": ["rsi", "momentum"]},
+        {"candidate_id": "c3", "strategy_type": "mean_reversion",  "improved_tp_pct": 0.05, "improved_sl_pct": 0.02, "confidence": 5, "keywords": ["mean", "reversion"]},
+    ])
+    mock_msg = make_mock_anthropic_response(multi_response)
+
+    with patch("anthropic.Anthropic") as mock_cls:
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.messages.create.return_value = mock_msg
+        ant._analyse_with_claude(ant._read_top_candidates())
+
+    records = read_ingestion_records(tmp_path, ant.ant_id)
+    assert len(records) == 3
+    names = [r["payload"]["name"] for r in records]
+    strategy_types_in_names = {n.split(":")[1] for n in names}
+    assert strategy_types_in_names == {"sma_crossover", "rsi_momentum", "mean_reversion"}
