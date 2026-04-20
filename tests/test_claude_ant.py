@@ -701,6 +701,75 @@ def test_variant_keywords_in_ingestion(tmp_path: Path) -> None:
     assert "claude" not in entry_keywords  # niet de generieke fallback
 
 
+# ---------------------------------------------------------------------------
+# Persistent budget tracking tests
+# ---------------------------------------------------------------------------
+
+
+def _write_total_costs_json(tmp_path: Path, total_eur: float) -> None:
+    path = tmp_path / "claude" / "total_costs.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"total_cost_eur": total_eur, "month_cost_eur": 0.0, "updated_at": "2024-01-01T00:00:00+00:00", "ant_id": "prev"}),
+        encoding="utf-8",
+    )
+
+
+def test_total_costs_loaded_from_file_on_startup(tmp_path: Path) -> None:
+    """_total_cost_eur laadt bestaand totaal uit total_costs.json bij startup."""
+    _write_total_costs_json(tmp_path, 5.25)
+    ant = make_ant(tmp_path)
+    assert ant._total_cost_eur == pytest.approx(5.25)
+
+
+def test_total_costs_no_file_uses_month_cost(tmp_path: Path) -> None:
+    """Geen total_costs.json → _total_cost_eur = _month_cost_eur."""
+    from datetime import datetime, timezone as tz
+    now = datetime.now(tz=tz.utc)
+    _write_cost_record(tmp_path, 1.50, now.year, now.month)
+    ant = make_ant(tmp_path)
+    assert ant._total_cost_eur == pytest.approx(1.50)
+
+
+def test_total_costs_saved_after_api_call(tmp_path: Path) -> None:
+    """Na een API call wordt total_costs.json bijgewerkt."""
+    ant = make_ant(tmp_path)
+    write_research_record(tmp_path)
+    mock_msg = make_mock_anthropic_response(_VALID_ANALYSIS_JSON)
+
+    with patch("anthropic.Anthropic") as mock_cls:
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+        mock_client.messages.create.return_value = mock_msg
+        ant._analyse_with_claude(ant._read_top_candidates())
+
+    total_path = tmp_path / "claude" / "total_costs.json"
+    assert total_path.exists()
+    data = json.loads(total_path.read_text(encoding="utf-8"))
+    assert data["total_cost_eur"] > 0.0
+
+
+def test_total_costs_accumulates_across_sessions(tmp_path: Path) -> None:
+    """Tweede sessie telt op bij bestaand totaal uit vorige sessie."""
+    _write_total_costs_json(tmp_path, 3.00)
+    ant = make_ant(tmp_path)
+    prev_total = ant._total_cost_eur
+    ant._total_cost_eur += 0.50
+    ant._save_total_costs()
+
+    data = json.loads((tmp_path / "claude" / "total_costs.json").read_text(encoding="utf-8"))
+    assert data["total_cost_eur"] == pytest.approx(prev_total + 0.50)
+
+
+def test_total_costs_corrupt_file_falls_back(tmp_path: Path) -> None:
+    """Corrupt total_costs.json → geen crash, fallback op month_cost."""
+    path = tmp_path / "claude" / "total_costs.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{invalid json", encoding="utf-8")
+    ant = make_ant(tmp_path)
+    assert ant._total_cost_eur >= 0.0  # geen crash, geldige waarde
+
+
 def test_variant_different_strategy_types(tmp_path: Path) -> None:
     """Meerdere varianten met verschillende strategy_types geven unieke namen."""
     ant = make_ant(tmp_path)

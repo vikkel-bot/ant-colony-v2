@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from ant_colony.ants.paper_ant import (
+    BROKER_FEE_PCT,
     PaperAnt,
     _MAX_OPEN_POSITIONS,
     _SL_PCT,
@@ -935,3 +936,80 @@ class TestResearchCandidates:
         from ant_colony.ants.paper_ant import PaperAnt
         seen = PaperAnt._preload_seen_research_ids(None)
         assert seen == set()
+
+
+# ---------------------------------------------------------------------------
+# 11. Broker fees
+# ---------------------------------------------------------------------------
+
+
+class TestBrokerFees:
+    def test_broker_fee_pct_value(self) -> None:
+        assert BROKER_FEE_PCT == pytest.approx(0.0025)
+
+    def test_trade_opened_has_effective_entry_and_fee(self, tmp_path: Path) -> None:
+        """trade_opened event bevat effective_entry en broker_entry_fee."""
+        ant = make_ant(logs_root=tmp_path)
+        pos = make_open_position(ant, entry_price=_PRICE)
+        ant._emit_trade_opened(pos, {})
+
+        log_path = tmp_path / "paper" / f"{ant.ant_id}.jsonl"
+        records = [json.loads(l) for l in log_path.read_text().splitlines() if l.strip()]
+        opened = next(r["payload"] for r in records if r["payload"]["action"] == "trade_opened")
+
+        assert "effective_entry"  in opened
+        assert "broker_entry_fee" in opened
+        assert opened["effective_entry"]  == pytest.approx(_PRICE * (1 + BROKER_FEE_PCT))
+        assert opened["broker_entry_fee"] == pytest.approx(_PRICE * pos.quantity * BROKER_FEE_PCT)
+
+    def test_trade_closed_has_fee_fields(self, tmp_path: Path) -> None:
+        """trade_closed event bevat broker_fee_cost, realized_pnl_gross, effective_exit."""
+        ant = make_ant(logs_root=tmp_path)
+        pos = make_open_position(ant, entry_price=_PRICE)
+        tp_price = pos.take_profit_price + 1.0
+        ant.biome_registry.get.return_value = _make_adapter_with_price(tp_price)
+        ant._process_exits()
+
+        log_path = tmp_path / "paper" / f"{ant.ant_id}.jsonl"
+        records = [json.loads(l) for l in log_path.read_text().splitlines() if l.strip()]
+        closed = next(r["payload"] for r in records if r["payload"]["action"] == "trade_closed")
+
+        assert "broker_fee_cost"    in closed
+        assert "realized_pnl_gross" in closed
+        assert "effective_exit"     in closed
+        assert closed["broker_fee_cost"] > 0
+
+    def test_trade_closed_pnl_net_of_fees(self, tmp_path: Path) -> None:
+        """realized_pnl in trade_closed is gecorrigeerd voor brokerkosten."""
+        ant = make_ant(logs_root=tmp_path)
+        pos = make_open_position(ant, entry_price=_PRICE)
+        tp_price = pos.take_profit_price + 1.0
+        ant.biome_registry.get.return_value = _make_adapter_with_price(tp_price)
+        ant._process_exits()
+
+        log_path = tmp_path / "paper" / f"{ant.ant_id}.jsonl"
+        records = [json.loads(l) for l in log_path.read_text().splitlines() if l.strip()]
+        closed = next(r["payload"] for r in records if r["payload"]["action"] == "trade_closed")
+
+        gross = closed["realized_pnl_gross"]
+        fee   = closed["broker_fee_cost"]
+        net   = closed["realized_pnl"]
+        assert net == pytest.approx(gross - fee, rel=1e-5)
+        assert net < gross  # fees reduceren altijd de PnL
+
+    def test_fee_reduces_pnl_pct(self, tmp_path: Path) -> None:
+        """pnl_pct is berekend op basis van netto PnL, niet bruto."""
+        ant = make_ant(logs_root=tmp_path)
+        pos = make_open_position(ant, entry_price=_PRICE)
+        tp_price = pos.take_profit_price + 1.0
+        ant.biome_registry.get.return_value = _make_adapter_with_price(tp_price)
+        ant._process_exits()
+
+        log_path = tmp_path / "paper" / f"{ant.ant_id}.jsonl"
+        records = [json.loads(l) for l in log_path.read_text().splitlines() if l.strip()]
+        closed = next(r["payload"] for r in records if r["payload"]["action"] == "trade_closed")
+
+        expected_pnl_pct = round(
+            closed["realized_pnl"] / (_PRICE * pos.quantity) * 100, 4
+        )
+        assert closed["pnl_pct"] == pytest.approx(expected_pnl_pct, rel=1e-4)

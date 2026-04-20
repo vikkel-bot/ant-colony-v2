@@ -114,7 +114,7 @@ class ClaudeAnt:
 
         self._budget_eur = float(os.getenv("CLAUDE_ANT_MONTHLY_BUDGET_EUR", "10.0"))
         self._month_cost_eur = self._load_month_costs()
-        self._total_cost_eur = self._month_cost_eur  # inclusief vorige maanden
+        self._total_cost_eur = self._load_total_costs()
 
         self._log = logging.getLogger(f"ant.claude.{ant_id[:8]}")
 
@@ -161,6 +161,39 @@ class ClaudeAnt:
             pass
         return total
 
+    def _load_total_costs(self) -> float:
+        """Laad cumulatief totaalverbruik uit ANT_LOGS/claude/total_costs.json."""
+        if self.logs_root is None:
+            return self._month_cost_eur
+        total_path = self.logs_root / "claude" / "total_costs.json"
+        if not total_path.exists():
+            return self._month_cost_eur
+        try:
+            data = json.loads(total_path.read_text(encoding="utf-8"))
+            saved = float(data.get("total_cost_eur", 0.0))
+            # Neem het maximum van opgeslagen totaal en huidig maandtotaal
+            # (beschermt bij corrupt/leeg bestand)
+            return max(saved, self._month_cost_eur)
+        except (OSError, json.JSONDecodeError, ValueError):
+            return self._month_cost_eur
+
+    def _save_total_costs(self) -> None:
+        """Sla cumulatief totaalverbruik op in ANT_LOGS/claude/total_costs.json."""
+        if self.logs_root is None:
+            return
+        total_path = self.logs_root / "claude" / "total_costs.json"
+        record = {
+            "total_cost_eur": round(self._total_cost_eur, 6),
+            "month_cost_eur": round(self._month_cost_eur, 6),
+            "updated_at":     datetime.now(tz=timezone.utc).isoformat(),
+            "ant_id":         self.ant_id,
+        }
+        try:
+            total_path.parent.mkdir(parents=True, exist_ok=True)
+            total_path.write_text(json.dumps(record, indent=2), encoding="utf-8")
+        except OSError:
+            self._log.exception("Kon total_costs.json niet schrijven: %s", total_path)
+
     def _append_cost_record(self, cost_eur: float) -> None:
         """Voeg kostenregel toe aan ANT_LOGS/claude/costs.jsonl."""
         if self.logs_root is None:
@@ -179,6 +212,7 @@ class ClaudeAnt:
                 fh.write(json.dumps(record) + "\n")
         except OSError:
             self._log.exception("Kon cost record niet schrijven: %s", costs_path)
+        self._save_total_costs()
 
     # ------------------------------------------------------------------
     # Publieke interface

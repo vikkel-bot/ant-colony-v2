@@ -57,6 +57,7 @@ _SL_PCT  = 0.02                  # 2% stop-loss onder entry
 _TP_PCT  = 0.03                  # 3% take-profit boven entry
 _SIGNAL_VALIDITY_TICKS = 2       # signal geldig voor heartbeat_interval × 2 seconden
 _MAX_OPEN_POSITIONS    = 3       # maximaal 3 open posities tegelijk (1 per symbool)
+BROKER_FEE_PCT         = 0.0025  # 0.25% Bitvavo maker/taker tarief per kant
 
 
 class PaperAnt:
@@ -753,43 +754,55 @@ class PaperAnt:
         tp_pct: float | None = None,
     ) -> None:
         """Log een trade_opened event naar ANT_LOGS/paper/{ant_id}.jsonl."""
+        entry_fee_cost = round(position.entry_price * position.quantity * BROKER_FEE_PCT, 6)
+        effective_entry = round(position.entry_price * (1.0 + BROKER_FEE_PCT), 8)
         self._write_log({
-            "action":         "trade_opened",
-            "position_id":    position.position_id,
-            "symbol":         position.symbol,
-            "side":           position.side.value,
-            "entry_price":    position.entry_price,
-            "quantity":       position.quantity,
-            "stop_loss":      position.stop_loss_price,
-            "take_profit":    position.take_profit_price,
-            "from_signal_id": signal_data.get("signal_id"),
-            "confidence":     signal_data.get("confidence"),
-            "strategy_type":  strategy_type,
-            "sl_pct":         sl_pct,
-            "tp_pct":         tp_pct,
+            "action":           "trade_opened",
+            "position_id":      position.position_id,
+            "symbol":           position.symbol,
+            "side":             position.side.value,
+            "entry_price":      position.entry_price,
+            "effective_entry":  effective_entry,
+            "broker_entry_fee": entry_fee_cost,
+            "quantity":         position.quantity,
+            "stop_loss":        position.stop_loss_price,
+            "take_profit":      position.take_profit_price,
+            "from_signal_id":   signal_data.get("signal_id"),
+            "confidence":       signal_data.get("confidence"),
+            "strategy_type":    strategy_type,
+            "sl_pct":           sl_pct,
+            "tp_pct":           tp_pct,
         })
 
     def _emit_trade_closed(self, position) -> None:
-        """Log een trade_closed event met PnL."""
-        pnl = position.realized_pnl() or 0.0
+        """Log een trade_closed event met fee-gecorrigeerde PnL."""
+        pnl_gross = position.realized_pnl() or 0.0
+        entry_fee = position.entry_price * position.quantity * BROKER_FEE_PCT
+        exit_fee  = (position.exit_price or 0.0) * position.quantity * BROKER_FEE_PCT
+        fee_total = round(entry_fee + exit_fee, 6)
+        pnl_net   = round(pnl_gross - fee_total, 4)
+
         entry_value = position.entry_price * position.quantity
-        pnl_pct = round(pnl / entry_value * 100, 4) if entry_value > 0 else 0.0
+        pnl_pct = round(pnl_net / entry_value * 100, 4) if entry_value > 0 else 0.0
 
         self._write_log({
-            "action":       "trade_closed",
-            "position_id":  position.position_id,
-            "symbol":       position.symbol,
-            "side":         position.side.value,
-            "entry_price":  position.entry_price,
-            "exit_price":   position.exit_price,
-            "quantity":     position.quantity,
-            "exit_reason":  position.exit_reason,
-            "realized_pnl": round(pnl, 4),
-            "pnl_pct":      pnl_pct,
+            "action":            "trade_closed",
+            "position_id":       position.position_id,
+            "symbol":            position.symbol,
+            "side":              position.side.value,
+            "entry_price":       position.entry_price,
+            "exit_price":        position.exit_price,
+            "effective_exit":    round((position.exit_price or 0.0) * (1.0 - BROKER_FEE_PCT), 8),
+            "quantity":          position.quantity,
+            "exit_reason":       position.exit_reason,
+            "broker_fee_cost":   fee_total,
+            "realized_pnl_gross": round(pnl_gross, 4),
+            "realized_pnl":      pnl_net,
+            "pnl_pct":           pnl_pct,
         })
         self._log.info(
-            "POSITIE GESLOTEN | %s via %s  pnl=%.4f (%.2f%%)",
-            position.symbol, position.exit_reason, pnl, pnl_pct,
+            "POSITIE GESLOTEN | %s via %s  pnl_gross=%.4f fee=%.4f pnl_net=%.4f (%.2f%%)",
+            position.symbol, position.exit_reason, pnl_gross, fee_total, pnl_net, pnl_pct,
         )
 
     def _emit_pnl_summary(self) -> None:
