@@ -38,6 +38,8 @@ from ant_colony.schemas.mission import Mission
 
 logger = logging.getLogger(__name__)
 
+BROKER_FEE_PCT = 0.0025  # 0.25% Bitvavo maker/taker tarief per kant
+
 
 class PaperLedger:
     """
@@ -98,9 +100,9 @@ class PaperLedger:
         self._open.pop(position.position_id, None)
         self._closed.append(position)
 
-        pnl = position.realized_pnl() or 0.0
+        pnl = self._net_pnl(position)
         logger.debug(
-            "Closed %s %s via %s  pnl=%.4f",
+            "Closed %s %s via %s  pnl_net=%.4f",
             position.side.value, position.symbol,
             position.status.value, pnl,
         )
@@ -118,6 +120,19 @@ class PaperLedger:
             )
             return
         self._open[position.position_id] = position
+
+    # ------------------------------------------------------------------
+    # PnL helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _net_pnl(position: PaperPosition) -> float:
+        """Netto PnL na aftrek van brokerkosten (beide kanten)."""
+        gross = position.realized_pnl() or 0.0
+        if position.exit_price is None:
+            return gross
+        fee = (position.entry_price + position.exit_price) * position.quantity * BROKER_FEE_PCT
+        return gross - fee
 
     # ------------------------------------------------------------------
     # Kapitaal
@@ -157,7 +172,7 @@ class PaperLedger:
                 continue
             if trade.closed_at.astimezone(timezone.utc).date() != trading_day:
                 continue
-            pnl = trade.realized_pnl() or 0.0
+            pnl = self._net_pnl(trade)
             if pnl < 0:
                 total_loss += abs(pnl)
         return total_loss
@@ -185,16 +200,16 @@ class PaperLedger:
 
     @property
     def total_realized_pnl(self) -> float:
-        """Som van alle gerealiseerde PnL over gesloten trades."""
-        return sum(t.realized_pnl() or 0.0 for t in self._closed)
+        """Som van alle gerealiseerde netto PnL (na brokerkosten) over gesloten trades."""
+        return sum(self._net_pnl(t) for t in self._closed)
 
     @property
     def win_count(self) -> int:
-        return sum(1 for t in self._closed if (t.realized_pnl() or 0.0) > 0)
+        return sum(1 for t in self._closed if self._net_pnl(t) > 0)
 
     @property
     def loss_count(self) -> int:
-        return sum(1 for t in self._closed if (t.realized_pnl() or 0.0) <= 0)
+        return sum(1 for t in self._closed if self._net_pnl(t) <= 0)
 
     @property
     def win_rate(self) -> float | None:
@@ -235,18 +250,23 @@ class PaperLedger:
         if self._logs_root is None:
             return
         log_path = self._logs_root / "paper" / f"{self._mission.mission_id}_trades.jsonl"
+        gross_pnl = position.realized_pnl()
+        net_pnl   = self._net_pnl(position)
+        fee_cost  = round((gross_pnl or 0.0) - net_pnl, 6)
         record = {
-            "position_id": position.position_id,
-            "symbol": position.symbol,
-            "side": position.side.value,
-            "status": position.status.value,
-            "entry_price": position.entry_price,
-            "exit_price": position.exit_price,
-            "quantity": position.quantity,
-            "realized_pnl": position.realized_pnl(),
-            "opened_at": position.opened_at.isoformat() if position.opened_at else None,
-            "closed_at": position.closed_at.isoformat() if position.closed_at else None,
-            "exit_reason": position.exit_reason,
+            "position_id":       position.position_id,
+            "symbol":            position.symbol,
+            "side":              position.side.value,
+            "status":            position.status.value,
+            "entry_price":       position.entry_price,
+            "exit_price":        position.exit_price,
+            "quantity":          position.quantity,
+            "realized_pnl_gross": gross_pnl,
+            "broker_fee_cost":   fee_cost,
+            "realized_pnl":      net_pnl,
+            "opened_at":         position.opened_at.isoformat() if position.opened_at else None,
+            "closed_at":         position.closed_at.isoformat() if position.closed_at else None,
+            "exit_reason":       position.exit_reason,
         }
         try:
             log_path.parent.mkdir(parents=True, exist_ok=True)

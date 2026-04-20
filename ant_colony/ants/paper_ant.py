@@ -46,7 +46,7 @@ from ant_colony.exit_chain.exit_conditions import (
 )
 from ant_colony.exit_chain.exit_evaluator import ExitEvaluator
 from ant_colony.paper.paper_broker import PaperBroker
-from ant_colony.paper.paper_ledger import PaperLedger
+from ant_colony.paper.paper_ledger import BROKER_FEE_PCT, PaperLedger
 from ant_colony.schemas.ant import AntStatus
 from ant_colony.schemas.audit_event import AuditEvent, AuditEventType
 from ant_colony.schemas.heartbeat import Heartbeat, HeartbeatStatus
@@ -57,7 +57,6 @@ _SL_PCT  = 0.02                  # 2% stop-loss onder entry
 _TP_PCT  = 0.03                  # 3% take-profit boven entry
 _SIGNAL_VALIDITY_TICKS = 2       # signal geldig voor heartbeat_interval × 2 seconden
 _MAX_OPEN_POSITIONS    = 3       # maximaal 3 open posities tegelijk (1 per symbool)
-BROKER_FEE_PCT         = 0.0025  # 0.25% Bitvavo maker/taker tarief per kant
 
 
 class PaperAnt:

@@ -31,7 +31,7 @@ from ant_colony.exit_chain.exit_conditions import (
 from ant_colony.exit_chain.exit_evaluator import ExitEvaluator
 from ant_colony.exit_chain.position import PositionStatus
 from ant_colony.paper.paper_broker import PaperBroker, RejectionReason
-from ant_colony.paper.paper_ledger import PaperLedger
+from ant_colony.paper.paper_ledger import BROKER_FEE_PCT, PaperLedger
 from ant_colony.paper.paper_loop import PaperLoop
 from ant_colony.schemas.mission import (
     AbortConditions,
@@ -418,6 +418,52 @@ class TestPaperLedger:
         ledger = PaperLedger(make_mission(), logs_root=None)
         _, closed = self._make_closed_position()
         ledger.record_closed(closed)  # must not raise
+
+    def test_total_realized_pnl_is_net(self):
+        """total_realized_pnl is netto (na brokerkosten)."""
+        ledger = PaperLedger(make_mission(), logs_root=None)
+        _, closed = self._make_closed_position(pnl_positive=True)
+        ledger.record_closed(closed)
+        gross = closed.realized_pnl() or 0.0
+        fee = (closed.entry_price + (closed.exit_price or 0.0)) * closed.quantity * BROKER_FEE_PCT
+        assert ledger.total_realized_pnl == pytest.approx(gross - fee)
+
+    def test_total_realized_pnl_net_less_than_gross(self):
+        """Netto PnL is altijd kleiner dan bruto PnL."""
+        ledger = PaperLedger(make_mission(), logs_root=None)
+        _, closed = self._make_closed_position(pnl_positive=True)
+        ledger.record_closed(closed)
+        assert ledger.total_realized_pnl < (closed.realized_pnl() or 0.0)
+
+    def test_trade_log_has_gross_and_net_pnl(self, tmp_path):
+        """_trades.jsonl bevat realized_pnl_gross, broker_fee_cost en realized_pnl (netto)."""
+        ledger = PaperLedger(make_mission(), logs_root=tmp_path)
+        _, closed = self._make_closed_position(pnl_positive=True)
+        ledger.record_closed(closed)
+        log = tmp_path / "paper" / "m-test_trades.jsonl"
+        record = json.loads(log.read_text().strip())
+        assert "realized_pnl_gross" in record
+        assert "broker_fee_cost"    in record
+        assert "realized_pnl"       in record
+        assert record["broker_fee_cost"] > 0
+        assert record["realized_pnl"] < record["realized_pnl_gross"]
+
+    def test_net_pnl_helper_computes_correctly(self):
+        """`_net_pnl` = gross − (entry + exit) × qty × fee."""
+        _, closed = self._make_closed_position(pnl_positive=True)
+        gross = closed.realized_pnl() or 0.0
+        fee   = (closed.entry_price + (closed.exit_price or 0.0)) * closed.quantity * BROKER_FEE_PCT
+        assert PaperLedger._net_pnl(closed) == pytest.approx(gross - fee)
+
+    def test_daily_loss_uses_net_pnl(self):
+        """Dagverlies is berekend op netto PnL."""
+        ledger = PaperLedger(make_mission(), logs_root=None)
+        _, closed = self._make_closed_position(pnl_positive=False)
+        ledger.record_closed(closed)
+        gross_loss = abs(closed.realized_pnl() or 0.0)
+        net_loss   = ledger.daily_loss_so_far()
+        # Netto verlies is groter dan bruto verlies (fees komen er bovenop)
+        assert net_loss > gross_loss
 
 
 # ---------------------------------------------------------------------------
