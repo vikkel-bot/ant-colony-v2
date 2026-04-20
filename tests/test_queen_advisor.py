@@ -33,7 +33,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from ant_colony.queen.queen_advisor import QueenDecision, QueenAdvisor, _WIN_HIGH, _WIN_LOW
+from ant_colony.queen.queen_advisor import (
+    QueenDecision, QueenAdvisor, _WIN_HIGH, _WIN_LOW,
+    select_diverse_top_n,
+)
 from ant_colony.schemas.mission import (
     AbortConditions, MarketScope, Mission, RiskLimits, SuccessConditions,
 )
@@ -436,6 +439,108 @@ def test_apply_decision_with_allocatie_aanpassingen(tmp_path: Path) -> None:
     records = read_decisions(tmp_path)
     assert len(records) == 1
     assert records[0]["allocatie_toegepast"] is True
+
+
+# ---------------------------------------------------------------------------
+# select_diverse_top_n
+# ---------------------------------------------------------------------------
+
+def _make_candidate(symbol: str, strategy_type: str, sharpe: float) -> dict:
+    return {"symbol": symbol, "strategy_type": strategy_type, "sharpe": sharpe,
+            "best_regime": "bull", "candidate_id": f"{symbol}-{strategy_type}"}
+
+
+def test_diverse_top_n_sorts_by_sharpe() -> None:
+    """Hoogste sharpe staat bovenaan."""
+    cands = [
+        _make_candidate("BTC-EUR", "sma_crossover",  0.5),
+        _make_candidate("ETH-EUR", "rsi_momentum",   0.9),
+        _make_candidate("SOL-EUR", "mean_reversion", 0.7),
+    ]
+    result = select_diverse_top_n(cands, n=3)
+    assert result[0]["sharpe"] == 0.9
+    assert result[1]["sharpe"] == 0.7
+
+
+def test_diverse_top_n_max_one_per_symbol() -> None:
+    """Maximaal 1 kandidaat per symbool in de top-N."""
+    cands = [
+        _make_candidate("BTC-EUR", "sma_crossover",  0.9),
+        _make_candidate("BTC-EUR", "rsi_momentum",   0.8),   # zelfde symbool, hogere 2e
+        _make_candidate("ETH-EUR", "mean_reversion", 0.7),
+    ]
+    result = select_diverse_top_n(cands, n=3)
+    symbols = [c["symbol"] for c in result]
+    assert symbols.count("BTC-EUR") == 1
+    assert len(result) == 2   # BTC-EUR (0.9) + ETH-EUR (0.7), 2e BTC-EUR uitgesloten
+
+
+def test_diverse_top_n_max_one_per_strategy_type() -> None:
+    """Maximaal 1 kandidaat per strategy_type in de top-N."""
+    cands = [
+        _make_candidate("BTC-EUR", "sma_crossover", 0.9),
+        _make_candidate("ETH-EUR", "sma_crossover", 0.8),   # zelfde type, ander symbool
+        _make_candidate("SOL-EUR", "rsi_momentum",  0.7),
+    ]
+    result = select_diverse_top_n(cands, n=3)
+    types = [c["strategy_type"] for c in result]
+    assert types.count("sma_crossover") == 1
+    assert len(result) == 2   # BTC sma (0.9) + SOL rsi (0.7), ETH sma uitgesloten
+
+
+def test_diverse_top_n_picks_diverse_set() -> None:
+    """Top-3 bevat unieke symbolen én strategy_types."""
+    cands = [
+        _make_candidate("BTC-EUR", "sma_crossover",  0.9),
+        _make_candidate("BTC-EUR", "rsi_momentum",   0.85),  # zelfde symbool
+        _make_candidate("BTC-EUR", "mean_reversion", 0.80),  # zelfde symbool
+        _make_candidate("ETH-EUR", "rsi_momentum",   0.75),
+        _make_candidate("SOL-EUR", "mean_reversion", 0.70),
+        _make_candidate("ADA-EUR", "breakout",        0.65),
+    ]
+    result = select_diverse_top_n(cands, n=3)
+    assert len(result) == 3
+    assert len({c["symbol"] for c in result}) == 3          # alle 3 unieke symbolen
+    assert len({c["strategy_type"] for c in result}) == 3   # alle 3 unieke types
+
+
+def test_diverse_top_n_unknown_type_not_deduplicated() -> None:
+    """strategy_type='unknown' telt niet als duplicate — meerdere unknowns zijn toegestaan."""
+    cands = [
+        _make_candidate("BTC-EUR", "unknown", 0.9),
+        _make_candidate("ETH-EUR", "unknown", 0.8),
+        _make_candidate("SOL-EUR", "unknown", 0.7),
+    ]
+    result = select_diverse_top_n(cands, n=3)
+    assert len(result) == 3   # alle 3 toegelaten ondanks zelfde type
+
+
+def test_diverse_top_n_fewer_than_n_candidates() -> None:
+    """Minder dan N kandidaten → retourneer wat beschikbaar is."""
+    cands = [_make_candidate("BTC-EUR", "sma_crossover", 0.8)]
+    result = select_diverse_top_n(cands, n=3)
+    assert len(result) == 1
+
+
+def test_diverse_top_n_empty_input() -> None:
+    """Lege input → lege output."""
+    assert select_diverse_top_n([], n=3) == []
+
+
+def test_diverse_top_n_btc_dominantie_doorbroken() -> None:
+    """Regressietest: BTC-EUR domineert niet meer de top-3 als er diverse kandidaten zijn."""
+    cands = [
+        _make_candidate("BTC-EUR", "hybrid", 0.23),
+        _make_candidate("BTC-EUR", "hybrid", 0.23),
+        _make_candidate("BTC-EUR", "hybrid", 0.23),
+        _make_candidate("ETH-EUR", "momentum", 0.20),
+        _make_candidate("SOL-EUR", "mean_reversion", 0.18),
+    ]
+    result = select_diverse_top_n(cands, n=3)
+    symbols = [c["symbol"] for c in result]
+    assert symbols.count("BTC-EUR") == 1
+    assert "ETH-EUR" in symbols
+    assert "SOL-EUR" in symbols
 
 
 def test_apply_decision_logs_all_fields(tmp_path: Path) -> None:

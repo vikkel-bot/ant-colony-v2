@@ -48,6 +48,56 @@ _CLAUDE_MIN_CONF  = 6      # minimale confidence voor Claude advies
 
 
 # ---------------------------------------------------------------------------
+# Diversiteitselectie — top-N met unieke symbolen én strategy_types
+# ---------------------------------------------------------------------------
+
+def select_diverse_top_n(candidates: list[dict], n: int = 3) -> list[dict]:
+    """
+    Selecteer top-N kandidaten op sharpe met diversiteitsconstraint.
+
+    Regels (in volgorde):
+      1. Sorteer op sharpe (hoogste eerst)
+      2. Maximaal 1 kandidaat per symbool
+      3. Maximaal 1 kandidaat per strategy_type (unknown telt niet mee als duplicate)
+
+    Args:
+        candidates: Lijst van candidate-dicts met "sharpe", "symbol", "strategy_type".
+        n:          Maximum aantal te retourneren kandidaten.
+
+    Returns:
+        Gefilterde lijst, maximaal n entries, gesorteerd op sharpe.
+    """
+    sorted_cands = sorted(
+        candidates,
+        key=lambda c: float(c.get("sharpe_ratio") or c.get("sharpe") or 0),
+        reverse=True,
+    )
+
+    seen_symbols: set[str] = set()
+    seen_types:   set[str] = set()
+    result: list[dict] = []
+
+    for c in sorted_cands:
+        if len(result) >= n:
+            break
+        symbol        = c.get("symbol") or ""
+        strategy_type = c.get("strategy_type") or c.get("strategy") or "unknown"
+
+        if symbol and symbol in seen_symbols:
+            continue
+        if strategy_type != "unknown" and strategy_type in seen_types:
+            continue
+
+        if symbol:
+            seen_symbols.add(symbol)
+        if strategy_type != "unknown":
+            seen_types.add(strategy_type)
+        result.append(c)
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # QueenDecision
 # ---------------------------------------------------------------------------
 

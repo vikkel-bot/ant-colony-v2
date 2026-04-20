@@ -1653,12 +1653,9 @@ def _read_queen_status_data(logs_root: Path) -> dict:
     if regimes:
         regime = Counter(regimes).most_common(1)[0][0]
 
-    # Top 3 by sharpe
-    scored = sorted(
-        candidates,
-        key=lambda c: float(c.get("sharpe_ratio") or c.get("sharpe") or 0),
-        reverse=True,
-    )
+    # Top 3 by sharpe — diversiteit: max 1 per symbool, max 1 per strategy_type
+    from ant_colony.queen.queen_advisor import select_diverse_top_n
+    top_3 = select_diverse_top_n(candidates, n=3)
     top_strategies = [
         {
             "strategy_type": c.get("strategy_type") or c.get("strategy") or "unknown",
@@ -1666,7 +1663,7 @@ def _read_queen_status_data(logs_root: Path) -> dict:
             "sharpe": round(float(c.get("sharpe_ratio") or c.get("sharpe") or 0), 2),
             "best_regime": c.get("best_regime") or "—",
         }
-        for c in scored[:3]
+        for c in top_3
     ]
 
     # Laatste Queen beslissing uit ANT_LOGS/queen/decisions.jsonl
