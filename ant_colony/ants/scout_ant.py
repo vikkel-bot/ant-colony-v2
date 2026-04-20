@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from statistics import mean
 
+from ant_colony.ants.time_filter_ant import read_latest_time_signal
 from ant_colony.biome.biome_adapter import MarketData
 from ant_colony.biome.biome_registry import BiomeRegistry
 from ant_colony.colony.scheduler.colony_scheduler import ColonyScheduler
@@ -140,6 +141,16 @@ class ScoutAnt:
 
     def _tick(self) -> None:
         """Één marktcyclus: data ophalen voor alle symbolen en kansen detecteren."""
+        if self.logs_root is not None:
+            sig = read_latest_time_signal(self.logs_root)
+            if sig is not None and not sig.get("trade_allowed", True):
+                self._log.debug(
+                    "Signalen overgeslagen — buiten kill zone: session=%s",
+                    sig.get("session", "unknown"),
+                )
+                self._last_action = f"skip:buiten_kill_zone:{sig.get('session', 'unknown')}"
+                return
+
         biome_id = self.mission.market_scope.biome
         timeframe = self._pick_timeframe()
 

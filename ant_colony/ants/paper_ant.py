@@ -35,6 +35,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from ant_colony.ants.time_filter_ant import read_latest_time_signal
 from ant_colony.biome.biome_registry import BiomeRegistry
 from ant_colony.colony.scheduler.colony_scheduler import ColonyScheduler
 from ant_colony.entry.entry_signal import EntrySignal, SignalSource
@@ -242,6 +243,15 @@ class PaperAnt:
 
     def _process_new_signals(self) -> None:
         """Verwerk nieuwe scout-signalen en open posities indien van toepassing."""
+        if self.logs_root is not None:
+            tf_sig = read_latest_time_signal(self.logs_root)
+            if tf_sig is not None and not tf_sig.get("trade_allowed", True):
+                self._log.debug(
+                    "Nieuwe posities gepauzeerd — buiten kill zone: session=%s",
+                    tf_sig.get("session", "unknown"),
+                )
+                return
+
         signals = self._read_new_scout_signals()
         for sig in signals:
             confidence = sig.get("confidence", 0.0)

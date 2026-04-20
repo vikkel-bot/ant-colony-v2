@@ -1074,6 +1074,74 @@ def main() -> None:
     except Exception:
         log.exception("OperatorAnt bootstrap mislukt — colony draait door zonder OperatorAnt.")
 
+    # --- Stap 8e-extra: TimeFilterAnt (opt-in via TIME_FILTER_ENABLED=true) ---
+    try:
+        _time_filter_enabled = os.getenv("TIME_FILTER_ENABLED", "false").lower() == "true"
+        if _time_filter_enabled:
+            from ant_colony.ants.time_filter_ant import TimeFilterAnt
+            from ant_colony.colony.scheduler.colony_scheduler import AgentRecord
+            from ant_colony.schemas.mission import (
+                AbortConditions, MarketScope, Mission, RiskLimits, SuccessConditions,
+            )
+
+            _ts_tf   = datetime.now(tz=timezone.utc).strftime("%Y%m%d-%H%M%S")
+            _obs_risk_tf = RiskLimits(
+                max_drawdown_pct=0.01, max_position_size=1.0,
+                daily_loss_limit=1.0, stop_loss_required=False,
+            )
+            tf_ant_id  = f"ant-time-filter-{_ts_tf}"
+            tf_mission = Mission(
+                mission_id=f"time-filter-{_ts_tf}",
+                ant_type="time_filter_ant",
+                allowed_node=args.node_id,
+                allowed_actions=["read_data", "report"],
+                market_scope=MarketScope(biome="crypto", symbols=["BTC-EUR"]),
+                capital_limit=0.0,
+                risk_limits=_obs_risk_tf,
+                ttl=86400,
+                heartbeat_interval=60,
+                success_conditions=SuccessConditions(
+                    description="Schrijf ICT Kill Zone TimeSignals elke minuut.",
+                ),
+                abort_conditions=AbortConditions(
+                    stale_heartbeat=True,
+                    capital_limit_breach=False,
+                    risk_limit_breach=False,
+                    ttl_expired=True,
+                ),
+            )
+            tf_result = queen.issue_mission(tf_mission)
+            if not tf_result.accepted:
+                log.warning(
+                    "TimeFilterAnt missie geweigerd: %s — %s",
+                    tf_result.rejection_reason, tf_result.rejection_detail,
+                )
+            else:
+                tf_ant = TimeFilterAnt(
+                    ant_id=tf_ant_id,
+                    mission=tf_mission,
+                    scheduler=scheduler,
+                    logs_root=logs_root,
+                )
+                threading.Thread(
+                    target=tf_ant.run,
+                    name=f"time-filter-{tf_ant_id[:20]}",
+                    daemon=True,
+                ).start()
+                scheduler.register_agent(AgentRecord(
+                    ant_id=tf_ant_id,
+                    mission_id=tf_mission.mission_id,
+                    node_id=args.node_id,
+                    ant_type="time_filter_ant",
+                    ttl=tf_mission.ttl,
+                    heartbeat_interval=tf_mission.heartbeat_interval,
+                ))
+                log.info("TimeFilterAnt gestart | ant_id=%s  ttl=%ds", tf_ant_id, tf_mission.ttl)
+        else:
+            log.info("TimeFilterAnt uitgeschakeld (zet TIME_FILTER_ENABLED=true om te activeren).")
+    except Exception:
+        log.exception("TimeFilterAnt bootstrap mislukt — colony draait door zonder TimeFilterAnt.")
+
     # --- Stap 8f: Equities ants (opt-in via EQUITIES_ENABLED=true) ---
     try:
         if _equities_enabled:
