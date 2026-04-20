@@ -570,3 +570,110 @@ class TestParseTs:
 
     def test_garbage_returns_none(self):
         assert _parse_ts("not-a-date") is None
+
+
+# ---------------------------------------------------------------------------
+# TestPerformanceChartEndpoint
+# ---------------------------------------------------------------------------
+
+class TestPerformanceChartEndpoint:
+
+    def _write_trade(self, logs: Path, pnl: float, days_ago: float = 0.0,
+                     filename: str = "m-1_trades.jsonl") -> None:
+        ts = (datetime.now(tz=timezone.utc) - timedelta(days=days_ago)).isoformat()
+        _write_jsonl(logs / "paper" / filename, [{"realized_pnl": pnl, "closed_at": ts}])
+
+    def test_no_logs_root_empty_response(self) -> None:
+        r = _client(ColonyContext()).get("/api/performance/chart")
+        assert r.status_code == 200
+        d = r.json()
+        assert d["points"] == []
+        assert d["total_pnl"] == 0.0
+        assert d["dag"] == 0.0
+        assert d["alltime"] == 0.0
+
+    def test_response_has_all_period_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            logs = Path(tmp)
+            _write_jsonl(logs / "paper" / "m-1_trades.jsonl", [
+                {"realized_pnl": 10.0, "closed_at": _now_iso()},
+            ])
+            r = _client(ColonyContext(logs_root=logs)).get("/api/performance/chart")
+            d = r.json()
+            for key in ("dag", "week", "maand", "jaar", "alltime", "curve_label", "total_pnl", "points"):
+                assert key in d, f"missing key: {key}"
+
+    def test_single_day_trade_alltime_curve(self) -> None:
+        """Minder dan 2 dagdata → curve_label='alltime'."""
+        with tempfile.TemporaryDirectory() as tmp:
+            logs = Path(tmp)
+            _write_jsonl(logs / "paper" / "m-1_trades.jsonl", [
+                {"realized_pnl": 50.0, "closed_at": _now_iso()},
+            ])
+            r = _client(ColonyContext(logs_root=logs)).get("/api/performance/chart")
+            d = r.json()
+            assert d["curve_label"] == "alltime"
+
+    def test_two_day_trades_today_curve(self) -> None:
+        """2 of meer dagdata → curve_label='vandaag'."""
+        with tempfile.TemporaryDirectory() as tmp:
+            logs = Path(tmp)
+            _write_jsonl(logs / "paper" / "m-1_trades.jsonl", [
+                {"realized_pnl": 10.0, "closed_at": _now_iso()},
+                {"realized_pnl": 20.0, "closed_at": _now_iso()},
+            ])
+            r = _client(ColonyContext(logs_root=logs)).get("/api/performance/chart")
+            d = r.json()
+            assert d["curve_label"] == "vandaag"
+
+    def test_period_totals_correct(self) -> None:
+        """Periode-totalen kloppen: dag telt alleen vandaag, alltime alles."""
+        with tempfile.TemporaryDirectory() as tmp:
+            logs = Path(tmp)
+            now_ts  = _now_iso()
+            old_ts  = (datetime.now(tz=timezone.utc) - timedelta(days=5)).isoformat()
+            _write_jsonl(logs / "paper" / "m-1_trades.jsonl", [
+                {"realized_pnl": 100.0, "closed_at": now_ts},
+                {"realized_pnl":  50.0, "closed_at": old_ts},
+            ])
+            r = _client(ColonyContext(logs_root=logs)).get("/api/performance/chart")
+            d = r.json()
+            assert d["alltime"] == pytest.approx(150.0)
+            assert d["dag"]     == pytest.approx(100.0)
+            assert d["week"]    == pytest.approx(150.0)   # beide binnen 7 dagen
+
+    def test_alltime_curve_uses_all_historical_trades(self) -> None:
+        """Alltime curve bevat ook historische trades van buiten vandaag."""
+        with tempfile.TemporaryDirectory() as tmp:
+            logs = Path(tmp)
+            old_ts = (datetime.now(tz=timezone.utc) - timedelta(days=30)).isoformat()
+            _write_jsonl(logs / "paper" / "m-1_trades.jsonl", [
+                {"realized_pnl": 200.0, "closed_at": old_ts},
+            ])
+            r = _client(ColonyContext(logs_root=logs)).get("/api/performance/chart")
+            d = r.json()
+            assert d["curve_label"] == "alltime"
+            assert d["total_pnl"]   == pytest.approx(200.0)
+            assert len(d["points"])  >= 2   # startpunt + 1 trade
+
+    def test_chart_starts_at_zero(self) -> None:
+        """Eerste punt in de curve heeft pnl=0 (startpunt)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            logs = Path(tmp)
+            _write_jsonl(logs / "paper" / "m-1_trades.jsonl", [
+                {"realized_pnl": 40.0, "closed_at": _now_iso()},
+                {"realized_pnl": 20.0, "closed_at": _now_iso()},
+            ])
+            r = _client(ColonyContext(logs_root=logs)).get("/api/performance/chart")
+            points = r.json()["points"]
+            assert points[0]["pnl"] == pytest.approx(0.0)
+
+    def test_no_trades_at_all_empty_points(self) -> None:
+        """Geen trades → lege puntenreeks, alle periodes 0."""
+        with tempfile.TemporaryDirectory() as tmp:
+            r = _client(ColonyContext(logs_root=Path(tmp))).get("/api/performance/chart")
+            d = r.json()
+            assert d["points"]  == []
+            assert d["total_pnl"] == 0.0
+            assert d["dag"]     == 0.0
+            assert d["alltime"] == 0.0

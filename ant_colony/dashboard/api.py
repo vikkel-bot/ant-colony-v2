@@ -233,6 +233,12 @@ class ChartPoint(BaseModel):
 class PerformanceChartResponse(BaseModel):
     points: list[ChartPoint]
     total_pnl: float
+    curve_label: str = "vandaag"   # "vandaag" | "alltime"
+    dag: float = 0.0
+    week: float = 0.0
+    maand: float = 0.0
+    jaar: float = 0.0
+    alltime: float = 0.0
 
 
 class QueenStrategyEntry(BaseModel):
@@ -1086,30 +1092,69 @@ def create_router(ctx: ColonyContext) -> APIRouter:
 
     @router.get("/performance/chart", response_model=PerformanceChartResponse)
     def get_performance_chart() -> PerformanceChartResponse:
-        """Cumulatief PnL verloop van vandaag als tijdsreeks."""
+        """Cumulatief PnL curve + periode-totalen uit alle paper trade logs."""
         if ctx.logs_root is None:
             return PerformanceChartResponse(points=[], total_pnl=0.0)
 
-        today  = _today_cutoff()
+        now    = datetime.now(tz=timezone.utc)
         trades = _read_all_trades(ctx.logs_root)
 
-        today_trades: list[tuple[datetime, float]] = []
+        def _pnl_since(cutoff: datetime) -> float:
+            total = 0.0
+            for t in trades:
+                ts = _parse_ts(t.get("closed_at"))
+                if ts is not None and ts >= cutoff:
+                    total += float(t.get("realized_pnl") or 0.0)
+            return round(total, 2)
+
+        today   = _today_cutoff()
+        dag     = _pnl_since(today)
+        week    = _pnl_since(now - timedelta(weeks=1))
+        maand   = _pnl_since(now - timedelta(days=30))
+        jaar    = _pnl_since(now - timedelta(days=365))
+        alltime = round(sum(float(t.get("realized_pnl") or 0.0) for t in trades), 2)
+
+        # Build day curve
+        day_pairs: list[tuple[datetime, float]] = []
         for t in trades:
-            closed_at = _parse_ts(t.get("closed_at"))
-            if closed_at and closed_at >= today:
-                today_trades.append((closed_at, float(t.get("realized_pnl") or 0)))
-        today_trades.sort(key=lambda x: x[0])
+            ts = _parse_ts(t.get("closed_at"))
+            if ts and ts >= today:
+                day_pairs.append((ts, float(t.get("realized_pnl") or 0.0)))
+        day_pairs.sort(key=lambda x: x[0])
+
+        # Fall back to alltime curve when fewer than 2 day trades
+        if len(day_pairs) >= 2:
+            curve_pairs = day_pairs
+            curve_label = "vandaag"
+        else:
+            all_pairs: list[tuple[datetime, float]] = []
+            for t in trades:
+                ts = _parse_ts(t.get("closed_at"))
+                if ts:
+                    all_pairs.append((ts, float(t.get("realized_pnl") or 0.0)))
+            all_pairs.sort(key=lambda x: x[0])
+            curve_pairs = all_pairs
+            curve_label = "alltime"
 
         points: list[ChartPoint] = []
         cumulative = 0.0
-        for ts, pnl in today_trades:
+        for ts, pnl in curve_pairs:
             cumulative = round(cumulative + pnl, 2)
             points.append(ChartPoint(time=_to_local_str(ts), pnl=cumulative))
 
         if points:
             points = [ChartPoint(time=points[0].time, pnl=0.0)] + points
 
-        return PerformanceChartResponse(points=points, total_pnl=round(cumulative, 2))
+        return PerformanceChartResponse(
+            points=points,
+            total_pnl=round(cumulative, 2),
+            curve_label=curve_label,
+            dag=dag,
+            week=week,
+            maand=maand,
+            jaar=jaar,
+            alltime=alltime,
+        )
 
     # ------------------------------------------------------------------
     # GET /api/queen/status

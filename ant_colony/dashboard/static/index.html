@@ -736,14 +736,15 @@
 
       <!-- PnL Chart -->
       <div class="card">
-        <div class="card-title">Paper PnL vandaag</div>
+        <div class="card-title" id="pnl-card-title">Paper PnL</div>
+        <div id="pnl-periods" style="display:flex;margin-bottom:7px;border:.5px solid var(--border-soft);border-radius:5px;overflow:hidden"></div>
         <div class="chart-hdr">
           <span class="chart-pnl-total zero" id="pnl-total">€ 0</span>
           <span style="font-size:10px;color:var(--faint)" id="pnl-trades-count"></span>
         </div>
         <div class="pnl-svg-wrap">
           <svg id="pnl-svg" viewBox="0 0 500 60" preserveAspectRatio="none">
-            <text x="250" y="34" text-anchor="middle" fill="#9ca3af" font-size="11">Geen gesloten trades vandaag</text>
+            <text x="250" y="34" text-anchor="middle" fill="#9ca3af" font-size="11">Geen gesloten trades</text>
           </svg>
         </div>
       </div>
@@ -834,7 +835,7 @@ const S = {
   v1loaded:    false,
   activity:    { ants:[] },
   queenStatus: null,
-  perfChart:   { points:[], total_pnl:0 },
+  perfChart:   { points:[], total_pnl:0, curve_label:'vandaag', dag:0, week:0, maand:0, jaar:0, alltime:0 },
   equities:    null,
   activeTab:   'colony',
   tickerIdx:   0,
@@ -962,21 +963,49 @@ function renderMetrics() {
 // ── PnL Chart ─────────────────────────────────
 
 function renderPnlChart() {
-  const chart     = S.perfChart || {};
-  const points    = chart.points || [];
-  const totalPnl  = chart.total_pnl || 0;
-  const totalEl   = document.getElementById('pnl-total');
-  const countEl   = document.getElementById('pnl-trades-count');
-  const svgEl     = document.getElementById('pnl-svg');
+  const chart      = S.perfChart || {};
+  const points     = chart.points || [];
+  const curveLabel = chart.curve_label || 'vandaag';
+  const totalPnl   = chart.total_pnl || 0;
+  const totalEl    = document.getElementById('pnl-total');
+  const countEl    = document.getElementById('pnl-trades-count');
+  const svgEl      = document.getElementById('pnl-svg');
+  const titleEl    = document.getElementById('pnl-card-title');
+  const periodsEl  = document.getElementById('pnl-periods');
 
+  // Card title
+  titleEl.textContent = curveLabel === 'alltime'
+    ? 'Paper PnL · alltime curve'
+    : 'Paper PnL vandaag';
+
+  // Period summary bar (dag / week / maand / jaar / alltime)
+  const periods = [
+    ['Dag',    chart.dag    ?? 0],
+    ['Week',   chart.week   ?? 0],
+    ['Maand',  chart.maand  ?? 0],
+    ['Jaar',   chart.jaar   ?? 0],
+    ['Alltime',chart.alltime ?? 0],
+  ];
+  periodsEl.innerHTML = periods.map(([lbl, val], idx) => {
+    const col = val > 0 ? 'var(--pnl-pos)' : val < 0 ? 'var(--pnl-neg)' : 'var(--muted)';
+    const border = idx < periods.length - 1 ? 'border-right:.5px solid var(--border-soft);' : '';
+    return `<div style="flex:1;padding:4px 0;text-align:center;${border}">
+      <div style="font-size:8px;text-transform:uppercase;letter-spacing:.4px;color:var(--faint);line-height:1.2">${lbl}</div>
+      <div style="font-size:11px;font-weight:700;font-variant-numeric:tabular-nums;color:${col}">${fPnL(val)}</div>
+    </div>`;
+  }).join('');
+
+  // Curve total + trade count
   totalEl.textContent = fPnL(totalPnl);
   totalEl.className   = 'chart-pnl-total ' + pnlCls(totalPnl);
 
   const trades = Math.max(0, points.length - 1);
-  countEl.textContent = trades ? trades + ' trade' + (trades !== 1 ? 's' : '') : '';
+  countEl.textContent = trades
+    ? trades + ' trade' + (trades !== 1 ? 's' : '') + (curveLabel === 'alltime' ? ' ooit' : '')
+    : '';
 
   if (points.length < 2) {
-    svgEl.innerHTML = '<text x="250" y="34" text-anchor="middle" fill="#9ca3af" font-size="11" font-family="sans-serif">Geen gesloten trades vandaag</text>';
+    svgEl.innerHTML = '<text x="250" y="34" text-anchor="middle" fill="#9ca3af" font-size="11" font-family="sans-serif">Geen gesloten trades</text>';
     return;
   }
 
@@ -996,7 +1025,7 @@ function renderPnlChart() {
   const ptStr = points.map((p, i) => `${toX(i).toFixed(1)},${toY(p.pnl).toFixed(1)}`).join(' ');
   const lastY = toY(pnls[pnls.length - 1]).toFixed(1);
 
-  const color = totalPnl >= 0 ? '#166534' : '#991b1b';
+  const color     = totalPnl >= 0 ? '#166534' : '#991b1b';
   const fillColor = totalPnl >= 0 ? 'rgba(22,101,52,.08)' : 'rgba(153,27,27,.08)';
 
   // Zero line (only if range spans zero)
@@ -1005,10 +1034,6 @@ function renderPnlChart() {
     const zy = toY(0).toFixed(1);
     zeroLine = `<line x1="0" y1="${zy}" x2="${W}" y2="${zy}" stroke="#d1d5db" stroke-width=".5" stroke-dasharray="3,3"/>`;
   }
-
-  // Area fill path
-  const areaPath = `M0,${toY(0).toFixed(1)} L${ptStr.replace(/(\d+\.?\d*),(\d+\.?\d*)/g, '$1,$2')} L${W},${toY(0).toFixed(1)} Z`
-    .replace('M0,', 'M0,').replace(' L' + ptStr, ' ' + ptStr.split(' ').map((pt, i) => (i === 0 ? 'L' : '') + pt).join(' '));
 
   const fillPts = `0,${toY(pnls[0]).toFixed(1)} ` + ptStr + ` ${W},${toY(pnls[pnls.length-1]).toFixed(1)} ${W},${H} 0,${H}`;
 
