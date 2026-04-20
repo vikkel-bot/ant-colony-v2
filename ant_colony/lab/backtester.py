@@ -21,12 +21,28 @@ Regels:
 
 from __future__ import annotations
 
+import logging
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
 from ant_colony.schemas.strategy_candidate import BacktestResults
+
+_log = logging.getLogger(__name__)
+
+# Minimum bars voor een betrouwbare backtest (logt warning, geen harde fout)
+_MIN_RELIABLE_BARS = 200
+# Minimum trades bij strategy-specifieke entry logica; minder → sharpe=None
+_MIN_TRADES = 5
+
+# Indicator warmup periodes
+_RSI_PERIOD = 14
+_BB_PERIOD  = 20
+_SMA_FAST   = 20
+_SMA_SLOW   = 50
+_MOM_PERIOD = 3
+_MR_PERIOD  = 20
 
 
 # ---------------------------------------------------------------------------
@@ -62,11 +78,14 @@ class BacktestConfig:
     take_profit_pct:  TP-afstand van entry als fractie (0.06 = 6%)
     stop_loss_pct:    SL-afstand van entry als fractie (0.03 = 3%)
     max_bars_held:    Maximaal aantal bars in positie voor TTL-exit (≥ 1)
+    strategy_type:    Optioneel — bepaalt entry-logica (sma_crossover, rsi_based,
+                      bollinger_bands, momentum, mean_reversion). None = elke bar.
     """
     direction: str
     take_profit_pct: float
     stop_loss_pct: float
     max_bars_held: int = 10
+    strategy_type: str | None = None
 
     def __post_init__(self) -> None:
         if self.direction not in ("long", "short"):
@@ -129,10 +148,12 @@ class Backtester:
 
         Args:
             bars:    Tijdgesorteerde OHLCV bars. Minimaal 2 nodig voor een trade.
-            config:  Strategie-parameters.
+            config:  Strategie-parameters (inclusief optioneel strategy_type).
 
         Returns:
             BacktestResults met alle statistieken ingevuld.
+            sharpe_ratio is None als: minder dan 2 trades (altijd), of minder dan
+            _MIN_TRADES trades bij strategy-specifieke entry logica.
 
         Raises:
             ValueError: als bars leeg is.
@@ -140,9 +161,18 @@ class Backtester:
         if not bars:
             raise ValueError("bars must not be empty")
 
+        st = config.strategy_type
+        if len(bars) < _MIN_RELIABLE_BARS:
+            _log.warning(
+                "Backtest heeft slechts %d bars (aanbevolen ≥ %d) | strategy_type=%s",
+                len(bars), _MIN_RELIABLE_BARS, st,
+            )
+
+        closes: list[float] = [b.close for b in bars]
         trade_returns: list[float] = []
         trade_entry_indices: list[int] = []
         equity: list[float] = [1.0]
+        signal_count = 0
 
         i = 0
         while i < len(bars) - 1:
@@ -151,12 +181,32 @@ class Backtester:
                 i += 1
                 continue
 
+            if st is not None and not self._has_entry_signal(closes, i, st, config.direction):
+                i += 1
+                continue
+
+            signal_count += 1
             exit_price, exit_idx = self._find_exit(bars, i, entry_close, config)
             ret = self._trade_return(entry_close, exit_price, config.direction)
             trade_returns.append(ret)
             trade_entry_indices.append(i)
             equity.append(equity[-1] * (1.0 + ret))
             i = exit_idx + 1
+
+        if st is not None:
+            _log.debug(
+                "Backtest klaar | strategy_type=%s bars=%d signals=%d trades=%d",
+                st, len(bars), signal_count, len(trade_returns),
+            )
+
+        sharpe = self._sharpe(trade_returns)
+        if st is not None and len(trade_returns) < _MIN_TRADES:
+            _log.warning(
+                "Backtest onbetrouwbaar | strategy_type=%s trades=%d < %d "
+                "— te weinig trades, sharpe=None",
+                st, len(trade_returns), _MIN_TRADES,
+            )
+            sharpe = None
 
         avg_win, avg_loss = self._avg_win_loss(trade_returns)
         best_streak = self._best_streak(trade_returns)
@@ -165,7 +215,7 @@ class Backtester:
         )
 
         return BacktestResults(
-            sharpe_ratio=self._sharpe(trade_returns),
+            sharpe_ratio=sharpe,
             max_drawdown_pct=self._max_drawdown(equity),
             total_trades=len(trade_returns),
             win_rate=self._win_rate(trade_returns),
@@ -233,6 +283,91 @@ class Backtester:
                 entry_price * (1.0 - config.take_profit_pct),
                 entry_price * (1.0 + config.stop_loss_pct),
             )
+
+    # ------------------------------------------------------------------
+    # Intern — strategy-specifieke entry logica
+    # ------------------------------------------------------------------
+
+    def _has_entry_signal(
+        self,
+        closes: list[float],
+        i: int,
+        strategy_type: str,
+        direction: str,
+    ) -> bool:
+        """
+        True als bar i een valide entry-signaal geeft voor de opgegeven strategy_type.
+
+        Elke strategie heeft een eigen warmup-periode; bars vóór de warmup
+        geven altijd False terug. Onbekend/hybrid type → True (elke bar).
+        """
+        if strategy_type == "sma_crossover":
+            if i < _SMA_SLOW:
+                return False
+            fast_now  = sum(closes[i - _SMA_FAST + 1 : i + 1]) / _SMA_FAST
+            slow_now  = sum(closes[i - _SMA_SLOW + 1 : i + 1]) / _SMA_SLOW
+            fast_prev = sum(closes[i - _SMA_FAST     : i    ]) / _SMA_FAST
+            slow_prev = sum(closes[i - _SMA_SLOW     : i    ]) / _SMA_SLOW
+            if direction == "long":
+                return fast_prev <= slow_prev and fast_now > slow_now
+            return fast_prev >= slow_prev and fast_now < slow_now
+
+        if strategy_type == "rsi_based":
+            if i < _RSI_PERIOD:
+                return False
+            rsi_val = self._rsi(closes, i)
+            return rsi_val < 30 if direction == "long" else rsi_val > 70
+
+        if strategy_type == "bollinger_bands":
+            if i < _BB_PERIOD:
+                return False
+            window  = closes[i - _BB_PERIOD + 1 : i + 1]
+            mean_bb = sum(window) / _BB_PERIOD
+            std_bb  = math.sqrt(sum((c - mean_bb) ** 2 for c in window) / _BB_PERIOD)
+            upper   = mean_bb + 2.0 * std_bb
+            lower   = mean_bb - 2.0 * std_bb
+            return closes[i] <= lower if direction == "long" else closes[i] >= upper
+
+        if strategy_type == "momentum":
+            if i < _MOM_PERIOD:
+                return False
+            mom = (closes[i] - closes[i - _MOM_PERIOD]) / closes[i - _MOM_PERIOD]
+            return mom > 0.02 if direction == "long" else mom < -0.02
+
+        if strategy_type == "mean_reversion":
+            if i < _MR_PERIOD:
+                return False
+            window  = closes[i - _MR_PERIOD + 1 : i + 1]
+            mean_mr = sum(window) / _MR_PERIOD
+            var     = sum((c - mean_mr) ** 2 for c in window) / _MR_PERIOD
+            std_mr  = math.sqrt(var)
+            if std_mr == 0.0:
+                return False
+            z = (closes[i] - mean_mr) / std_mr
+            return z < -2.0 if direction == "long" else z > 2.0
+
+        # Onbekend / hybrid strategy type → elke bar (veilig fallback)
+        return True
+
+    @staticmethod
+    def _rsi(closes: list[float], i: int) -> float:
+        """
+        Vereenvoudigde RSI op basis van simple average gains/losses.
+
+        Gebruikt closes[i-_RSI_PERIOD : i+1]. Retourneert 50.0 bij onvoldoende data.
+        """
+        start  = max(0, i - _RSI_PERIOD)
+        window = closes[start : i + 1]
+        if len(window) < 2:
+            return 50.0
+        gains  = [max(0.0, window[j] - window[j - 1]) for j in range(1, len(window))]
+        losses = [max(0.0, window[j - 1] - window[j]) for j in range(1, len(window))]
+        avg_gain = sum(gains)  / len(gains)
+        avg_loss = sum(losses) / len(losses)
+        if avg_loss == 0.0:
+            return 100.0
+        rs = avg_gain / avg_loss
+        return 100.0 - (100.0 / (1.0 + rs))
 
     # ------------------------------------------------------------------
     # Intern — statistieken

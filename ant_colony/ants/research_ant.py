@@ -45,7 +45,7 @@ from ant_colony.schemas.strategy_candidate import (
     StrategyCandidate,
 )
 
-_MIN_CANDLES        = 52    # SMA50 + 2 bars voor crossover detectie
+_MIN_CANDLES        = 52    # SMA50 + 2 bars voor crossover detectie (backtester log-waarschuwing bij <200)
 _CANDLE_LIMIT       = 500   # candles ophalen per symbool per tick (verhoogd voor betrouwbaardere backtests)
 _SHARPE_THRESHOLD   = 0.15
 _WIN_RATE_THRESHOLD = 0.45
@@ -536,12 +536,17 @@ class ResearchAnt:
             return
 
         try:
-            config = backtest_config or BacktestConfig(
-                direction=direction,
-                take_profit_pct=_TP_PCT,
-                stop_loss_pct=_SL_PCT,
-                max_bars_held=_MAX_BARS_HELD,
-            )
+            if backtest_config is not None:
+                config = backtest_config
+            else:
+                _st = _strategy_type_from_signal_type(signal_type)
+                config = BacktestConfig(
+                    direction=direction,
+                    take_profit_pct=_TP_PCT,
+                    stop_loss_pct=_SL_PCT,
+                    max_bars_held=_MAX_BARS_HELD,
+                    strategy_type=_st,
+                )
             results = self._backtester.run(bars, config)
         except Exception:
             self._log.exception("Backtest mislukt voor %s/%s", symbol, signal_type)
@@ -840,15 +845,42 @@ def _grade_from_sharpe(sharpe: float | None) -> str:
     return "C"
 
 
+def _strategy_type_from_signal_type(signal_type: str) -> str | None:
+    """
+    Leid strategy_type af uit signal_type voor backtester entry-logica.
+
+    Directe ResearchAnt signalen worden exact gematcht.
+    Ingested/onbekende signalen geven None terug (= elke bar).
+    """
+    st = signal_type.lower()
+    if st.startswith("sma") or "crossover" in st:
+        return "sma_crossover"
+    if st.startswith("rsi"):
+        return "rsi_based"
+    if st.startswith("bb") or "bollinger" in st:
+        return "bollinger_bands"
+    if "momentum" in st:
+        return "momentum"
+    if "mean_rev" in st or "reversion" in st:
+        return "mean_reversion"
+    return None   # ingested of onbekend → elke bar (veilig fallback)
+
+
 def _config_from_keywords(keywords: list[str], direction: str) -> BacktestConfig:
     """
-    Vertaal entry_keywords naar een BacktestConfig.
+    Vertaal entry_keywords naar een BacktestConfig inclusief strategy_type.
 
     Doorloopt _KEYWORD_PROFILES in prioriteitsvolgorde (eerst gedefinieerde
     trefwoord wint). Geeft standaard _TP_PCT/_SL_PCT/_MAX_BARS_HELD terug
     als geen enkel keyword matcht.
     """
     kw_lower = {k.lower() for k in keywords}
+    st = _strategy_type_from_signal(
+        signal_type="",
+        keywords=list(kw_lower),
+        tp_pct=None,
+    )
+    strategy_type = st if st not in ("unknown", None) else None
     for keyword, (tp, sl, bars) in _KEYWORD_PROFILES.items():
         if keyword in kw_lower:
             return BacktestConfig(
@@ -856,12 +888,14 @@ def _config_from_keywords(keywords: list[str], direction: str) -> BacktestConfig
                 take_profit_pct=tp,
                 stop_loss_pct=sl,
                 max_bars_held=bars,
+                strategy_type=strategy_type,
             )
     return BacktestConfig(
         direction=direction,
         take_profit_pct=_TP_PCT,
         stop_loss_pct=_SL_PCT,
         max_bars_held=_MAX_BARS_HELD,
+        strategy_type=strategy_type,
     )
 
 
