@@ -32,6 +32,14 @@ from typing import Protocol, runtime_checkable
 
 from ant_colony.schemas.order import LiveOrder, OrderResult
 
+_STALE_THRESHOLDS: dict[str, float] = {
+    "1m":  120.0,
+    "5m":  600.0,
+    "15m": 1800.0,
+    "1h":  7200.0,
+    "4h":  28800.0,
+    "1d":  172800.0,
+}
 
 # ---------------------------------------------------------------------------
 # Marktdata snapshot
@@ -62,13 +70,16 @@ class MarketData:
     volume: float
     biome_id: str
 
-    def is_stale(self, max_age_seconds: float = 300.0) -> bool:
+    def is_stale(self, max_age_seconds: float | None = None) -> bool:
         """
         True als de data ouder is dan max_age_seconds.
 
         Fail-closed: stale data blokkeert execution (P2).
-        max_age_seconds=300 = 5 minuten (standaard voor live data).
+        Zonder max_age_seconds: drempel afgeleid van self.timeframe (2× candle-duur).
+        Met expliciete max_age_seconds: die waarde wordt gebruikt ongeacht timeframe.
         """
+        if max_age_seconds is None:
+            max_age_seconds = _STALE_THRESHOLDS.get(self.timeframe, 300.0)
         age = (datetime.now(tz=timezone.utc) - self.timestamp).total_seconds()
         return age > max_age_seconds
 

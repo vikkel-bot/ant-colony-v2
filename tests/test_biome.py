@@ -157,9 +157,83 @@ class TestMarketData:
         data = _make_market_data(age_seconds=0.0)
         assert not data.is_stale()
 
-    def test_data_older_than_default_threshold_is_stale(self):
-        data = _make_market_data(age_seconds=301.0)
+    def test_data_older_than_1h_threshold_is_stale(self):
+        # timeframe="1h" → drempel 7200s; 7201s oud → stale
+        data = _make_market_data(age_seconds=7201.0)
         assert data.is_stale()
+
+    def test_1h_candle_301s_old_is_not_stale(self):
+        # timeframe="1h" → drempel 7200s; 301s is ruim binnen de drempel
+        data = _make_market_data(age_seconds=301.0)
+        assert not data.is_stale()
+
+    def test_unknown_timeframe_falls_back_to_300s(self):
+        from datetime import timedelta
+        from ant_colony.biome.biome_adapter import MarketData
+        ts = _now() - timedelta(seconds=301.0)
+        data = MarketData(
+            symbol="BTC-EUR", timeframe="unknown",
+            timestamp=ts, open=100.0, high=101.0, low=99.0,
+            close=100.0, volume=1.0, biome_id="crypto",
+        )
+        assert data.is_stale()
+
+    def test_1m_candle_90s_old_is_not_stale(self):
+        from datetime import timedelta
+        from ant_colony.biome.biome_adapter import MarketData
+        ts = _now() - timedelta(seconds=90.0)
+        data = MarketData(
+            symbol="BTC-EUR", timeframe="1m",
+            timestamp=ts, open=100.0, high=101.0, low=99.0,
+            close=100.0, volume=1.0, biome_id="crypto",
+        )
+        assert not data.is_stale()
+
+    def test_1m_candle_150s_old_is_stale(self):
+        from datetime import timedelta
+        from ant_colony.biome.biome_adapter import MarketData
+        ts = _now() - timedelta(seconds=150.0)
+        data = MarketData(
+            symbol="BTC-EUR", timeframe="1m",
+            timestamp=ts, open=100.0, high=101.0, low=99.0,
+            close=100.0, volume=1.0, biome_id="crypto",
+        )
+        assert data.is_stale()
+
+    def test_1h_candle_30min_old_is_not_stale(self):
+        from datetime import timedelta
+        from ant_colony.biome.biome_adapter import MarketData
+        ts = _now() - timedelta(seconds=1800.0)
+        data = MarketData(
+            symbol="BTC-EUR", timeframe="1h",
+            timestamp=ts, open=100.0, high=101.0, low=99.0,
+            close=100.0, volume=1.0, biome_id="crypto",
+        )
+        assert not data.is_stale()
+
+    def test_1h_candle_3h_old_is_stale(self):
+        from datetime import timedelta
+        from ant_colony.biome.biome_adapter import MarketData
+        ts = _now() - timedelta(seconds=10800.0)
+        data = MarketData(
+            symbol="BTC-EUR", timeframe="1h",
+            timestamp=ts, open=100.0, high=101.0, low=99.0,
+            close=100.0, volume=1.0, biome_id="crypto",
+        )
+        assert data.is_stale()
+
+    def test_explicit_max_age_overrides_timeframe(self):
+        # 1h candle 400s oud, maar expliciete max_age=300 → stale
+        from datetime import timedelta
+        from ant_colony.biome.biome_adapter import MarketData
+        ts = _now() - timedelta(seconds=400.0)
+        data = MarketData(
+            symbol="BTC-EUR", timeframe="1h",
+            timestamp=ts, open=100.0, high=101.0, low=99.0,
+            close=100.0, volume=1.0, biome_id="crypto",
+        )
+        assert data.is_stale(max_age_seconds=300.0)
+        assert not data.is_stale(max_age_seconds=600.0)
 
     def test_data_well_within_threshold_is_not_stale(self):
         # age << max_age_seconds → not stale (strictly greater check)

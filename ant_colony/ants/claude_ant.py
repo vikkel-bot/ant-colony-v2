@@ -9,7 +9,7 @@ Verantwoordelijkheden:
   3. Parseert de JSON-response en schrijft verbeterde varianten naar ANT_LOGS/ingestion/
      zodat ze door de normale pipeline gaan (ResearchAnt → Promoter → PaperAnt)
   4. Schrijft analyse naar ANT_LOGS/claude/{ant_id}.jsonl
-  5. Rate limit: 1 call per 5 minuten (escalatie naar 1/uur bij 80% budget)
+  5. Rate limit: 1 call per 30 min normaal; 1/uur bij ≥50%, 1/2u bij ≥75%, 1/4u bij ≥90%
   6. Maandelijks budget: CLAUDE_ANT_MONTHLY_BUDGET_EUR (default €10)
   7. Logt geschatte kosten per call in ANT_LOGS/claude/costs.jsonl
 
@@ -44,11 +44,15 @@ from ant_colony.schemas.strategy_candidate import (
 
 _MODEL             = "claude-sonnet-4-6"
 _MAX_TOKENS        = 500
-_TOP_N_CANDIDATES  = 3
+_TOP_N_CANDIDATES  = 10
 _MAX_WORDS_PER_CANDIDATE = 200
 _RATE_LIMIT_FAST   = 1800.0   # normaal: 1 call per 30 minuten
-_RATE_LIMIT_SLOW   = 3600.0   # bij 80% budget: 1 call per uur
-_BUDGET_WARN_PCT   = 0.80     # drempel voor rate limit escalatie
+_RATE_LIMIT_50PCT  = 3600.0   # bij ≥50% budget: 1 call per uur
+_RATE_LIMIT_75PCT  = 7200.0   # bij ≥75% budget: 1 call per 2 uur
+_RATE_LIMIT_90PCT  = 14400.0  # bij ≥90% budget: 1 call per 4 uur
+_BUDGET_50PCT      = 0.50
+_BUDGET_75PCT      = 0.75
+_BUDGET_90PCT      = 0.90
 
 # Pipeline-gating: minimale pipeline-activiteit voordat Claude API wordt aangeroepen
 _PIPELINE_MIN_RESEARCH      = 3    # minimaal N accepted candidates in laatste 24u
@@ -115,6 +119,7 @@ class ClaudeAnt:
         self._budget_eur = float(os.getenv("CLAUDE_ANT_MONTHLY_BUDGET_EUR", "10.0"))
         self._month_cost_eur = self._load_month_costs()
         self._total_cost_eur = self._load_total_costs()
+        self._last_candidate_ids: frozenset[str] = frozenset()
 
         self._log = logging.getLogger(f"ant.claude.{ant_id[:8]}")
 
@@ -128,9 +133,16 @@ class ClaudeAnt:
 
     @property
     def _rate_limit(self) -> float:
-        """Effectieve rate limit: langzamer bij ≥80% budget."""
-        if self._budget_eur > 0 and self._month_cost_eur >= _BUDGET_WARN_PCT * self._budget_eur:
-            return _RATE_LIMIT_SLOW
+        """Effectieve rate limit op basis van budget-gebruik (4-tier throttling)."""
+        if self._budget_eur <= 0:
+            return _RATE_LIMIT_FAST
+        pct = self._month_cost_eur / self._budget_eur
+        if pct >= _BUDGET_90PCT:
+            return _RATE_LIMIT_90PCT
+        if pct >= _BUDGET_75PCT:
+            return _RATE_LIMIT_75PCT
+        if pct >= _BUDGET_50PCT:
+            return _RATE_LIMIT_50PCT
         return _RATE_LIMIT_FAST
 
     def _load_month_costs(self) -> float:
@@ -317,6 +329,15 @@ class ClaudeAnt:
                 self._log.debug("Geen research-kandidaten beschikbaar — tick overgeslagen")
                 return
 
+            current_ids = frozenset(c.get("candidate_id", "") for c in candidates)
+            if current_ids and current_ids == self._last_candidate_ids:
+                self._log.debug(
+                    "Kandidaten ongewijzigd t.o.v. vorige batch (%d IDs) — API call overgeslagen",
+                    len(current_ids),
+                )
+                return
+            self._last_candidate_ids = current_ids
+
             self._analyse_with_claude(candidates)
 
         except Exception:
@@ -334,14 +355,10 @@ class ClaudeAnt:
         Returns (True, "") als pipeline groen is.
         Returns (False, reden) als één of meer voorwaarden niet voldaan zijn.
         """
-        # Voorwaarde 1: budget niet in waarschuwingsstatus
-        if self._budget_eur > 0 and self._month_cost_eur >= _BUDGET_WARN_PCT * self._budget_eur:
-            return False, "BUDGET_WARNING actief"
-
         if self.logs_root is None:
             return False, "geen logs_root geconfigureerd"
 
-        # Voorwaarde 2: minimaal N research-kandidaten in laatste 24u
+        # Voorwaarde 1: minimaal N research-kandidaten in laatste 24u
         research_count = self._count_recent_research_candidates()
         if research_count < _PIPELINE_MIN_RESEARCH:
             return False, (
@@ -349,7 +366,7 @@ class ClaudeAnt:
                 f"in laatste 24u"
             )
 
-        # Voorwaarde 3: minimaal N gesloten paper trades
+        # Voorwaarde 2: minimaal N gesloten paper trades
         closed_trades = self._count_closed_paper_trades()
         if closed_trades < _PIPELINE_MIN_CLOSED_TRADES:
             return False, (
@@ -505,14 +522,22 @@ class ClaudeAnt:
         self._total_cost_eur += cost_eur
         self._append_cost_record(cost_eur)
 
-        # Waarschuwing bij 80% budget
         if self._budget_eur > 0:
             usage_pct = self._month_cost_eur / self._budget_eur
-            if usage_pct >= _BUDGET_WARN_PCT:
+            if usage_pct >= _BUDGET_90PCT:
                 self._log.warning(
-                    "Budget waarschuwing: %.0f%% van €%.2f verbruikt (€%.4f) — "
-                    "rate limit verlaagd naar 1 call/uur",
-                    usage_pct * 100, self._budget_eur, self._month_cost_eur,
+                    "Budget kritiek: %.0f%% van €%.2f verbruikt — rate limit 4 uur",
+                    usage_pct * 100, self._budget_eur,
+                )
+            elif usage_pct >= _BUDGET_75PCT:
+                self._log.warning(
+                    "Budget hoog: %.0f%% van €%.2f verbruikt — rate limit 2 uur",
+                    usage_pct * 100, self._budget_eur,
+                )
+            elif usage_pct >= _BUDGET_50PCT:
+                self._log.info(
+                    "Budget 50%%+ verbruikt: %.0f%% van €%.2f — rate limit 1 uur",
+                    usage_pct * 100, self._budget_eur,
                 )
 
         self._log.info(

@@ -76,11 +76,12 @@ def make_candle(
     close: float = 50_000.0,
     volume: float = 100.0,
     age_seconds: float = 0.0,
+    timeframe: str = "1h",
 ) -> MarketData:
     ts = datetime.now(tz=timezone.utc) - timedelta(seconds=age_seconds)
     return MarketData(
         symbol=symbol,
-        timeframe="1h",
+        timeframe=timeframe,
         timestamp=ts,
         open=open_,
         high=max(open_, close) * 1.001,
@@ -276,9 +277,10 @@ class TestVolumeSpikeDetection:
 class TestDataValidation:
     def test_stale_candle_skipped(self, tmp_path):
         # Scenario 6: stale data → geen signaal
+        # 1m candle van 400s oud (drempel = 120s) → stale
         stale_candle = make_candle(
             open_=50_000.0, close=52_000.0,  # 4% move — zou detecteren
-            age_seconds=400.0,               # ouder dan 300s max
+            age_seconds=400.0, timeframe="1m",
         )
         scout = make_scout(tmp_path, registry=make_registry(candle=stale_candle))
 

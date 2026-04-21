@@ -190,16 +190,25 @@ def test_no_research_candidates_no_api_call(tmp_path: Path) -> None:
     assert call_count == 0
 
 
-def test_top3_selection_by_sharpe(tmp_path: Path) -> None:
-    """Kandidaten gesorteerd op sharpe, top 3 geselecteerd."""
+def test_top10_selection_by_sharpe(tmp_path: Path) -> None:
+    """Kandidaten gesorteerd op sharpe, top 10 geselecteerd."""
     ant = make_ant(tmp_path)
-    for i in range(8):
+    for i in range(15):
         write_research_record(tmp_path, sharpe=float(i) * 0.1)
 
     candidates = ant._read_top_candidates()
-    assert len(candidates) == 3
+    assert len(candidates) == 10
     # Hoogste sharpe eerst
     assert candidates[0]["sharpe"] >= candidates[1]["sharpe"]
+
+def test_fewer_than_10_returns_all(tmp_path: Path) -> None:
+    """Minder dan 10 kandidaten → alle worden teruggegeven."""
+    ant = make_ant(tmp_path)
+    for i in range(4):
+        write_research_record(tmp_path, sharpe=float(i) * 0.1)
+
+    candidates = ant._read_top_candidates()
+    assert len(candidates) == 4
 
 
 def test_valid_response_writes_ingestion(tmp_path: Path) -> None:
@@ -409,18 +418,32 @@ def test_append_cost_record_creates_file(tmp_path: Path) -> None:
     assert rec["cost_eur"] == 0.05
 
 
-def test_rate_limit_fast_below_budget_warn(tmp_path: Path) -> None:
-    """Onder 80% budget → rate limit = 1800s (30 min)."""
+def test_rate_limit_fast_below_50pct(tmp_path: Path) -> None:
+    """Onder 50% budget → rate limit = 1800s (30 min)."""
     ant = make_ant(tmp_path)
-    ant._month_cost_eur = 7.9   # 79% van €10
+    ant._month_cost_eur = 4.9   # 49% van €10
     assert ant._rate_limit == 1800.0
 
 
-def test_rate_limit_slow_at_budget_warn(tmp_path: Path) -> None:
-    """≥80% budget → rate limit = 3600s."""
+def test_rate_limit_1h_at_50pct(tmp_path: Path) -> None:
+    """≥50% budget → rate limit = 3600s (1 uur)."""
     ant = make_ant(tmp_path)
-    ant._month_cost_eur = 8.0   # 80% van €10
+    ant._month_cost_eur = 5.0   # 50% van €10
     assert ant._rate_limit == 3600.0
+
+
+def test_rate_limit_2h_at_75pct(tmp_path: Path) -> None:
+    """≥75% budget → rate limit = 7200s (2 uur)."""
+    ant = make_ant(tmp_path)
+    ant._month_cost_eur = 7.5   # 75% van €10
+    assert ant._rate_limit == 7200.0
+
+
+def test_rate_limit_4h_at_90pct(tmp_path: Path) -> None:
+    """≥90% budget → rate limit = 14400s (4 uur)."""
+    ant = make_ant(tmp_path)
+    ant._month_cost_eur = 9.0   # 90% van €10
+    assert ant._rate_limit == 14400.0
 
 
 def test_budget_exceeded_sets_aborted(tmp_path: Path) -> None:
@@ -555,14 +578,13 @@ def test_pipeline_ready_zero_closed_trades(tmp_path: Path) -> None:
     assert reason == ""
 
 
-def test_pipeline_not_ready_budget_warning(tmp_path: Path) -> None:
-    """Pipeline niet groen bij actieve BUDGET_WARNING (>=80%)."""
+def test_pipeline_ready_at_high_budget(tmp_path: Path) -> None:
+    """Pipeline blijft groen bij hoog budget — throttling via rate limit, niet pipeline gate."""
     ant = make_ant(tmp_path)
     write_research_recent(tmp_path, 3)
-    ant._month_cost_eur = 8.0  # 80% van €10 → BUDGET_WARNING
+    ant._month_cost_eur = 8.0  # 80% van €10 — pipeline zelf blokkeert niet meer
     ready, reason = ant._pipeline_ready()
-    assert ready is False
-    assert "budget" in reason.lower()
+    assert ready is True  # budget-check is verplaatst naar _rate_limit
 
 
 def test_pipeline_not_ready_no_logs_root() -> None:
@@ -793,3 +815,137 @@ def test_variant_different_strategy_types(tmp_path: Path) -> None:
     names = [r["payload"]["name"] for r in records]
     strategy_types_in_names = {n.split(":")[1] for n in names}
     assert strategy_types_in_names == {"sma_crossover", "rsi_momentum", "mean_reversion"}
+
+
+# ---------------------------------------------------------------------------
+# Batch-grootte en deduplicatie tests
+# ---------------------------------------------------------------------------
+
+def test_batch_size_is_10(tmp_path: Path) -> None:
+    """_TOP_N_CANDIDATES is 10."""
+    from ant_colony.ants.claude_ant import _TOP_N_CANDIDATES
+    assert _TOP_N_CANDIDATES == 10
+
+
+def test_read_top_candidates_returns_max_10(tmp_path: Path) -> None:
+    """Bij 15 kandidaten worden maximaal 10 teruggegeven."""
+    ant = make_ant(tmp_path)
+    for i in range(15):
+        write_research_record(tmp_path, sharpe=float(i) * 0.1)
+    candidates = ant._read_top_candidates()
+    assert len(candidates) == 10
+
+
+def test_dedup_skips_api_call_on_same_candidates(tmp_path: Path) -> None:
+    """Tweede tick met dezelfde kandidaat-IDs → API niet aangeroepen."""
+    ant = make_ant(tmp_path)
+    write_research_recent(tmp_path, 3)
+    ant._status = AntStatus.RUNNING
+    ant._last_api_call = 0.0   # rate limit niet actief
+
+    call_count = 0
+
+    def mock_analyse(candidates):
+        nonlocal call_count
+        call_count += 1
+
+    ant._analyse_with_claude = mock_analyse
+    ant._tick()
+    assert call_count == 1  # eerste tick: API aangeroepen
+
+    ant._last_api_call = 0.0  # reset rate limit
+    ant._tick()
+    assert call_count == 1  # tweede tick: zelfde IDs → overgeslagen
+
+
+def test_dedup_calls_api_on_new_candidates(tmp_path: Path) -> None:
+    """Nieuwe kandidaat-IDs na vorige batch → API wordt wel aangeroepen."""
+    ant = make_ant(tmp_path)
+    write_research_recent(tmp_path, 3)
+    ant._status = AntStatus.RUNNING
+    ant._last_api_call = 0.0
+
+    call_count = 0
+
+    def mock_analyse(candidates):
+        nonlocal call_count
+        call_count += 1
+
+    ant._analyse_with_claude = mock_analyse
+    ant._tick()
+    assert call_count == 1
+
+    # Voeg nieuwe kandidaten toe → andere IDs
+    write_research_recent(tmp_path, 3)
+    ant._last_api_call = 0.0
+    ant._tick()
+    assert call_count == 2  # nieuwe IDs → API opnieuw aangeroepen
+
+
+def test_dedup_empty_candidates_not_cached(tmp_path: Path) -> None:
+    """Lege kandidatenset wordt niet gecached als 'vorige batch'."""
+    ant = make_ant(tmp_path)
+    ant._status = AntStatus.RUNNING
+    # Geen kandidaten → tick retourneert zonder API call
+    ant._tick()
+    assert ant._last_candidate_ids == frozenset()  # leeg: niet gecached
+
+
+def test_throttle_50pct_blocks_call(tmp_path: Path) -> None:
+    """Bij ≥50% budget en recente call (< 3600s) → geen API call."""
+    ant = make_ant(tmp_path)
+    write_research_recent(tmp_path, 3)
+    ant._status = AntStatus.RUNNING
+    ant._month_cost_eur = 5.0   # 50% van €10 → rate limit = 3600s
+
+    call_count = 0
+
+    def mock_analyse(candidates):
+        nonlocal call_count
+        call_count += 1
+
+    ant._analyse_with_claude = mock_analyse
+    import time as _time
+    ant._last_api_call = _time.monotonic() - 1800.0  # 30 min geleden (< 3600s drempel)
+    ant._tick()
+    assert call_count == 0  # geblokkeerd door 50%-throttle
+
+
+def test_throttle_75pct_blocks_call(tmp_path: Path) -> None:
+    """Bij ≥75% budget en call van 1 uur geleden → nog steeds geblokkeerd (drempel 2 uur)."""
+    ant = make_ant(tmp_path)
+    write_research_recent(tmp_path, 3)
+    ant._status = AntStatus.RUNNING
+    ant._month_cost_eur = 7.5   # 75% → rate limit = 7200s
+
+    call_count = 0
+
+    def mock_analyse(candidates):
+        nonlocal call_count
+        call_count += 1
+
+    ant._analyse_with_claude = mock_analyse
+    import time as _time
+    ant._last_api_call = _time.monotonic() - 3601.0  # 1 uur geleden (< 7200s)
+    ant._tick()
+    assert call_count == 0
+
+
+def test_throttle_90pct_blocks_call(tmp_path: Path) -> None:
+    """Bij ≥90% budget en call van 2 uur geleden → geblokkeerd (drempel 4 uur)."""
+    ant = make_ant(tmp_path)
+    write_research_recent(tmp_path, 3)
+    ant._status = AntStatus.RUNNING
+    ant._month_cost_eur = 9.0   # 90% → rate limit = 14400s
+
+    call_count = 0
+
+    def mock_analyse(candidates):
+        nonlocal call_count
+        call_count += 1
+
+    ant._analyse_with_claude = mock_analyse
+    import time as _time
+    ant._last_api_call = _time.monotonic() - 7201.0  # 2 uur geleden (< 14400s)
+    ant._tick()
+    assert call_count == 0
