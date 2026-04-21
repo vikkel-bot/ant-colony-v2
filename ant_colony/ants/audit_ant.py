@@ -261,10 +261,16 @@ class AuditAnt:
 
         findings: list[AuditFinding] = []
         own_log = self.logs_root / "audit" / f"{self.ant_id}.jsonl"
+        cutoff = time.time() - 24 * 3600
 
         try:
             for jsonl_path in sorted(self.logs_root.rglob("*.jsonl")):
                 if jsonl_path == own_log:
+                    continue
+                try:
+                    if jsonl_path.stat().st_mtime < cutoff:
+                        continue
+                except OSError:
                     continue
 
                 gaps = _find_sequence_gaps(jsonl_path)

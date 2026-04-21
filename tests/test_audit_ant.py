@@ -676,6 +676,81 @@ class TestAuditLog:
         assert records[0]["sequence"] == 0
         assert records[1]["sequence"] == 1
 
+
+# ---------------------------------------------------------------------------
+# 26–29  Sequence-gap deduplicatie en 24u-bestandsfilter
+# ---------------------------------------------------------------------------
+
+import os
+import time as _time_module
+
+
+def _write_jsonl_with_gap(path: Path, sequences: list[int]) -> None:
+    """Schrijf JSONL met opgegeven sequence-nummers (gesimuleerde gap)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as fh:
+        for seq in sequences:
+            fh.write(json.dumps({"sequence": seq, "event_type": "action_executed"}) + "\n")
+
+
+class TestSequenceGapDeduplicatieEn24uFilter:
+    def test_gap_maar_een_keer_gerapporteerd(self, tmp_path):
+        """Scenario 26: dezelfde gap wordt slechts één keer als finding teruggegeven."""
+        log_file = tmp_path / "paper" / "ant-paper.jsonl"
+        _write_jsonl_with_gap(log_file, [0, 1, 5, 6])  # gap 1→5
+
+        ant = make_ant(tmp_path)
+
+        # Eerste tick → gap gevonden
+        findings1 = ant._check_audit_trail_integrity()
+        gap_findings1 = [f for f in findings1 if f.check_name == "sequence_gap"]
+        assert len(gap_findings1) == 1
+
+        # Tweede tick → gap al in _reported_gaps → niet opnieuw gerapporteerd
+        findings2 = ant._check_audit_trail_integrity()
+        gap_findings2 = [f for f in findings2 if f.check_name == "sequence_gap"]
+        assert len(gap_findings2) == 0
+
+    def test_meerdere_gaps_allemaal_eenmalig(self, tmp_path):
+        """Scenario 27: twee gaps in één bestand worden elk maar één keer gerapporteerd."""
+        log_file = tmp_path / "scout" / "ant-scout.jsonl"
+        _write_jsonl_with_gap(log_file, [0, 1, 5, 6, 10, 11])  # gap 1→5 en 6→10
+
+        ant = make_ant(tmp_path)
+
+        findings1 = ant._check_audit_trail_integrity()
+        gap_findings1 = [f for f in findings1 if f.check_name == "sequence_gap"]
+        assert len(gap_findings1) == 2
+
+        findings2 = ant._check_audit_trail_integrity()
+        gap_findings2 = [f for f in findings2 if f.check_name == "sequence_gap"]
+        assert len(gap_findings2) == 0
+
+    def test_oud_bestand_overgeslagen(self, tmp_path):
+        """Scenario 28: JSONL-bestand ouder dan 24u wordt niet gescand op gaps."""
+        log_file = tmp_path / "paper" / "ant-old.jsonl"
+        _write_jsonl_with_gap(log_file, [0, 1, 5, 6])  # gap aanwezig
+
+        # Zet mtime naar 25 uur geleden
+        old_mtime = _time_module.time() - 25 * 3600
+        os.utime(log_file, (old_mtime, old_mtime))
+
+        ant = make_ant(tmp_path)
+        findings = ant._check_audit_trail_integrity()
+        gap_findings = [f for f in findings if f.check_name == "sequence_gap"]
+        assert len(gap_findings) == 0
+
+    def test_recent_bestand_wel_gescand(self, tmp_path):
+        """Scenario 29: JSONL-bestand jonger dan 24u wordt wél gescand op gaps."""
+        log_file = tmp_path / "paper" / "ant-recent.jsonl"
+        _write_jsonl_with_gap(log_file, [0, 1, 5, 6])  # gap aanwezig
+
+        # Bestand is recent (standaard mtime = nu)
+        ant = make_ant(tmp_path)
+        findings = ant._check_audit_trail_integrity()
+        gap_findings = [f for f in findings if f.check_name == "sequence_gap"]
+        assert len(gap_findings) == 1
+
     def test_no_crash_with_logs_root_none(self, tmp_path):
         """Scenario 23: logs_root=None → geen crash, geen bestand."""
         ant = AuditAnt(

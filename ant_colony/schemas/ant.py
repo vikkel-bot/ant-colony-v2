@@ -15,13 +15,19 @@ class AntType(str, Enum):
     INGESTION = "ingestion_ant"
     STRATEGY = "strategy_ant"
     OPERATOR = "operator_ant"
-    CLAUDE   = "claude_ant"
+    CLAUDE       = "claude_ant"
+    TIME_FILTER  = "time_filter_ant"
     # Equities biome
     SECTOR_SCOUT   = "sector_scout_ant"
     FUNDAMENTAL    = "fundamental_ant"
     DIVIDEND_SCOUT = "dividend_scout_ant"
     PIOTROSKI      = "piotroski_ant"
     BREAKOUT       = "breakout_ant"
+    MOMENTUM_RANK  = "momentum_rank_ant"
+    REBALANCE      = "rebalance_ant"
+    ROTATION       = "rotation_ant"
+    VOLATILITY     = "volatility_ant"
+    RS_REGIME      = "rs_regime_ant"
 
 
 class AntStatus(str, Enum):
