@@ -18,6 +18,7 @@ from ant_colony.ants.equities.dividend_scout_ant import (
     DividendScoutAnt,
     _DIVIDEND_ARISTOCRATS,
     _MAX_PAYOUT,
+    _MAX_YIELD,
     _MIN_YEARS,
     _MIN_YIELD,
     _VIX_THRESHOLD,
@@ -162,6 +163,53 @@ class TestScreenSymbol:
         assert result["dividend_yield"]   == pytest.approx(info["dividend_yield"])
         assert result["consecutive_years"] == info["consecutive_years"]
         assert result["payout_ratio"]     == pytest.approx(info["payout_ratio"])
+
+    def test_yield_above_max_rejected(self) -> None:
+        """Yields > 15% zijn yfinance data-artefacten en moeten worden afgekeurd."""
+        adapter = MagicMock(spec=YahooFinanceAdapter)
+        adapter.get_dividend_info.return_value = {
+            **good_dividend_info(),
+            "dividend_yield": 0.76,  # 76% — data-artefact
+        }
+        ant = make_ant(adapter=adapter)
+        assert ant._screen_symbol("KO") is None
+
+    def test_yield_exactly_max_rejected(self) -> None:
+        """Yield exact op de grens (15%) wordt ook afgekeurd (> check)."""
+        adapter = MagicMock(spec=YahooFinanceAdapter)
+        adapter.get_dividend_info.return_value = {
+            **good_dividend_info(),
+            "dividend_yield": _MAX_YIELD,
+        }
+        ant = make_ant(adapter=adapter)
+        # _MAX_YIELD zelf triggert de > check niet — moet geaccepteerd worden
+        result = ant._screen_symbol("KO")
+        assert result is not None
+
+    def test_yield_just_above_max_rejected(self) -> None:
+        adapter = MagicMock(spec=YahooFinanceAdapter)
+        adapter.get_dividend_info.return_value = {
+            **good_dividend_info(),
+            "dividend_yield": _MAX_YIELD + 0.001,
+        }
+        ant = make_ant(adapter=adapter)
+        assert ant._screen_symbol("KO") is None
+
+    def test_extreme_yield_logs_warning(self, caplog) -> None:
+        import logging
+        adapter = MagicMock(spec=YahooFinanceAdapter)
+        adapter.get_dividend_info.return_value = {
+            **good_dividend_info(),
+            "dividend_yield": 2.14,  # 214% — extreem artefact
+        }
+        ant = make_ant(adapter=adapter)
+
+        with caplog.at_level(logging.WARNING, logger=f"ant.dividend_scout.{ant.ant_id[:8]}"):
+            ant._screen_symbol("KO")
+
+        warning_records = [r for r in caplog.records if r.levelno == logging.WARNING
+                           and "artefact" in r.message]
+        assert len(warning_records) == 1
 
 
 # ---------------------------------------------------------------------------

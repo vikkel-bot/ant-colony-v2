@@ -55,6 +55,7 @@ _DIVIDEND_ARISTOCRATS: list[str] = [
 _VIX_SYMBOL     = "^VIX"
 _VIX_THRESHOLD  = 25.0
 _MIN_YIELD      = 0.02    # 2%
+_MAX_YIELD      = 0.15    # 15% — hogere waarden zijn yfinance data-artefacten
 _MIN_YEARS      = 25
 _MAX_PAYOUT     = 0.80    # 80%
 _API_DELAY_SECS = 2.0
@@ -71,6 +72,9 @@ class DividendScoutAnt:
         adapter:   YahooFinanceAdapter instantie (injectable voor tests).
         logs_root: Pad naar ANT_LOGS. None = geen disk-logging.
     """
+
+    # Fundamentele data verandert dagelijks; elke uur scannen is voldoende.
+    _TICK_INTERVAL: int = 3600
 
     def __init__(
         self,
@@ -99,6 +103,7 @@ class DividendScoutAnt:
         self._log_seq: int = 0
         self._status: AntStatus = AntStatus.IDLE
         self._last_action: str = "init"
+        self._last_tick_at: float = 0.0
         self._log = logging.getLogger(f"ant.dividend_scout.{ant_id[:8]}")
 
         if self.logs_root is not None:
@@ -134,7 +139,10 @@ class DividendScoutAnt:
                     self._status = AntStatus.COMPLETED
                     break
 
-                self._tick()
+                now_mono = time.monotonic()
+                if now_mono - self._last_tick_at >= self._TICK_INTERVAL:
+                    self._last_tick_at = now_mono
+                    self._tick()
 
                 time.sleep(1.0)
 
@@ -200,6 +208,12 @@ class DividendScoutAnt:
 
         if yield_val <= _MIN_YIELD:
             self._log.debug("%s: yield %.2f%% <= %.0f%% — overgeslagen", symbol, yield_val * 100, _MIN_YIELD * 100)
+            return None
+        if yield_val > _MAX_YIELD:
+            self._log.warning(
+                "%s: yield %.2f%% > %.0f%% — waarschijnlijk data-artefact, overgeslagen",
+                symbol, yield_val * 100, _MAX_YIELD * 100,
+            )
             return None
         if years <= _MIN_YEARS:
             self._log.debug("%s: %d jaren <= %d — overgeslagen", symbol, years, _MIN_YEARS)
