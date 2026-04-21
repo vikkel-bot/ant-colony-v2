@@ -64,6 +64,9 @@ class BreakoutAnt:
         sl_pct:            Stop-loss fractie (standaard 0.08 = 8%).
     """
 
+    # Breakout-check elke minuut: prijsgevoelig maar geen seconde-frequentie nodig.
+    _TICK_INTERVAL: int = 60
+
     def __init__(
         self,
         ant_id: str,
@@ -97,6 +100,7 @@ class BreakoutAnt:
         self._log_seq: int = 0
         self._status: AntStatus = AntStatus.IDLE
         self._last_action: str = "init"
+        self._last_tick_at: float = 0.0
         self._log = logging.getLogger(f"ant.breakout.{ant_id[:8]}")
 
     # ------------------------------------------------------------------
@@ -127,7 +131,10 @@ class BreakoutAnt:
                     self._status = AntStatus.COMPLETED
                     break
 
-                self._tick()
+                now_mono = time.monotonic()
+                if now_mono - self._last_tick_at >= self._TICK_INTERVAL:
+                    self._last_tick_at = now_mono
+                    self._tick()
 
                 time.sleep(1.0)
 

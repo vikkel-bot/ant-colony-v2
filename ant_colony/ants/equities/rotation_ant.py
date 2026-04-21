@@ -66,6 +66,9 @@ class RotationAnt:
         min_shift:       Drempel voor positiewisselingen (standaard 2).
     """
 
+    # Rotatie-check elke 5 minuten is voldoende.
+    _TICK_INTERVAL: int = 300
+
     def __init__(
         self,
         ant_id: str,
@@ -86,6 +89,7 @@ class RotationAnt:
         self._log_seq: int = 0
         self._status: AntStatus = AntStatus.IDLE
         self._last_action: str = "init"
+        self._last_tick_at: float = 0.0
 
         # Bijgehouden state: top-3 en bottom-3 van de laatste emissie
         self._last_top3: list[str] = []
@@ -124,7 +128,10 @@ class RotationAnt:
                     self._status = AntStatus.COMPLETED
                     break
 
-                self._tick()
+                now_mono = time.monotonic()
+                if now_mono - self._last_tick_at >= self._TICK_INTERVAL:
+                    self._last_tick_at = now_mono
+                    self._tick()
 
                 time.sleep(1.0)
 

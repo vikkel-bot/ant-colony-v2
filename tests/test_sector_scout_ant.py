@@ -7,6 +7,7 @@ Tests voor SectorScoutAnt.
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -407,3 +408,94 @@ class TestLifecycle:
     def test_initial_status_is_idle(self) -> None:
         ant = make_ant()
         assert ant._status == AntStatus.IDLE
+
+
+# ---------------------------------------------------------------------------
+# 8. Tick throttling
+# ---------------------------------------------------------------------------
+
+
+class TestTickThrottling:
+    def test_tick_not_called_before_interval(self) -> None:
+        ant = make_ant()
+        ant._tick = MagicMock(return_value=[])
+        # last_tick_at almost at now — interval not expired yet
+        ant._last_tick_at = 1e18  # far future monotonic
+
+        with patch("ant_colony.ants.equities.sector_scout_ant.time.sleep"):
+            with patch("ant_colony.ants.equities.sector_scout_ant.time.monotonic", return_value=1e18 + 1):
+                with patch("ant_colony.ants.equities.sector_scout_ant.datetime") as mock_dt:
+                    start   = datetime(2026, 1, 1, tzinfo=timezone.utc)
+                    expired = start + timedelta(seconds=ant.mission.ttl + 1)
+                    mock_dt.now.side_effect = [start, start, expired]
+                    ant.run()
+
+        ant._tick.assert_not_called()
+
+    def test_tick_called_after_interval_expired(self) -> None:
+        ant = make_ant()
+        ant._tick = MagicMock(return_value=[])
+        ant._last_tick_at = 0.0  # interval always expired
+
+        with patch("ant_colony.ants.equities.sector_scout_ant.time.sleep"):
+            with patch("ant_colony.ants.equities.sector_scout_ant.time.monotonic", return_value=99999.0):
+                with patch("ant_colony.ants.equities.sector_scout_ant.datetime") as mock_dt:
+                    start   = datetime(2026, 1, 1, tzinfo=timezone.utc)
+                    expired = start + timedelta(seconds=ant.mission.ttl + 1)
+                    mock_dt.now.side_effect = [start, start, expired]
+                    ant.run()
+
+        ant._tick.assert_called_once()
+
+    def test_tick_interval_is_300(self) -> None:
+        assert SectorScoutAnt._TICK_INTERVAL == 300
+
+    def test_last_tick_at_initialized_zero(self) -> None:
+        ant = make_ant()
+        assert ant._last_tick_at == 0.0
+
+
+# ---------------------------------------------------------------------------
+# 9. Change detection logging
+# ---------------------------------------------------------------------------
+
+
+class TestChangeDetection:
+    def test_info_logged_on_first_tick(self, caplog) -> None:
+        adapter = make_adapter(_full_returns())
+        ant = make_ant(adapter=adapter)
+
+        with caplog.at_level(logging.INFO, logger=f"ant.sector_scout.{ant.ant_id[:8]}"):
+            ant._tick()
+
+        info_records = [r for r in caplog.records if r.levelno == logging.INFO
+                        and "Sector ranking" in r.message]
+        assert len(info_records) == 1
+
+    def test_debug_logged_on_unchanged_tick(self, caplog) -> None:
+        adapter = make_adapter(_full_returns())
+        ant = make_ant(adapter=adapter)
+        ant._tick()  # prime state
+
+        with caplog.at_level(logging.DEBUG, logger=f"ant.sector_scout.{ant.ant_id[:8]}"):
+            ant._tick()
+
+        debug_records = [r for r in caplog.records if r.levelno == logging.DEBUG
+                         and "onveranderd" in r.message]
+        assert len(debug_records) == 1
+
+    def test_info_logged_on_top3_change(self, caplog) -> None:
+        adapter1 = make_adapter({s: (i * 0.01) for i, s in enumerate(_SPDR_ETFS.keys())})
+        ant = make_ant(adapter=adapter1)
+        ant._tick()
+
+        # Change the ranking order completely
+        adapter2 = make_adapter({s: ((10 - i) * 0.01) for i, s in enumerate(_SPDR_ETFS.keys())})
+        ant.biome_registry.get.return_value = adapter2
+
+        with caplog.at_level(logging.INFO, logger=f"ant.sector_scout.{ant.ant_id[:8]}"):
+            ant._tick()
+
+        info_records = [r for r in caplog.records if r.levelno == logging.INFO
+                        and "Sector ranking" in r.message]
+        assert len(info_records) >= 1

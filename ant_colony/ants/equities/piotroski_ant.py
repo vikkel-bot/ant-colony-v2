@@ -58,6 +58,9 @@ class PiotroskiAnt:
                           Standaard: logs_root/research/.
     """
 
+    # Hervalidatie elk uur is voldoende (fundamentals veranderen dagelijks).
+    _TICK_INTERVAL: int = 3600
+
     def __init__(
         self,
         ant_id: str,
@@ -88,6 +91,7 @@ class PiotroskiAnt:
         self._log_seq: int = 0
         self._status: AntStatus = AntStatus.IDLE
         self._last_action: str = "init"
+        self._last_tick_at: float = 0.0
         self._log = logging.getLogger(f"ant.piotroski.{ant_id[:8]}")
 
     # ------------------------------------------------------------------
@@ -117,7 +121,10 @@ class PiotroskiAnt:
                     self._status = AntStatus.COMPLETED
                     break
 
-                self._tick()
+                now_mono = time.monotonic()
+                if now_mono - self._last_tick_at >= self._TICK_INTERVAL:
+                    self._last_tick_at = now_mono
+                    self._tick()
 
                 time.sleep(1.0)
 

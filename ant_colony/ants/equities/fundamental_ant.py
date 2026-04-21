@@ -79,6 +79,9 @@ class FundamentalAnt:
         min_f_score:     Minimum Piotroski F-Score (standaard 7).
     """
 
+    # Fundamentals veranderen dagelijks; elk uur screenen is voldoende.
+    _TICK_INTERVAL: int = 3600
+
     def __init__(
         self,
         ant_id: str,
@@ -99,6 +102,7 @@ class FundamentalAnt:
         self._log_seq: int = 0
         self._status: AntStatus = AntStatus.IDLE
         self._last_action: str = "init"
+        self._last_tick_at: float = 0.0
         # Dedup: één candidate_id per (symbool, dag)
         self._emitted_candidates: set[str] = set()
 
@@ -132,7 +136,10 @@ class FundamentalAnt:
                     self._status = AntStatus.COMPLETED
                     break
 
-                self._tick()
+                now_mono = time.monotonic()
+                if now_mono - self._last_tick_at >= self._TICK_INTERVAL:
+                    self._last_tick_at = now_mono
+                    self._tick()
 
                 time.sleep(1.0)
 

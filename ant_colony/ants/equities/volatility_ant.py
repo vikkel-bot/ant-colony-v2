@@ -67,6 +67,9 @@ class VolatilityAnt:
         logs_root:       Pad naar ANT_LOGS. None = geen disk-logging.
     """
 
+    # VIX-check elke 5 minuten is voldoende voor dagelijkse signalen.
+    _TICK_INTERVAL: int = 300
+
     def __init__(
         self,
         ant_id: str,
@@ -85,6 +88,7 @@ class VolatilityAnt:
         self._log_seq: int = 0
         self._status: AntStatus = AntStatus.IDLE
         self._last_action: str = "init"
+        self._last_tick_at: float = 0.0
         self._emitted_dates: set[str] = set()
 
         self._log = logging.getLogger(f"ant.volatility.{ant_id[:8]}")
@@ -117,7 +121,10 @@ class VolatilityAnt:
                     self._status = AntStatus.COMPLETED
                     break
 
-                self._tick()
+                now_mono = time.monotonic()
+                if now_mono - self._last_tick_at >= self._TICK_INTERVAL:
+                    self._last_tick_at = now_mono
+                    self._tick()
 
                 time.sleep(1.0)
 
