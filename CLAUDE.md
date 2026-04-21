@@ -184,119 +184,35 @@ Queen weet niet welke exchange — alleen welk biome en risicoprofiel.
 
 ## Faseoverzicht
 
-| Fase | Doel | Tests | Status |
-|------|------|-------|--------|
-| 0 | Doctrine + schemas + scheduler skeleton | — | ✅ bewezen |
-| 1 | Exit-keten validatie harness | 147/147 | ✅ bewezen |
-| 2 | Entry + volledige loop, paper only | 210/210 | ✅ bewezen |
-| 3 | Queen governance + mission + kill-switch | 241/241 | ✅ bewezen |
-| 4 | Strategy Lab (research only) | 286/286 | ✅ bewezen |
-| 5 | Multi-biome scaffolding | 354/354 | ✅ bewezen |
-| 6 | Queen allocator upgrade | 403/403 | ✅ bewezen |
-| 7 | Paper-mode multi-node simulatie | 487/487 | ✅ bewezen |
-| 8 | Guarded live adapters | 543/543 | ✅ bewezen |
-| 9 | Colony Dashboard | 591/591 | ✅ bewezen |
-| 10 | Eerste echte Bitvavo adapter op PC2 | — | 🔄 actief |
+| Fase | Doel | Gate |
+|------|------|------|
+| 0 | Doctrine + schemas + scheduler skeleton | Doctrine goedgekeurd |
+| 1 | Exit-keten validatie harness | EXIT_KETEN_VOLLEDIG_CORRECT |
+| 2 | Entry + volledige loop, paper only | 50+ paper trades bewezen |
+| 3 | Queen governance + mission + kill-switch | Kill-switch bewezen in simulatie |
+| 4 | Strategy Lab (research only) | Na bewezen live loop |
+| 5 | Multi-biome scaffolding | Na single-market paper bewijs |
+| 6 | Queen allocator upgrade | Na multi-biome paper bewijs |
+| 7 | Paper-mode multi-node simulatie | Volledig bewezen paper kolonie |
+| 8 | Guarded live adapters | Alleen na volledige paper proof |
 
 ---
 
 ## Huidige fase
 
-**FASE 10 — actief**
+**FASE 0 — actief**
 
-Doel: eerste echte Bitvavo adapter draaien op PC2 tegen de live Bitvavo API.
-De volledige paper/simulatie stack is bewezen (fases 0–9, 591 tests groen).
-Dit is de eerste stap over de grens van simulatie naar echte marktdata en orders.
-
-Gate: Bitvavo adapter op PC2 draait stabiel, heartbeat groen, market data binnenkomend,
-execution gate blokkeert live orders tot Queen expliciete toestemming geeft.
-
-**Constraints voor fase 10:**
-- Adapter wraps de v1 `bitvavo_adapter.py` — niet herschrijven
-- Execution gate staat standaard op PAPER — live alleen na expliciete Queen promotie
-- Alle market data en orders loggen naar `C:\Trading\ANT_LOGS` (append-only)
-- Heartbeat vereist — stale heartbeat = adapter stopt zichzelf
-
----
-
----
-
-## FASE 10 — EQUITIES & ETF BIOME (IN BOUW)
-
-### Architectuur uitbreiding
-De colony breidt uit van crypto naar drie asset klassen:
-- crypto biome (operationeel)
-- equities biome (in bouw) — aandelen via IBKR of DeGiro
-- etf biome (in bouw) — sector ETFs via zelfde adapter
-
-### Drie bewezen trading setups
-
-**Setup 1 — Sector Rotatie (ETFs)**
-- Monitor 11 SPDR sector ETFs
-- Relatief momentum over 3 maanden
-- Top 3 sectoren long, zwakste short
-- Herbalanceer maandelijks
-- Mieren: SectorScoutAnt, MomentumRankAnt, RotationAnt
-
-**Setup 2 — Fundamenteel + Technisch Hybride (Aandelen)**
-- Piotroski F-Score >= 7 als kwaliteitsfilter
-- 12-maands momentum positief
-- Entry bij 52-weeks high breakout
-- Stop loss 8% onder entry
-- Mieren: FundamentalAnt, PiotroskiAnt, BreakoutAnt
-
-**Setup 3 — Defensief Dividend + Volatiliteit Hedge**
-- 70% dividend aristocrats
-- 20% laag-volatiliteit ETFs
-- 10% VIX hedge bij hoge marktspanning
-- Herbalanceer kwartaals
-- Mieren: DividendScoutAnt, VolatilityAnt, RebalanceAnt
-
-### Bouwvolgorde
-1. Equities biome adapter (IBKR of DeGiro)
-2. Setup 1: SectorScoutAnt + MomentumRankAnt + RotationAnt
-3. Setup 2: FundamentalAnt + PiotroskiAnt + BreakoutAnt
-4. Setup 3: DividendScoutAnt + VolatilityAnt + RebalanceAnt
-5. Dashboard integratie — nieuwe kolom voor equities biome
-6. Queen uitbreiden — cross-biome kapitaalallocatie
-
-### Data bronnen
-- Yahoo Finance API (gratis, geen auth vereist)
-- IBKR API (gevalideerde toegang beschikbaar)
-- DeGiro API (gevalideerde toegang beschikbaar)
-- Alpha Vantage (backup voor fundamentele data)
-
-### Gate voor live trading equities
-- Paper trading bewezen over minimaal 30 handelsdagen
-- Sharpe > 0.5 in backtest over 5 jaar
-- Max drawdown < 25%
-- Queen goedkeuring vereist
-
----
-
-## Environment variabelen
-
-Zet deze in een `.env` bestand of in de Windows omgevingsvariabelen op PC2:
-
-```
-# Bitvavo
-BITVAVO_API_KEY=...
-BITVAVO_API_SECRET=...
-BITVAVO_PAPER_MODE=true
-
-# Claude Ant (opt-in, default uitgeschakeld)
-ANTHROPIC_API_KEY=...
-CLAUDE_ANT_ENABLED=false
-CLAUDE_ANT_MONTHLY_BUDGET_EUR=10.00
-```
-
-**CLAUDE_ANT_ENABLED**: Zet op `true` om ClaudeAnt te starten. Default `false` (opt-in,
-nooit per ongeluk aan). Bij `false` toont het dashboard Claude Ant als uitgeschakeld.
-
-**CLAUDE_ANT_MONTHLY_BUDGET_EUR**: Maandelijks kostenlimiet in EUR. Bij 80% verlaagt
-ClaudeAnt de rate limit naar 1 call/uur. Bij 100% stopt ClaudeAnt zichzelf.
+Deliverables:
+- [ ] `docs/ANT_COLONY_V2_DOCTRINE.md`
+- [ ] `docs/COLONY_OBJECT_MODEL.md`
+- [ ] `docs/COLONY_GOVERNANCE.md`
+- [ ] `ant_colony/schemas/` (alle schema bestanden)
+- [ ] `ant_colony/colony/scheduler/colony_scheduler.py` (skeleton)
+- [ ] `tests/test_schemas.py`
+- [ ] `tests/test_mission_validation.py`
+- [ ] `tests/test_scheduler_tick.py`
 
 ---
 
 *Dit bestand bijhouden bij elke fase-overgang.*
-*Laatste update: 2026-04-19 — Equities & ETF biome sectie toegevoegd (fase 10 roadmap)*
+*Laatste update: Fase 0 start — infrastructuur PC1/PC2 toegevoegd*
