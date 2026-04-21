@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from statistics import mean
 
+from ant_colony.ants._heartbeat import HeartbeatThread
 from ant_colony.ants.time_filter_ant import read_latest_time_signal
 from ant_colony.biome.biome_adapter import MarketData
 from ant_colony.biome.biome_registry import BiomeRegistry
@@ -103,7 +104,8 @@ class ScoutAnt:
         )
 
         started_at    = datetime.now(tz=timezone.utc)
-        last_heartbeat = started_at
+        _hb = HeartbeatThread(self, self.mission.heartbeat_interval)
+        _hb.start()
 
         try:
             while self._status == AntStatus.RUNNING:
@@ -117,11 +119,7 @@ class ScoutAnt:
 
                 self._tick()
 
-                if (now - last_heartbeat).total_seconds() >= self.mission.heartbeat_interval:
-                    self._send_heartbeat()
-                    last_heartbeat = datetime.now(tz=timezone.utc)
-
-                time.sleep(self.mission.heartbeat_interval)
+                time.sleep(1.0)
 
         except KeyboardInterrupt:
             self._log.info("ScoutAnt onderbroken door operator")
@@ -130,6 +128,7 @@ class ScoutAnt:
             self._log.exception("Onverwachte fout in tick-loop")
             self._status = AntStatus.ABORTED
         finally:
+            _hb.stop()
             self._send_heartbeat()
             self._log.info("ScoutAnt gestopt | status=%s", self._status.value)
 

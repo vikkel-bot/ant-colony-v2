@@ -40,6 +40,7 @@ import time
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+from ant_colony.ants._heartbeat import HeartbeatThread
 from ant_colony.biome.biome_registry import BiomeRegistry
 from ant_colony.colony.scheduler.colony_scheduler import ColonyScheduler
 from ant_colony.schemas.ant import AntStatus
@@ -116,8 +117,10 @@ class FundamentalAnt:
             self.mission.mission_id, self.mission.ttl, len(watchlist),
         )
 
-        started_at     = datetime.now(tz=timezone.utc)
-        last_heartbeat = started_at
+        started_at = datetime.now(tz=timezone.utc)
+
+        _hb = HeartbeatThread(self, self.mission.heartbeat_interval)
+        _hb.start()
 
         try:
             while self._status == AntStatus.RUNNING:
@@ -131,11 +134,7 @@ class FundamentalAnt:
 
                 self._tick()
 
-                if (now - last_heartbeat).total_seconds() >= self.mission.heartbeat_interval:
-                    self._send_heartbeat()
-                    last_heartbeat = datetime.now(tz=timezone.utc)
-
-                time.sleep(self.mission.heartbeat_interval)
+                time.sleep(1.0)
 
         except KeyboardInterrupt:
             self._log.info("FundamentalAnt onderbroken door operator")
@@ -144,6 +143,7 @@ class FundamentalAnt:
             self._log.exception("Onverwachte fout in tick-loop")
             self._status = AntStatus.ABORTED
         finally:
+            _hb.stop()
             self._send_heartbeat()
             self._log.info("FundamentalAnt gestopt | status=%s", self._status.value)
 

@@ -30,6 +30,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ant_colony.ants._heartbeat import HeartbeatThread
 from ant_colony.colony.scheduler.colony_scheduler import ColonyScheduler
 from ant_colony.schemas.ant import AntStatus
 from ant_colony.schemas.audit_event import AuditEvent, AuditEventType
@@ -153,8 +154,10 @@ class TimeFilterAnt:
             self.mission.mission_id, self.mission.ttl,
         )
 
-        started_at     = datetime.now(tz=timezone.utc)
-        last_heartbeat = started_at
+        started_at = datetime.now(tz=timezone.utc)
+
+        _hb = HeartbeatThread(self, self.mission.heartbeat_interval)
+        _hb.start()
 
         try:
             while self._status == AntStatus.RUNNING:
@@ -170,11 +173,7 @@ class TimeFilterAnt:
 
                 self._tick()
 
-                if (now - last_heartbeat).total_seconds() >= self.mission.heartbeat_interval:
-                    self._send_heartbeat()
-                    last_heartbeat = datetime.now(tz=timezone.utc)
-
-                time.sleep(self.mission.heartbeat_interval)
+                time.sleep(1.0)
 
         except KeyboardInterrupt:
             self._log.info("TimeFilterAnt onderbroken door operator")
@@ -183,6 +182,7 @@ class TimeFilterAnt:
             self._log.exception("Onverwachte fout in tick-loop")
             self._status = AntStatus.ABORTED
         finally:
+            _hb.stop()
             self._send_heartbeat()
             self._log.info("TimeFilterAnt gestopt | status=%s", self._status.value)
 
