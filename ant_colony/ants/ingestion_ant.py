@@ -29,6 +29,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import os
 import time
 import uuid
 from datetime import datetime, timezone
@@ -64,6 +65,8 @@ _SEARCH_TERMS        = [
 ]
 _RESULTS_PER_TERM    = 10
 _MIN_STARS           = 10
+_MAX_REPOS_PER_TICK  = 5      # max README fetches per tick om rate limit te sparen
+_GITHUB_TOKEN_ENV    = "GITHUB_TOKEN"
 
 # Per-bron rate limits (seconden tussen calls)
 _RATE_LIMITS: dict[str, float] = {
@@ -71,8 +74,10 @@ _RATE_LIMITS: dict[str, float] = {
     "reddit": 30.0,
     "devto":  30.0,
 }
-_RATE_LIMIT_BACKOFF  = 60.0   # wacht 60s bij 403/429 rate limit response
-_README_MAX_BYTES    = 65_536  # 64 KB — genoeg voor keyword-scan
+_RATE_LIMIT_BACKOFF         = 60.0     # wacht 60s bij 429 rate limit response (Reddit, Dev.to)
+_RATE_LIMIT_BACKOFF_GITHUB  = 900.0    # 15 min na GitHub 403 (rate limit zonder token)
+_README_CACHE_TTL   = 86_400  # 24h — hergebruik gecachte README bij herstart
+_README_MAX_BYTES   = 65_536  # 64 KB — genoeg voor keyword-scan
 
 # Keywords voor Reddit/Dev.to kwaliteitsfilter
 _REDDIT_KEYWORDS: frozenset[str] = frozenset({"strategy", "backtest", "bot", "edge"})
@@ -87,7 +92,7 @@ _EXIT_KEYWORDS: frozenset[str] = frozenset({
     "trailing stop", "trailing_stop", "close position",
 })
 
-_GITHUB_HEADERS = {
+_GITHUB_HEADERS_BASE = {
     "Accept": "application/vnd.github+json",
     "X-GitHub-Api-Version": "2022-11-28",
 }
@@ -119,6 +124,7 @@ class IngestionAnt:
 
         self._seen_urls: set[str] = set()
         self._last_call: dict[str, float] = {"github": 0.0, "reddit": 0.0, "devto": 0.0}
+        self._readme_cache: dict[str, tuple[str, float]] = {}  # full_name → (text, mono_time)
         self._log_seq: int = 0
         self._status: AntStatus = AntStatus.IDLE
         self._last_action: str = "init"
@@ -191,10 +197,16 @@ class IngestionAnt:
 
     def _tick(self) -> None:
         """Één ingestion-cyclus: alle bronnen doorlopen."""
+        repos_this_tick = 0
         for term in _SEARCH_TERMS:
+            if repos_this_tick >= _MAX_REPOS_PER_TICK:
+                break
             repos = self._search_github(term)
             for repo in repos:
-                self._process_repo(repo)
+                if repos_this_tick >= _MAX_REPOS_PER_TICK:
+                    break
+                if self._process_repo(repo):
+                    repos_this_tick += 1
 
         for post in self._fetch_reddit():
             self._process_reddit_post(post)
@@ -204,39 +216,43 @@ class IngestionAnt:
 
         self._last_action = "tick"
 
-    def _process_repo(self, repo: dict) -> None:
-        """Verwerk één repo: filter, README lezen, kandidaat bouwen en loggen."""
+    def _process_repo(self, repo: dict) -> bool:
+        """
+        Verwerk één repo: filter, README lezen, kandidaat bouwen en loggen.
+        Retourneert True als een README-fetch werd uitgevoerd (telt mee voor tick-limiet).
+        """
         stars = repo.get("stargazers_count", 0)
         if stars < _MIN_STARS:
             self._log.debug(
                 "Repo %s overgeslagen — te weinig stars (%d < %d)",
                 repo.get("full_name"), stars, _MIN_STARS,
             )
-            return
+            return False
 
         url = repo.get("html_url", "")
         if not url:
-            return
+            return False
         if url in self._seen_urls:
             self._log.debug("Duplicaat overgeslagen: %s", url)
-            return
+            return False
         self._seen_urls.add(url)
 
+        # README fetch telt als API-call — retourneer True ongeacht de uitkomst
         readme = self._fetch_readme(repo)
         if readme is None:
             self._log.debug("Geen README voor %s — overgeslagen", repo.get("full_name"))
-            return
+            return True
 
         extracted = self._extract_strategy(readme, repo)
         if extracted is None:
             self._log.debug(
                 "Geen herkenbare strategie in %s — overgeslagen", repo.get("full_name")
             )
-            return
+            return True
 
         candidate = self._build_candidate(repo, extracted)
         if candidate is None:
-            return
+            return True
 
         self._write_candidate(candidate)
         self._last_action = f"ingested:{repo.get('full_name', url)}"
@@ -246,10 +262,19 @@ class IngestionAnt:
             extracted["entry_keywords"][:3],
             extracted["exit_keywords"][:2],
         )
+        return True
 
     # ------------------------------------------------------------------
     # GitHub API
     # ------------------------------------------------------------------
+
+    def _github_headers(self) -> dict[str, str]:
+        """Bouw GitHub request headers. Voegt Bearer token toe als GITHUB_TOKEN is gezet."""
+        headers = dict(_GITHUB_HEADERS_BASE)
+        token = os.environ.get(_GITHUB_TOKEN_ENV)
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        return headers
 
     def _search_github(self, term: str) -> list[dict]:
         """Zoek repos op GitHub. Retourneert lijst van repo-dicts (leeg bij fout)."""
@@ -263,14 +288,15 @@ class IngestionAnt:
                     "order":    "desc",
                     "per_page": _RESULTS_PER_TERM,
                 },
-                headers=_GITHUB_HEADERS,
+                headers=self._github_headers(),
                 timeout=15.0,
             )
             if resp.status_code == 403:
                 self._log.warning(
-                    "GitHub rate limit (403) voor term '%s' — backoff %.0fs", term, _RATE_LIMIT_BACKOFF
+                    "GitHub rate limit (403) voor term '%s' — backoff %.0fs",
+                    term, _RATE_LIMIT_BACKOFF_GITHUB,
                 )
-                time.sleep(_RATE_LIMIT_BACKOFF)
+                time.sleep(_RATE_LIMIT_BACKOFF_GITHUB)
                 return []
             if resp.status_code != 200:
                 self._log.warning(
@@ -283,15 +309,22 @@ class IngestionAnt:
             return []
 
     def _fetch_readme(self, repo: dict) -> str | None:
-        """Haal README op en decodeer van base64. Retourneert tekst of None."""
+        """Haal README op en decodeer van base64. Retourneert tekst of None (gecached 24h)."""
         full_name = repo.get("full_name", "")
         if not full_name:
             return None
+
+        cached = self._readme_cache.get(full_name)
+        if cached is not None:
+            text, cached_at = cached
+            if time.monotonic() - cached_at < _README_CACHE_TTL:
+                return text
+
         self._rate_limit("github")
         try:
             resp = httpx.get(
                 f"{_GITHUB_API_BASE}/repos/{full_name}/readme",
-                headers=_GITHUB_HEADERS,
+                headers=self._github_headers(),
                 timeout=15.0,
             )
             if resp.status_code != 200:
@@ -302,7 +335,9 @@ class IngestionAnt:
             decoded = base64.b64decode(
                 raw_content.replace("\n", "").encode("ascii")
             ).decode("utf-8", errors="replace")
-            return decoded[:_README_MAX_BYTES]
+            result = decoded[:_README_MAX_BYTES]
+            self._readme_cache[full_name] = (result, time.monotonic())
+            return result
         except Exception:
             self._log.exception("README ophalen mislukt voor %s", full_name)
             return None

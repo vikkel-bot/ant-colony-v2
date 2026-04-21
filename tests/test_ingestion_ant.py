@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import json
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -17,8 +18,12 @@ import pytest
 
 from ant_colony.ants.ingestion_ant import (
     IngestionAnt,
+    _GITHUB_TOKEN_ENV,
+    _MAX_REPOS_PER_TICK,
     _MIN_STARS,
+    _RATE_LIMIT_BACKOFF_GITHUB,
     _RATE_LIMITS,
+    _README_CACHE_TTL,
     _REDDIT_KEYWORDS,
     _REDDIT_TOP_URL,
     _DEVTO_ARTICLES_URL,
@@ -943,3 +948,192 @@ class TestDevtoFetch:
         log_path = tmp_path / "ingestion" / f"{ant.ant_id}.jsonl"
         records = [json.loads(l) for l in log_path.read_text().splitlines() if l.strip()]
         assert records[0]["payload"]["provenance"][0]["details"]["url"] == article["url"]
+
+
+# ---------------------------------------------------------------------------
+# 15. GitHub token
+# ---------------------------------------------------------------------------
+
+
+class TestGitHubToken:
+    def test_no_token_no_auth_header(self, monkeypatch) -> None:
+        monkeypatch.delenv(_GITHUB_TOKEN_ENV, raising=False)
+        ant = make_ant()
+        headers = ant._github_headers()
+        assert "Authorization" not in headers
+
+    def test_token_added_as_bearer(self, monkeypatch) -> None:
+        monkeypatch.setenv(_GITHUB_TOKEN_ENV, "ghp_testtoken123")
+        ant = make_ant()
+        headers = ant._github_headers()
+        assert headers.get("Authorization") == "Bearer ghp_testtoken123"
+
+    def test_token_used_in_search_request(self, monkeypatch) -> None:
+        monkeypatch.setenv(_GITHUB_TOKEN_ENV, "ghp_abc")
+        ant = make_ant()
+        reset_rate_limits(ant)
+        resp = make_http_response(json_data={"items": []})
+        with patch("ant_colony.ants.ingestion_ant.httpx.get", return_value=resp) as mock_get:
+            with patch("ant_colony.ants.ingestion_ant.time.sleep"):
+                ant._search_github("trading")
+        call_headers = mock_get.call_args[1]["headers"]
+        assert call_headers.get("Authorization") == "Bearer ghp_abc"
+
+    def test_token_used_in_readme_request(self, monkeypatch) -> None:
+        monkeypatch.setenv(_GITHUB_TOKEN_ENV, "ghp_xyz")
+        ant = make_ant()
+        reset_rate_limits(ant)
+        b64 = encode_readme("buy signal stop_loss")
+        resp = make_http_response(json_data={"content": b64})
+        with patch("ant_colony.ants.ingestion_ant.httpx.get", return_value=resp) as mock_get:
+            with patch("ant_colony.ants.ingestion_ant.time.sleep"):
+                ant._fetch_readme(make_repo())
+        call_headers = mock_get.call_args[1]["headers"]
+        assert call_headers.get("Authorization") == "Bearer ghp_xyz"
+
+
+# ---------------------------------------------------------------------------
+# 16. README cache
+# ---------------------------------------------------------------------------
+
+
+class TestReadmeCache:
+    def test_cached_readme_not_fetched_again(self) -> None:
+        ant = make_ant()
+        reset_rate_limits(ant)
+        repo = make_repo()
+        full_name = repo["full_name"]
+        b64 = encode_readme("buy signal stop_loss")
+        resp = make_http_response(json_data={"content": b64})
+
+        with patch("ant_colony.ants.ingestion_ant.httpx.get", return_value=resp) as mock_get:
+            with patch("ant_colony.ants.ingestion_ant.time.sleep"):
+                ant._fetch_readme(repo)  # first call — fetches
+                ant._fetch_readme(repo)  # second call — from cache
+
+        assert mock_get.call_count == 1
+
+    def test_expired_cache_refetched(self) -> None:
+        ant = make_ant()
+        reset_rate_limits(ant)
+        repo = make_repo()
+        b64 = encode_readme("buy signal stop_loss")
+        resp = make_http_response(json_data={"content": b64})
+
+        # Seed cache with a timestamp older than _README_CACHE_TTL
+        expired_at = time.monotonic() - _README_CACHE_TTL - 1
+        ant._readme_cache[repo["full_name"]] = ("old text", expired_at)
+
+        with patch("ant_colony.ants.ingestion_ant.httpx.get", return_value=resp) as mock_get:
+            with patch("ant_colony.ants.ingestion_ant.time.sleep"):
+                result = ant._fetch_readme(repo)
+
+        assert mock_get.call_count == 1
+        assert result != "old text"
+
+    def test_cache_populated_after_fetch(self) -> None:
+        ant = make_ant()
+        reset_rate_limits(ant)
+        repo = make_repo()
+        b64 = encode_readme("buy signal stop_loss")
+        resp = make_http_response(json_data={"content": b64})
+
+        with patch("ant_colony.ants.ingestion_ant.httpx.get", return_value=resp):
+            with patch("ant_colony.ants.ingestion_ant.time.sleep"):
+                ant._fetch_readme(repo)
+
+        assert repo["full_name"] in ant._readme_cache
+
+    def test_cache_ttl_constant_is_24h(self) -> None:
+        assert _README_CACHE_TTL == 86_400
+
+
+# ---------------------------------------------------------------------------
+# 17. Max repos per tick
+# ---------------------------------------------------------------------------
+
+
+class TestMaxReposPerTick:
+    def test_at_most_max_repos_processed_per_tick(self, tmp_path: Path) -> None:
+        ant = make_ant(logs_root=tmp_path)
+        reset_rate_limits(ant)
+
+        # 10 repos per search term × 8 terms = 80 total, but only 5 should be processed
+        repos = [make_repo(f"user/repo{i}", stars=50) for i in range(10)]
+        search_resp = make_http_response(json_data={"items": repos})
+        readme_resp = make_http_response(json_data={"content": encode_readme(_GOOD_README)})
+
+        readme_call_count = 0
+
+        def side_effect(url, **kwargs):
+            nonlocal readme_call_count
+            if "search" in url:
+                return search_resp
+            if "api.github.com/repos" in url:
+                readme_call_count += 1
+                return readme_resp
+            if "reddit.com" in url:
+                return make_reddit_response(posts=[])
+            if "dev.to" in url:
+                return make_devto_response(articles=[])
+            return make_http_response(json_data={})
+
+        with patch("ant_colony.ants.ingestion_ant.httpx.get", side_effect=side_effect):
+            with patch("ant_colony.ants.ingestion_ant.time.sleep"):
+                ant._tick()
+
+        assert readme_call_count <= _MAX_REPOS_PER_TICK
+
+    def test_max_repos_constant_is_5(self) -> None:
+        assert _MAX_REPOS_PER_TICK == 5
+
+    def test_process_repo_returns_false_for_low_stars(self) -> None:
+        ant = make_ant()
+        result = ant._process_repo(make_repo(stars=_MIN_STARS - 1))
+        assert result is False
+
+    def test_process_repo_returns_false_for_duplicate(self) -> None:
+        ant = make_ant()
+        repo = make_repo()
+        ant._seen_urls.add(repo["html_url"])
+        result = ant._process_repo(repo)
+        assert result is False
+
+    def test_process_repo_returns_true_after_readme_fetch(self) -> None:
+        ant = make_ant()
+        reset_rate_limits(ant)
+        repo = make_repo()
+        b64 = encode_readme(_GOOD_README)
+        resp = make_http_response(json_data={"content": b64})
+        with patch("ant_colony.ants.ingestion_ant.httpx.get", return_value=resp):
+            with patch("ant_colony.ants.ingestion_ant.time.sleep"):
+                result = ant._process_repo(repo)
+        assert result is True
+
+
+# ---------------------------------------------------------------------------
+# 18. GitHub 403 backoff
+# ---------------------------------------------------------------------------
+
+
+class TestGitHub403Backoff:
+    def test_403_triggers_900s_backoff(self) -> None:
+        ant = make_ant()
+        reset_rate_limits(ant)
+        resp = make_http_response(status_code=403)
+        with patch("ant_colony.ants.ingestion_ant.httpx.get", return_value=resp):
+            with patch("ant_colony.ants.ingestion_ant.time.sleep") as mock_sleep:
+                ant._search_github("trading")
+        mock_sleep.assert_called_with(_RATE_LIMIT_BACKOFF_GITHUB)
+
+    def test_403_backoff_constant_is_900(self) -> None:
+        assert _RATE_LIMIT_BACKOFF_GITHUB == 900.0
+
+    def test_403_returns_empty_list(self) -> None:
+        ant = make_ant()
+        reset_rate_limits(ant)
+        resp = make_http_response(status_code=403)
+        with patch("ant_colony.ants.ingestion_ant.httpx.get", return_value=resp):
+            with patch("ant_colony.ants.ingestion_ant.time.sleep"):
+                result = ant._search_github("trading")
+        assert result == []
