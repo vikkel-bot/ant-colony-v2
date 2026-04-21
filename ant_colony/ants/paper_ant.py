@@ -58,6 +58,7 @@ _SL_PCT  = 0.02                  # 2% stop-loss onder entry
 _TP_PCT  = 0.03                  # 3% take-profit boven entry
 _SIGNAL_VALIDITY_TICKS = 2       # signal geldig voor heartbeat_interval × 2 seconden
 _MAX_OPEN_POSITIONS    = 3       # maximaal 3 open posities tegelijk (1 per symbool)
+_STALE_SIGNAL_MINUTES  = 5       # signalen ouder dan dit worden genegeerd
 
 
 class PaperAnt:
@@ -255,6 +256,17 @@ class PaperAnt:
                 sig.get("session", "unknown"),
             )
         return allowed
+
+    @staticmethod
+    def _is_stale_timestamp(ts_str: str | None) -> bool:
+        """True als ts_str meer dan _STALE_SIGNAL_MINUTES oud is. Geen timestamp → False (fail-open)."""
+        if not ts_str:
+            return False
+        try:
+            ts = datetime.fromisoformat(str(ts_str).replace("Z", "+00:00"))
+            return (datetime.now(tz=timezone.utc) - ts) > timedelta(minutes=_STALE_SIGNAL_MINUTES)
+        except (ValueError, TypeError):
+            return False
 
     def _process_new_signals(self) -> None:
         """Verwerk nieuwe scout-signalen en open posities indien van toepassing."""
@@ -461,6 +473,13 @@ class PaperAnt:
                         continue
                     self._seen_research_ids.add(candidate_id)
 
+                    if self._is_stale_timestamp(record.get("timestamp")):
+                        self._log.debug(
+                            "Stale research-kandidaat %s overgeslagen (timestamp=%s)",
+                            candidate_id, record.get("timestamp"),
+                        )
+                        continue
+
                     self._open_from_research_candidate(payload)
 
             except OSError:
@@ -521,10 +540,13 @@ class PaperAnt:
         sl_pct/tp_pct: override voor stop-loss / take-profit percentages.
                        Valt terug op module-defaults als None.
         """
-        symbol      = sig.get("symbol", "")
-        entry_price = sig.get("current_price", 0.0)
+        symbol = sig.get("symbol", "")
+        if not symbol:
+            return
 
-        if not symbol or entry_price <= 0:
+        entry_price = self._fetch_price(symbol)
+        if entry_price is None or entry_price <= 0:
+            self._log.debug("Geen live prijs voor %s — positie niet geopend", symbol)
             return
 
         # Definitieve guard — blokkeert duplicaten ongeacht aanroeppad
@@ -643,6 +665,13 @@ class PaperAnt:
                         continue
                     self._seen_approved_ids.add(candidate_id)
 
+                    if self._is_stale_timestamp(record.get("timestamp")):
+                        self._log.debug(
+                            "Stale approved-kandidaat %s overgeslagen (timestamp=%s)",
+                            candidate_id, record.get("timestamp"),
+                        )
+                        continue
+
                     self._open_from_candidate(record)
 
             except OSError:
@@ -737,6 +766,14 @@ class PaperAnt:
                         continue
 
                     self._processed_signals.add(signal_id)
+
+                    if self._is_stale_timestamp(payload.get("detected_at")):
+                        self._log.debug(
+                            "Stale scout-signaal %s overgeslagen (detected_at=%s)",
+                            signal_id, payload.get("detected_at"),
+                        )
+                        continue
+
                     new_signals.append(payload)
 
             except OSError:

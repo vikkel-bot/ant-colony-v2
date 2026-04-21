@@ -489,7 +489,9 @@ def test_paper_opens_position_inside_kill_zone(tmp_path):
     price = 50_000.0
     adapter_mock = MagicMock()
     adapter_mock.is_available.return_value = True
-    adapter_mock.get_market_data.return_value = MagicMock(close=price, is_valid_price=True)
+    md_mock = MagicMock(close=price, is_valid_price=True)
+    md_mock.is_stale.return_value = False
+    adapter_mock.get_market_data.return_value = md_mock
 
     from ant_colony.ants.paper_ant import PaperAnt
     from ant_colony.biome.biome_registry import BiomeRegistry
@@ -586,7 +588,9 @@ def test_paper_fail_open_no_time_filter(tmp_path):
     price = 50_000.0
     adapter_mock = MagicMock()
     adapter_mock.is_available.return_value = True
-    adapter_mock.get_market_data.return_value = MagicMock(close=price, is_valid_price=True)
+    md_mock = MagicMock(close=price, is_valid_price=True)
+    md_mock.is_stale.return_value = False
+    adapter_mock.get_market_data.return_value = md_mock
 
     from ant_colony.ants.paper_ant import PaperAnt
     from ant_colony.biome.biome_registry import BiomeRegistry

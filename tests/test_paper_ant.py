@@ -61,11 +61,22 @@ def make_mission(capital: float = 10_000.0, symbols: list[str] | None = None) ->
     )
 
 
+def _make_adapter_with_price(price: float) -> MagicMock:
+    md = MagicMock()
+    md.close = price
+    md.is_valid_price = True
+    md.is_stale.return_value = False
+    adapter = MagicMock()
+    adapter.is_available.return_value = True
+    adapter.get_market_data.return_value = md
+    return adapter
+
+
 def make_ant(mission: Mission | None = None, logs_root: Path | None = None) -> PaperAnt:
     mission = mission or make_mission()
     scheduler = MagicMock()
     biome_registry = MagicMock()
-    biome_registry.get.return_value = None  # no live prices by default
+    biome_registry.get.return_value = _make_adapter_with_price(_PRICE)
     return PaperAnt(
         ant_id=str(uuid.uuid4()),
         mission=mission,
@@ -86,22 +97,26 @@ def write_scout_signal(
     signal_type: str = "price_move",
     biome: str = _BIOME,
     filename: str = "scout_1.jsonl",
+    detected_at: str | None = None,
 ) -> str:
     signal_id = signal_id or str(uuid.uuid4())
     scout_dir.mkdir(parents=True, exist_ok=True)
+    payload: dict = {
+        "action": "opportunity_detected",
+        "signal_id": signal_id,
+        "symbol": symbol,
+        "current_price": price,
+        "confidence": confidence,
+        "change_pct": change_pct,
+        "signal_type": signal_type,
+        "biome": biome,
+    }
+    if detected_at is not None:
+        payload["detected_at"] = detected_at
     record = {
         "event_type": "action_executed",
         "source": "scout-001",
-        "payload": {
-            "action": "opportunity_detected",
-            "signal_id": signal_id,
-            "symbol": symbol,
-            "current_price": price,
-            "confidence": confidence,
-            "change_pct": change_pct,
-            "signal_type": signal_type,
-            "biome": biome,
-        },
+        "payload": payload,
     }
     (scout_dir / filename).open("a", encoding="utf-8").write(
         json.dumps(record) + "\n"
@@ -244,17 +259,6 @@ class TestEntryParameters:
 # ---------------------------------------------------------------------------
 # 3. Exit verwerking
 # ---------------------------------------------------------------------------
-
-
-def _make_adapter_with_price(price: float) -> MagicMock:
-    md = MagicMock()
-    md.close = price
-    md.is_valid_price = True
-    md.is_stale.return_value = False
-    adapter = MagicMock()
-    adapter.is_available.return_value = True
-    adapter.get_market_data.return_value = md
-    return adapter
 
 
 class TestExitProcessing:
@@ -742,11 +746,12 @@ def write_research_candidate(
     biome: str = _BIOME,
     ant_id: str = "ant-research-001",
     filename: str | None = None,
+    timestamp: str | None = None,
 ) -> str:
     import uuid as _uuid
     candidate_id = candidate_id or f"candidate-{_uuid.uuid4().hex[:8]}"
     research_dir.mkdir(parents=True, exist_ok=True)
-    record = {
+    record: dict = {
         "event_type": "action_executed",
         "source": ant_id,
         "payload": {
@@ -761,6 +766,8 @@ def write_research_candidate(
             "biome": biome,
         },
     }
+    if timestamp is not None:
+        record["timestamp"] = timestamp
     fname = filename or f"{ant_id}.jsonl"
     (research_dir / fname).open("a", encoding="utf-8").write(
         json.dumps(record) + "\n"
@@ -768,28 +775,17 @@ def write_research_candidate(
     return candidate_id
 
 
-def _make_adapter_with_price_v2(price: float) -> MagicMock:
-    md = MagicMock()
-    md.close = price
-    md.is_valid_price = True
-    md.is_stale.return_value = False
-    adapter = MagicMock()
-    adapter.is_available.return_value = True
-    adapter.get_market_data.return_value = md
-    return adapter
-
-
 class TestResearchCandidates:
     def test_research_candidate_opens_position(self, tmp_path: Path) -> None:
         ant = make_ant(logs_root=tmp_path)
-        ant.biome_registry.get.return_value = _make_adapter_with_price_v2(_PRICE)
+        ant.biome_registry.get.return_value = _make_adapter_with_price(_PRICE)
         write_research_candidate(tmp_path / "research")
         ant._tick()
         assert len(ant._ledger.open_positions) == 1
 
     def test_research_candidate_uses_tp_pct_from_log(self, tmp_path: Path) -> None:
         ant = make_ant(logs_root=tmp_path)
-        ant.biome_registry.get.return_value = _make_adapter_with_price_v2(_PRICE)
+        ant.biome_registry.get.return_value = _make_adapter_with_price(_PRICE)
         write_research_candidate(tmp_path / "research", tp_pct=0.08, sl_pct=0.04)
         ant._tick()
         pos = ant._ledger.open_positions[0]
@@ -798,7 +794,7 @@ class TestResearchCandidates:
 
     def test_research_candidate_uses_sl_pct_from_log(self, tmp_path: Path) -> None:
         ant = make_ant(logs_root=tmp_path)
-        ant.biome_registry.get.return_value = _make_adapter_with_price_v2(_PRICE)
+        ant.biome_registry.get.return_value = _make_adapter_with_price(_PRICE)
         write_research_candidate(tmp_path / "research", tp_pct=0.08, sl_pct=0.04)
         ant._tick()
         pos = ant._ledger.open_positions[0]
@@ -807,7 +803,7 @@ class TestResearchCandidates:
 
     def test_research_candidate_dedup(self, tmp_path: Path) -> None:
         ant = make_ant(logs_root=tmp_path)
-        ant.biome_registry.get.return_value = _make_adapter_with_price_v2(_PRICE)
+        ant.biome_registry.get.return_value = _make_adapter_with_price(_PRICE)
         cid = write_research_candidate(tmp_path / "research")
         ant._tick()
         assert len(ant._ledger.open_positions) == 1
@@ -820,7 +816,7 @@ class TestResearchCandidates:
         """BTC-EUR met twee verschillende strategy_types mag twee posities openen."""
         mission = make_mission(capital=50_000.0)
         ant = make_ant(mission=mission, logs_root=tmp_path)
-        ant.biome_registry.get.return_value = _make_adapter_with_price_v2(_PRICE)
+        ant.biome_registry.get.return_value = _make_adapter_with_price(_PRICE)
         write_research_candidate(
             tmp_path / "research", strategy_type="sma_crossover", filename="r1.jsonl"
         )
@@ -833,7 +829,7 @@ class TestResearchCandidates:
     def test_same_strategy_type_blocks_duplicate(self, tmp_path: Path) -> None:
         """BTC-EUR met zelfde strategy_type mag maar één keer openen."""
         ant = make_ant(logs_root=tmp_path)
-        ant.biome_registry.get.return_value = _make_adapter_with_price_v2(_PRICE)
+        ant.biome_registry.get.return_value = _make_adapter_with_price(_PRICE)
         write_research_candidate(
             tmp_path / "research", strategy_type="sma_crossover", filename="r1.jsonl"
         )
@@ -848,7 +844,7 @@ class TestResearchCandidates:
 
     def test_short_direction_skipped(self, tmp_path: Path) -> None:
         ant = make_ant(logs_root=tmp_path)
-        ant.biome_registry.get.return_value = _make_adapter_with_price_v2(_PRICE)
+        ant.biome_registry.get.return_value = _make_adapter_with_price(_PRICE)
         write_research_candidate(tmp_path / "research", direction="short")
         ant._tick()
         assert len(ant._ledger.open_positions) == 0
@@ -862,7 +858,7 @@ class TestResearchCandidates:
 
     def test_trade_opened_log_has_strategy_type(self, tmp_path: Path) -> None:
         ant = make_ant(logs_root=tmp_path)
-        ant.biome_registry.get.return_value = _make_adapter_with_price_v2(_PRICE)
+        ant.biome_registry.get.return_value = _make_adapter_with_price(_PRICE)
         write_research_candidate(tmp_path / "research", strategy_type="momentum")
         ant._tick()
         log_path = tmp_path / "paper" / f"{ant.ant_id}.jsonl"
@@ -873,7 +869,7 @@ class TestResearchCandidates:
 
     def test_trade_opened_log_has_sl_pct_and_tp_pct(self, tmp_path: Path) -> None:
         ant = make_ant(logs_root=tmp_path)
-        ant.biome_registry.get.return_value = _make_adapter_with_price_v2(_PRICE)
+        ant.biome_registry.get.return_value = _make_adapter_with_price(_PRICE)
         write_research_candidate(tmp_path / "research", tp_pct=0.07, sl_pct=0.035)
         ant._tick()
         log_path = tmp_path / "paper" / f"{ant.ant_id}.jsonl"
@@ -885,7 +881,7 @@ class TestResearchCandidates:
     def test_research_candidate_closes_and_frees_slot(self, tmp_path: Path) -> None:
         """Na sluiting van research positie mag dezelfde (symbool, strategy_type) opnieuw."""
         ant = make_ant(logs_root=tmp_path)
-        ant.biome_registry.get.return_value = _make_adapter_with_price_v2(_PRICE)
+        ant.biome_registry.get.return_value = _make_adapter_with_price(_PRICE)
         write_research_candidate(tmp_path / "research", strategy_type="rsi_based")
         ant._tick()
         assert len(ant._ledger.open_positions) == 1
@@ -893,7 +889,7 @@ class TestResearchCandidates:
 
         # Sluit de positie via take-profit
         pos = ant._ledger.open_positions[0]
-        ant.biome_registry.get.return_value = _make_adapter_with_price_v2(
+        ant.biome_registry.get.return_value = _make_adapter_with_price(
             pos.take_profit_price + 1.0
         )
         ant._process_exits()
@@ -916,7 +912,7 @@ class TestResearchCandidates:
         cid = write_research_candidate(tmp_path / "research")
         # Ant aanmaken ná schrijven → preload markeert cid als gezien
         ant = make_ant(logs_root=tmp_path)
-        ant.biome_registry.get.return_value = _make_adapter_with_price_v2(_PRICE)
+        ant.biome_registry.get.return_value = _make_adapter_with_price(_PRICE)
         assert cid in ant._seen_research_ids
         ant._tick()
         # Geen positie — kandidaat was al aanwezig bij startup
@@ -926,7 +922,7 @@ class TestResearchCandidates:
         """Kandidaat die ná startup arriveert wordt wel verwerkt."""
         # Ant eerst aanmaken (lege research dir)
         ant = make_ant(logs_root=tmp_path)
-        ant.biome_registry.get.return_value = _make_adapter_with_price_v2(_PRICE)
+        ant.biome_registry.get.return_value = _make_adapter_with_price(_PRICE)
         # Nu een nieuw kandidaat schrijven
         write_research_candidate(tmp_path / "research")
         ant._tick()
@@ -1013,3 +1009,97 @@ class TestBrokerFees:
             closed["realized_pnl"] / (_PRICE * pos.quantity) * 100, 4
         )
         assert closed["pnl_pct"] == pytest.approx(expected_pnl_pct, rel=1e-4)
+
+
+# ---------------------------------------------------------------------------
+# 15. Staleness-filter en live-price gedrag
+# ---------------------------------------------------------------------------
+
+
+class TestStalenessAndLivePrice:
+    def test_stale_scout_signal_not_processed(self, tmp_path: Path) -> None:
+        """Scout signal met detected_at > 5 min oud wordt niet geopend."""
+        ant = make_ant(logs_root=tmp_path)
+        stale_ts = (datetime.now(tz=timezone.utc) - timedelta(minutes=10)).isoformat()
+        sid = write_scout_signal(tmp_path / "scouts", detected_at=stale_ts)
+        ant._tick()
+        assert len(ant._ledger.open_positions) == 0
+        assert sid in ant._processed_signals  # wel als gezien gemarkeerd
+
+    def test_fresh_scout_signal_processed(self, tmp_path: Path) -> None:
+        """Scout signal met recent detected_at wordt wel geopend."""
+        ant = make_ant(logs_root=tmp_path)
+        fresh_ts = (datetime.now(tz=timezone.utc) - timedelta(seconds=30)).isoformat()
+        write_scout_signal(tmp_path / "scouts", detected_at=fresh_ts)
+        ant._tick()
+        assert len(ant._ledger.open_positions) == 1
+
+    def test_scout_signal_no_timestamp_treated_as_fresh(self, tmp_path: Path) -> None:
+        """Scout signal zonder detected_at wordt als vers behandeld (fail-open)."""
+        ant = make_ant(logs_root=tmp_path)
+        write_scout_signal(tmp_path / "scouts")  # geen detected_at
+        ant._tick()
+        assert len(ant._ledger.open_positions) == 1
+
+    def test_stale_research_candidate_not_processed(self, tmp_path: Path) -> None:
+        """Research kandidaat met timestamp > 5 min oud wordt niet verwerkt."""
+        ant = make_ant(logs_root=tmp_path)
+        stale_ts = (datetime.now(tz=timezone.utc) - timedelta(minutes=10)).isoformat()
+        cid = write_research_candidate(tmp_path / "research", timestamp=stale_ts)
+        ant._tick()
+        assert len(ant._ledger.open_positions) == 0
+        assert cid in ant._seen_research_ids  # wel als gezien gemarkeerd
+
+    def test_fresh_research_candidate_processed(self, tmp_path: Path) -> None:
+        """Research kandidaat met recent timestamp wordt wel verwerkt."""
+        ant = make_ant(logs_root=tmp_path)
+        fresh_ts = (datetime.now(tz=timezone.utc) - timedelta(seconds=30)).isoformat()
+        write_research_candidate(tmp_path / "research", timestamp=fresh_ts)
+        ant._tick()
+        assert len(ant._ledger.open_positions) == 1
+
+    def test_research_candidate_no_timestamp_treated_as_fresh(self, tmp_path: Path) -> None:
+        """Research kandidaat zonder timestamp wordt als vers behandeld (fail-open)."""
+        ant = make_ant(logs_root=tmp_path)
+        write_research_candidate(tmp_path / "research")  # geen timestamp
+        ant._tick()
+        assert len(ant._ledger.open_positions) == 1
+
+    def test_try_open_position_uses_live_price_not_signal_price(self, tmp_path: Path) -> None:
+        """Positie wordt geopend op live marktprijs, niet op de prijs uit het signaal."""
+        live_price = 50_000.0
+        ant = make_ant(logs_root=tmp_path)
+        ant.biome_registry.get.return_value = _make_adapter_with_price(live_price)
+        write_scout_signal(tmp_path / "scouts", price=99_999.0)  # signal prijs genegeerd
+        ant._tick()
+        assert len(ant._ledger.open_positions) == 1
+        pos = ant._ledger.open_positions[0]
+        assert abs(pos.entry_price - live_price) < 0.01
+
+    def test_no_live_price_blocks_scout_entry(self, tmp_path: Path) -> None:
+        """Geen live prijs beschikbaar → geen positie geopend."""
+        ant = make_ant(logs_root=tmp_path)
+        ant.biome_registry.get.return_value = None
+        write_scout_signal(tmp_path / "scouts")
+        ant._tick()
+        assert len(ant._ledger.open_positions) == 0
+
+    def test_no_live_price_blocks_research_entry(self, tmp_path: Path) -> None:
+        """Geen live prijs voor research kandidaat → geen positie geopend."""
+        ant = make_ant(logs_root=tmp_path)
+        ant.biome_registry.get.return_value = None
+        write_research_candidate(tmp_path / "research")
+        ant._tick()
+        assert len(ant._ledger.open_positions) == 0
+
+    def test_sl_tp_based_on_live_price(self, tmp_path: Path) -> None:
+        """SL en TP worden berekend op basis van live prijs, niet signal prijs."""
+        live_price = 50_000.0
+        ant = make_ant(logs_root=tmp_path)
+        ant.biome_registry.get.return_value = _make_adapter_with_price(live_price)
+        write_scout_signal(tmp_path / "scouts", price=99_999.0)
+        ant._tick()
+        pos = ant._ledger.open_positions[0]
+        from ant_colony.ants.paper_ant import _SL_PCT, _TP_PCT
+        assert abs(pos.stop_loss_price - live_price * (1.0 - _SL_PCT)) < 0.01
+        assert abs(pos.take_profit_price - live_price * (1.0 + _TP_PCT)) < 0.01
