@@ -358,18 +358,13 @@ class ResearchAnt:
         )
 
         all_files = sorted(ingestion_dir.glob("*.jsonl"))
-        self._log.info(
-            "research — tick debug | ingestion_path=%s files=%d candidates_new=? candidates_seen=%d",
-            ingestion_dir, len(all_files), len(self._seen_ingestion_ids),
-        )
 
         new_count = 0
+        seen_count = 0
         for path in all_files:
             try:
                 lines = [l for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
-                self._log.info(
-                    "research — tick debug | bestand=%s regels=%d", path.name, len(lines)
-                )
+                self._log.debug("research — ingestion | bestand=%s regels=%d", path.name, len(lines))
                 candidates_in_file = 0
                 for line in lines:
                     try:
@@ -387,13 +382,14 @@ class ResearchAnt:
                     candidates_in_file += 1
                     candidate_id = str(payload.get("candidate_id") or "")
                     if not candidate_id:
-                        self._log.info(
+                        self._log.debug(
                             "Ingestion record zonder candidate_id overgeslagen in %s", path.name
                         )
                         continue
 
                     if candidate_id in self._seen_ingestion_ids:
-                        self._log.info(
+                        seen_count += 1
+                        self._log.debug(
                             "Ingestion kandidaat al verwerkt — overgeslagen | id=%s",
                             candidate_id[:16],
                         )
@@ -408,16 +404,16 @@ class ResearchAnt:
                     new_count += 1
                     self._backtest_ingested_candidate(candidate_id, payload, biome_id, timeframe)
 
-                self._log.info(
-                    "research — tick debug | bestand=%s kandidaten_na_filter=%d",
+                self._log.debug(
+                    "research — ingestion | bestand=%s kandidaten=%d",
                     path.name, candidates_in_file,
                 )
             except OSError:
                 self._log.warning("Kan ingestion-log niet lezen: %s", path)
 
         self._log.info(
-            "research — tick debug | ingestion_path=%s files=%d candidates_new=%d candidates_seen=%d",
-            ingestion_dir, len(all_files), new_count, len(self._seen_ingestion_ids),
+            "research tick | files=%d nieuw=%d verwerkt=%d",
+            len(all_files), new_count, seen_count,
         )
 
     def _backtest_ingested_candidate(
