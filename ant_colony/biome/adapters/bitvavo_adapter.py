@@ -164,7 +164,9 @@ class BitvavoAdapter:
 
             # Bitvavo geeft een dict terug bij een API-fout ({"errorCode": ..., "error": ...})
             if not candles or isinstance(candles, dict):
-                log.warning(
+                # Niet-crypto symbolen (geen "-" in naam) loggen op DEBUG om spam te voorkomen.
+                _log_fn = log.debug if "-" not in symbol else log.warning
+                _log_fn(
                     "BitvavoAdapter.get_market_data: geen data voor %s/%s — %r",
                     symbol, timeframe, candles,
                 )

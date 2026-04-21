@@ -1205,3 +1205,75 @@ class TestZombiePositionDetection:
         )
         ant = make_ant(logs_root=tmp_path)
         assert ("ETH-EUR", "rsi_oversold") in ant._open_research_keys
+
+
+# ---------------------------------------------------------------------------
+# Biome-filter in _read_new_scout_signals
+# ---------------------------------------------------------------------------
+
+class TestScoutSignalBiomeFilter:
+    def test_equities_signaal_overgeslagen_door_crypto_ant(self, tmp_path: Path) -> None:
+        """Equities-signaal (biome='equities') wordt genegeerd door crypto PaperAnt."""
+        scout_dir = tmp_path / "scouts"
+        write_scout_signal(scout_dir, symbol="XLK", biome="equities", filename="eq_scout.jsonl")
+
+        ant = make_ant(logs_root=tmp_path)
+        signals = ant._read_new_scout_signals()
+        assert signals == []
+
+    def test_crypto_signaal_verwerkt_door_crypto_ant(self, tmp_path: Path) -> None:
+        """Crypto-signaal (biome='crypto') wordt wél verwerkt door crypto PaperAnt."""
+        scout_dir = tmp_path / "scouts"
+        write_scout_signal(scout_dir, symbol=_SYMBOL, biome="crypto", filename="crypto_scout.jsonl")
+
+        ant = make_ant(logs_root=tmp_path)
+        signals = ant._read_new_scout_signals()
+        assert len(signals) == 1
+        assert signals[0]["symbol"] == _SYMBOL
+
+    def test_signaal_zonder_biome_veld_wordt_verwerkt(self, tmp_path: Path) -> None:
+        """Signaal zonder biome-veld → fail-open: wél verwerken (backwards-compat)."""
+        scout_dir = tmp_path / "scouts"
+        sid = str(uuid.uuid4())
+        scout_dir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "action": "opportunity_detected",
+            "signal_id": sid,
+            "symbol": _SYMBOL,
+            "current_price": _PRICE,
+            "confidence": 0.8,
+            "change_pct": 0.05,
+            # biome veld bewust weggelaten
+        }
+        (scout_dir / "old_scout.jsonl").write_text(
+            json.dumps({"event_type": "action_executed", "payload": payload}) + "\n"
+        )
+
+        ant = make_ant(logs_root=tmp_path)
+        signals = ant._read_new_scout_signals()
+        assert len(signals) == 1
+
+    def test_gemengde_signalen_worden_gefilterd(self, tmp_path: Path) -> None:
+        """Scout-dir met zowel crypto als equities signalen: alleen crypto wordt teruggegeven."""
+        scout_dir = tmp_path / "scouts"
+        write_scout_signal(scout_dir, symbol=_SYMBOL,  biome="crypto",   filename="crypto.jsonl")
+        write_scout_signal(scout_dir, symbol="XLK",    biome="equities", filename="eq.jsonl")
+        write_scout_signal(scout_dir, symbol="ETH-EUR", biome="crypto",  filename="eth.jsonl")
+
+        ant = make_ant(logs_root=tmp_path)
+        signals = ant._read_new_scout_signals()
+        symbols = {s["symbol"] for s in signals}
+        assert symbols == {_SYMBOL, "ETH-EUR"}
+        assert "XLK" not in symbols
+
+    def test_cross_biome_signaal_deduplicatie_werkt(self, tmp_path: Path) -> None:
+        """Overgeslagen equities-signalen worden opgeslagen in _processed_signals zodat
+        ze bij volgende tick niet opnieuw worden aangeboden."""
+        scout_dir = tmp_path / "scouts"
+        sid = write_scout_signal(scout_dir, symbol="XLK", biome="equities")
+
+        ant = make_ant(logs_root=tmp_path)
+        ant._read_new_scout_signals()
+
+        # Na eerste read: signal_id staat in _processed_signals
+        assert sid in ant._processed_signals

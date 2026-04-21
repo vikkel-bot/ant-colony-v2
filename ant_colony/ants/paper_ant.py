@@ -802,6 +802,13 @@ class PaperAnt:
                     if signal_id in self._processed_signals:
                         continue
 
+                    # Sla cross-biome signalen over (bijv. equities-signalen in
+                    # een crypto PaperAnt). Fail-open: geen biome veld → accepteren.
+                    signal_biome = payload.get("biome")
+                    if signal_biome and signal_biome != self.mission.market_scope.biome:
+                        self._processed_signals.add(signal_id)
+                        continue
+
                     self._processed_signals.add(signal_id)
 
                     if self._is_stale_timestamp(payload.get("detected_at")):
