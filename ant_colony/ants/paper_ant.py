@@ -60,6 +60,7 @@ _TP_PCT  = 0.03                  # 3% take-profit boven entry
 _SIGNAL_VALIDITY_TICKS = 2       # signal geldig voor heartbeat_interval × 2 seconden
 _MAX_OPEN_POSITIONS    = 3       # maximaal 3 open posities tegelijk (1 per symbool)
 _STALE_SIGNAL_MINUTES  = 5       # signalen ouder dan dit worden genegeerd
+_ZOMBIE_POSITION_HOURS = 24      # posities zonder close ouder dan dit → zombie
 
 
 class PaperAnt:
@@ -268,6 +269,16 @@ class PaperAnt:
         except (ValueError, TypeError):
             return False
 
+    def _is_zombie_position(self, ts_str: str, now: datetime) -> bool:
+        """True als een ongesloten positie ouder is dan _ZOMBIE_POSITION_HOURS. Geen timestamp → False (fail-open)."""
+        if not ts_str:
+            return False
+        try:
+            ts = datetime.fromisoformat(str(ts_str).replace("Z", "+00:00"))
+            return (now - ts).total_seconds() > _ZOMBIE_POSITION_HOURS * 3600
+        except (ValueError, TypeError):
+            return False
+
     def _process_new_signals(self) -> None:
         """Verwerk nieuwe scout-signalen en open posities indien van toepassing."""
         if not self._is_trading_allowed():
@@ -325,7 +336,8 @@ class PaperAnt:
         if not paper_dir.exists():
             return set()
 
-        opened: dict[str, str] = {}   # position_id → symbol
+        opened: dict[str, str] = {}       # position_id → symbol
+        opened_ts: dict[str, str] = {}    # position_id → timestamp str
         closed_ids: set[str] = set()
 
         for path in paper_dir.glob("*.jsonl"):
@@ -348,12 +360,26 @@ class PaperAnt:
                         sym = str(payload.get("symbol") or "")
                         if sym:
                             opened[pos_id] = sym
+                            opened_ts[pos_id] = str(record.get("timestamp") or "")
                     elif action == "trade_closed":
                         closed_ids.add(pos_id)
             except OSError:
                 pass
 
-        return {sym for pid, sym in opened.items() if pid not in closed_ids}
+        result: set[str] = set()
+        now = datetime.now(tz=timezone.utc)
+        for pid, sym in opened.items():
+            if pid in closed_ids:
+                continue
+            ts_str = opened_ts.get(pid, "")
+            if self._is_zombie_position(ts_str, now):
+                self._log.info(
+                    "Zombie positie genegeerd bij herstel: symbol=%s position_id=%s ts=%s",
+                    sym, pid, ts_str,
+                )
+                continue
+            result.add(sym)
+        return result
 
     def _load_research_keys_from_logs(
         self,
@@ -372,7 +398,8 @@ class PaperAnt:
         if not paper_dir.exists():
             return keys, pos_map
 
-        opened: dict[str, tuple[str, str]] = {}  # pos_id → (symbol, strategy_type)
+        opened: dict[str, tuple[str, str]] = {}    # pos_id → (symbol, strategy_type)
+        opened_ts: dict[str, str] = {}              # pos_id → timestamp str
         closed_ids: set[str] = set()
 
         for path in paper_dir.glob("*.jsonl"):
@@ -396,15 +423,25 @@ class PaperAnt:
                         sym = str(payload.get("symbol") or "")
                         if sym:
                             opened[pos_id] = (sym, st)
+                            opened_ts[pos_id] = str(record.get("timestamp") or "")
                     elif action == "trade_closed":
                         closed_ids.add(pos_id)
             except OSError:
                 pass
 
+        now = datetime.now(tz=timezone.utc)
         for pid, key in opened.items():
-            if pid not in closed_ids:
-                keys.add(key)
-                pos_map[pid] = key
+            if pid in closed_ids:
+                continue
+            ts_str = opened_ts.get(pid, "")
+            if self._is_zombie_position(ts_str, now):
+                self._log.info(
+                    "Zombie research positie genegeerd bij herstel: key=%s position_id=%s ts=%s",
+                    key, pid, ts_str,
+                )
+                continue
+            keys.add(key)
+            pos_map[pid] = key
 
         return keys, pos_map
 
