@@ -1150,6 +1150,7 @@ def main() -> None:
             from ant_colony.ants.equities.dividend_scout_ant import DividendScoutAnt
             from ant_colony.ants.equities.piotroski_ant import PiotroskiAnt
             from ant_colony.ants.equities.breakout_ant import BreakoutAnt
+            from ant_colony.ants.equities.rs_regime_ant import RSRegimeAnt
             from ant_colony.biome.adapters.ibkr_adapter import IBKRAdapter
             from ant_colony.biome.adapters.yahoo_finance_adapter import YahooFinanceAdapter
             from ant_colony.biome.biome_registry import BiomeRegistry
@@ -1260,6 +1261,24 @@ def main() -> None:
                         description="Bevestig 52-weeks high breakout en emitteer entry-signalen.",
                     ),
                 ),
+                Mission(
+                    mission_id=f"rs-regime-{_ts_eq}",
+                    ant_type="rs_regime_ant",
+                    allowed_node=args.node_id,
+                    allowed_actions=["read_data", "report"],
+                    market_scope=MarketScope(
+                        biome="equities",
+                        symbols=["QQQ", "XLV", "XLP", "XLU", "XLE", "GLD"],
+                    ),
+                    capital_limit=0.0,
+                    risk_limits=_obs_risk_eq,
+                    ttl=86400,
+                    heartbeat_interval=3600,
+                    success_conditions=SuccessConditions(
+                        description="Classificeer marktregime op basis van QQQ vs defensive basket "
+                                    "en schrijf RegimeSignal naar ANT_LOGS/rs_regime/.",
+                    ),
+                ),
             ]
 
             _eq_ant_classes = {
@@ -1268,6 +1287,7 @@ def main() -> None:
                 "dividend_scout_ant": (DividendScoutAnt, {"biome_registry": _eq_registry}),
                 "piotroski_ant":      (PiotroskiAnt,     {"biome_registry": _eq_registry}),
                 "breakout_ant":       (BreakoutAnt,      {"biome_registry": _eq_registry}),
+                "rs_regime_ant":      (RSRegimeAnt,      {"biome_registry": _eq_registry}),
             }
 
             for eq_mission in _eq_missions:
