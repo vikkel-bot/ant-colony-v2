@@ -46,7 +46,7 @@ from ant_colony.schemas.strategy_candidate import (
     StrategyCandidate,
 )
 
-_MIN_CANDLES        = 52    # SMA50 + 2 bars voor crossover detectie (backtester log-waarschuwing bij <200)
+_MIN_CANDLES        = 200   # backtester vereist ≥200 bars voor betrouwbare walk-forward resultaten
 _CANDLE_LIMIT       = 500   # candles ophalen per symbool per tick (verhoogd voor betrouwbaardere backtests)
 _SHARPE_THRESHOLD   = 0.15
 _WIN_RATE_THRESHOLD = 0.45

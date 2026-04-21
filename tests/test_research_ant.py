@@ -189,37 +189,36 @@ def log_path(tmp_path: Path, ant: ResearchAnt) -> Path:
 # - closes[31..49] = 70.0 (19 bars nog lager → SMA20 zakt)
 # - closes[50..51] = 200.0 (2 bars spike → SMA20 schiet omhoog, kruist SMA50)
 # Verificatie: sma20[-2]=76.5 < sma50[-2]=78.6 ; sma20[-1]=83.0 > sma50[-1]=81.0
-GOLDEN_CROSS_CLOSES = [80.0] * 31 + [70.0] * 19 + [200.0] * 2  # 52 bars
+GOLDEN_CROSS_CLOSES = [80.0] * 179 + [70.0] * 19 + [200.0] * 2  # 200 bars
+# Verificatie (identiek aan 52-bar versie): sma20[-2]=76.5 < sma50[-2]=78.6 ;
+# sma20[-1]=83.0 > sma50[-1]=81.0
 
 # Death cross: SMA20 kruist onder SMA50
-# - closes[0..44] = 120.0 (45 bars hoog → SMA50 hoog)
-# - closes[45..49] = 140.0 (5 bars hoger → SMA20 tijdelijk boven)
-# - closes[50..51] = 30.0  (2 bars crash → SMA20 zakt door SMA50)
+DEATH_CROSS_CLOSES = [120.0] * 193 + [140.0] * 5 + [30.0] * 2  # 200 bars
 # Verificatie: sma20[-2]=120.5 > sma50[-2]=120.2 ; sma20[-1]=116.0 < sma50[-1]=118.4
-DEATH_CROSS_CLOSES = [120.0] * 45 + [140.0] * 5 + [30.0] * 2  # 52 bars
 
-# RSI oversold: 38 neutrale bars + 14 dalende bars (elke stap -5)
+# RSI oversold: 186 neutrale bars + 14 dalende bars (elke stap -5)
 # RSI = 0.0 (alle deltas negatief) → ruim onder 30
-RSI_OVERSOLD_CLOSES = [100.0] * 38 + [float(100 - 5 * i) for i in range(14)]  # 52 bars
+RSI_OVERSOLD_CLOSES = [100.0] * 186 + [float(100 - 5 * i) for i in range(14)]  # 200 bars
 
-# RSI overbought: 38 neutrale bars + 14 stijgende bars (elke stap +5)
+# RSI overbought: 186 neutrale bars + 14 stijgende bars (elke stap +5)
 # RSI = 100.0 (alle deltas positief) → ruim boven 70
-RSI_OVERBOUGHT_CLOSES = [100.0] * 38 + [float(100 + 5 * i) for i in range(14)]  # 52 bars
+RSI_OVERBOUGHT_CLOSES = [100.0] * 186 + [float(100 + 5 * i) for i in range(14)]  # 200 bars
 
-# Bollinger onderband touch: 51 stabiele bars + 1 crash naar 70
-# mean≈98.5, std≈6.5, lower≈85.4 → 70 < lower ✓
-BB_LOWER_CLOSES = [100.0] * 51 + [70.0]  # 52 bars
+# Bollinger onderband touch: 199 stabiele bars + 1 crash naar 70
+# mean≈99.85, std≈2.1, lower≈95.6 → 70 < lower ✓
+BB_LOWER_CLOSES = [100.0] * 199 + [70.0]  # 200 bars
 
-# Bollinger bovenband touch: 51 stabiele bars + 1 spike naar 130
-# mean≈101.5, std≈6.5, upper≈114.6 → 130 > upper ✓
-BB_UPPER_CLOSES = [100.0] * 51 + [130.0]  # 52 bars
+# Bollinger bovenband touch: 199 stabiele bars + 1 spike naar 130
+# mean≈100.15, std≈2.1, upper≈104.4 → 130 > upper ✓
+BB_UPPER_CLOSES = [100.0] * 199 + [130.0]  # 200 bars
 
-# Neutraal: 52 bars op constante prijs → geen SMA crossover
-FLAT_CLOSES = [100.0] * 52
+# Neutraal: 200 bars op constante prijs → geen SMA crossover
+FLAT_CLOSES = [100.0] * 200
 
 # Neutraal alternererend: RSI ≈ 50, prijs middenin Bollinger bands
 # 101/99 afwisselend → mean=100, std=1, upper=102, lower=98, RSI≈50
-NEUTRAL_CLOSES = [101.0 if i % 2 == 0 else 99.0 for i in range(52)]
+NEUTRAL_CLOSES = [101.0 if i % 2 == 0 else 99.0 for i in range(200)]
 
 
 # ---------------------------------------------------------------------------
@@ -532,7 +531,7 @@ class TestThresholdFilter:
 
 class TestDataValidation:
     def test_too_few_candles_tick_skipped(self, tmp_path):
-        """Scenario 11: < 52 candles → _tick slaat symbool over, geen crash."""
+        """Scenario 11: < 200 candles → _tick slaat symbool over, geen crash."""
         short_closes = [100.0] * (_MIN_CANDLES - 1)  # één te weinig
         candles = make_candles(short_closes)
         registry = make_registry(candles=candles)

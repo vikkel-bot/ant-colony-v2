@@ -71,7 +71,7 @@ def make_mission(symbols: list[str] | None = None) -> Mission:
     )
 
 
-def make_candles(n: int = 100) -> list[MarketData]:
+def make_candles(n: int = 200) -> list[MarketData]:
     base = datetime(2024, 1, 1, tzinfo=timezone.utc)
     return [
         MarketData(
