@@ -241,16 +241,25 @@ class PaperAnt:
     # Signaalverwerking en entry
     # ------------------------------------------------------------------
 
+    def _is_trading_allowed(self) -> bool:
+        """True als de TimeFilterAnt trading toestaat (of niet actief is)."""
+        if self.logs_root is None:
+            return True
+        sig = read_latest_time_signal(self.logs_root)
+        if sig is None:
+            return True  # filter niet actief → fail-open
+        allowed = sig.get("trade_allowed", True)
+        if not allowed:
+            self._log.debug(
+                "Nieuwe posities gepauzeerd — buiten kill zone: session=%s",
+                sig.get("session", "unknown"),
+            )
+        return allowed
+
     def _process_new_signals(self) -> None:
         """Verwerk nieuwe scout-signalen en open posities indien van toepassing."""
-        if self.logs_root is not None:
-            tf_sig = read_latest_time_signal(self.logs_root)
-            if tf_sig is not None and not tf_sig.get("trade_allowed", True):
-                self._log.debug(
-                    "Nieuwe posities gepauzeerd — buiten kill zone: session=%s",
-                    tf_sig.get("session", "unknown"),
-                )
-                return
+        if not self._is_trading_allowed():
+            return
 
         signals = self._read_new_scout_signals()
         for sig in signals:
@@ -425,6 +434,8 @@ class PaperAnt:
 
     def _process_research_candidates(self) -> None:
         """Verwerk ACCEPTED StrategyCandidate records uit ANT_LOGS/research/*.jsonl."""
+        if not self._is_trading_allowed():
+            return
         if self.logs_root is None:
             return
         research_dir = self.logs_root / "research"
@@ -608,6 +619,8 @@ class PaperAnt:
 
     def _process_approved_candidates(self) -> None:
         """Verwerk APPROVED StrategyCandidate records uit ANT_LOGS/approved/*.jsonl."""
+        if not self._is_trading_allowed():
+            return
         if self.logs_root is None:
             return
 

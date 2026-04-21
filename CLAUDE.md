@@ -12,6 +12,7 @@ strategieën ontdekt, valideert en gecontroleerd inzet over meerdere markten.
 
 - Repo: https://github.com/vikkel-bot/ant-colony-v2
 - Taal: Python (tenzij anders aangegeven)
+- Tests: `python -m pytest tests/ -q` — altijd groen houden
 
 ---
 
@@ -31,6 +32,7 @@ strategieën ontdekt, valideert en gecontroleerd inzet over meerdere markten.
   - `C:\Trading\ANT_LIVE` — live execution artifacts
   - `C:\Trading\ANT_LOGS` — append-only logs
 - **Deployment:** automatische `git pull` + herstart bij nieuwe commit op `main`
+- **Toegang:** via AnyDesk (desktop) en Tailscale (dashboard op localhost:8000)
 - **Wat hier NIET draait:** development tools, Claude Code, editors
 
 ### Deployment flow
@@ -112,7 +114,8 @@ Deze modules zijn production-proven en verwerken echte live orders.
 
 ### Ant (agent)
 - Task-bound, TTL, budget, rapporteert aan Queen
-- Types: `scout_ant`, `research_ant`, `paper_ant`, `execution_ant`, `audit_ant`
+- Types: `scout_ant`, `research_ant`, `paper_ant`, `execution_ant`, `audit_ant`,
+  `time_filter_ant`, `ingestion_ant`, `strategy_ant`, `operator_ant`, `claude_ant`
 - Mag zelfstandig: kansen ontdekken, strategieën vinden, backtesten, paper traden
 - Mag NOOIT zelfstandig: live gaan, kapitaallimieten verhogen, eigen policies aanpassen
 
@@ -122,7 +125,9 @@ Bevat: `mission_id`, `ant_type`, `allowed_node`, `allowed_actions`,
 `success_conditions`, `abort_conditions`
 
 ### Biome
-- crypto, equities, commodities
+- crypto (operationeel via Bitvavo)
+- equities (in bouw via IBKR / Yahoo Finance)
+- commodities (gepland)
 - Per biome: market universe, data adapter interface, risk profiel, execution constraints
 
 ### StrategyCandidate
@@ -155,17 +160,70 @@ Bevat: `mission_id`, `ant_type`, `allowed_node`, `allowed_actions`,
 
 ---
 
+## TimeFilterAnt — ICT Kill Zone logica
+
+Kill Zones (UTC):
+
+| Window | Sessie | Trade toegestaan |
+|--------|--------|-----------------|
+| 02:00 – 05:00 | London Kill Zone | ✅ JA |
+| 13:30 – 15:00 | NY AM Kill Zone | ✅ JA |
+| 15:00 – 16:00 | NY PM | ❌ NEE |
+| 19:00 – 24:00 | Asian Session | ❌ NEE |
+| overig | Neutral | ❌ NEE |
+
+**Gedragsregel voor alle ants:**
+- `read_latest_time_signal()` retourneert `None` als TimeFilterAnt niet actief is
+- Bij `None` → `trade_allowed = True` (fail-open: filter niet actief = geen blokkade)
+- Bij `trade_allowed = False` → blokkeer alle nieuwe entries (scout + research + approved)
+- Exits worden nooit geblokkeerd door de time filter (P3: exit altijd eerst)
+- Alle drie entry-paden in PaperAnt moeten de time filter respecteren:
+  `_process_new_signals()`, `_process_research_candidates()`, `_process_approved_candidates()`
+
+---
+
 ## Exchanges en biomes
 
 | Biome | Exchange | Status |
 |-------|----------|--------|
-| Crypto | Bitvavo | v1 bewezen — primary |
+| Crypto | Bitvavo | v1 bewezen — primary, live op PC2 |
 | Crypto | Binance / Kraken | v2 backup |
-| Equities | Interactive Brokers | v2 target |
+| Equities | Interactive Brokers | in bouw |
+| Equities | Yahoo Finance | data source (gratis) |
 | Commodities | Saxo Bank | v2 target |
 
 Architectuur: één adapter interface per biome.
 Queen weet niet welke exchange — alleen welk biome en risicoprofiel.
+
+---
+
+## Huidige staat van de colony (PC2)
+
+Colony draait live op PC2 — dashboard bereikbaar via Tailscale op localhost:8000.
+
+**Actieve ants (9 missions):**
+- ScoutAnt — detecteert price_move en volume_spike signalen
+- ResearchAnt — genereert StrategyCandidate objecten (SMA crossover, RSI, Bollinger)
+- PaperAnt — paper trades op basis van scout + research kandidaten
+- AuditAnt — monitort systeemgezondheid
+- IngestionAnt — ingesteert GitHub repos (45+ per dag)
+- StrategyAnt — genereert strategy varianten
+- ExecutionAnt — actief maar nog geen live orders
+- OperatorAnt — verwerkt operator input via Claude Vision
+- ClaudeAnt — AI-gestuurde analyse (€10/maand budget)
+- TimeFilterAnt — ICT Kill Zone filter
+
+**Bekende issues:**
+- PaperAnt opent geen posities buiten kill zones (correct gedrag)
+- PaperAnt time filter wordt inconsistent toegepast: `_process_new_signals()` respecteert
+  de filter, maar `_process_research_candidates()` en `_process_approved_candidates()` niet
+- Dit is de prioritaire fix voor de volgende sessie
+
+**Dashboard staat (laatste snapshot):**
+- Totaal kapitaal: €1.591 | Beschikbaar op Bitvavo: €80,64
+- Regime: SIDEWAYS
+- Top strategieën: momentum (ETH-EUR, Sharpe 0.29), hybrid (BTC-EUR, Sharpe 0.29)
+- Colony v1: heartbeat rood (verwacht — v1 draait als apart process)
 
 ---
 
@@ -177,6 +235,7 @@ Queen weet niet welke exchange — alleen welk biome en risicoprofiel.
 4. **Werk stap voor stap** — één deliverable per keer, dan stoppen en wachten
 5. **Kies altijd de simpelste veilige oplossing** bij twijfel
 6. **Elke stap moet**: uitlegbaar zijn, testbaar zijn, veilig zijn, passen binnen bestaande structuur
+7. **Tests draaien na elke wijziging** — `python -m pytest tests/ -q` moet groen blijven
 
 **Na elke deliverable: stop, toon output, wacht op bevestiging.**
 
@@ -184,35 +243,70 @@ Queen weet niet welke exchange — alleen welk biome en risicoprofiel.
 
 ## Faseoverzicht
 
-| Fase | Doel | Gate |
-|------|------|------|
-| 0 | Doctrine + schemas + scheduler skeleton | Doctrine goedgekeurd |
-| 1 | Exit-keten validatie harness | EXIT_KETEN_VOLLEDIG_CORRECT |
-| 2 | Entry + volledige loop, paper only | 50+ paper trades bewezen |
-| 3 | Queen governance + mission + kill-switch | Kill-switch bewezen in simulatie |
-| 4 | Strategy Lab (research only) | Na bewezen live loop |
-| 5 | Multi-biome scaffolding | Na single-market paper bewijs |
-| 6 | Queen allocator upgrade | Na multi-biome paper bewijs |
-| 7 | Paper-mode multi-node simulatie | Volledig bewezen paper kolonie |
-| 8 | Guarded live adapters | Alleen na volledige paper proof |
+| Fase | Doel | Tests | Status |
+|------|------|-------|--------|
+| 0 | Doctrine + schemas + scheduler skeleton | 73 | ✅ bewezen |
+| 1 | Exit-keten validatie harness | 147 | ✅ bewezen |
+| 2 | Entry + volledige loop, paper only | 210 | ✅ bewezen |
+| 3 | Queen governance + mission + kill-switch | 241 | ✅ bewezen |
+| 4 | Strategy Lab (research only) | 286 | ✅ bewezen |
+| 5 | Multi-biome scaffolding | 354 | ✅ bewezen |
+| 6 | Queen allocator upgrade | 403 | ✅ bewezen |
+| 7 | Paper-mode multi-node simulatie | 487 | ✅ bewezen |
+| 8 | Guarded live adapters | 543 | ✅ bewezen |
+| 9 | Colony Dashboard | 591 | ✅ bewezen |
+| 10 | Live op PC2 — Bitvavo + equities biome | 1757 | 🔄 actief |
 
 ---
 
-## Huidige fase
+## FASE 10 — actief
 
-**FASE 0 — actief**
+Doel: Colony draait live op PC2. Bitvavo adapter operationeel.
+Equities biome in bouw. Paper trading actief maar nog geen trades door kill zone filter.
 
-Deliverables:
-- [ ] `docs/ANT_COLONY_V2_DOCTRINE.md`
-- [ ] `docs/COLONY_OBJECT_MODEL.md`
-- [ ] `docs/COLONY_GOVERNANCE.md`
-- [ ] `ant_colony/schemas/` (alle schema bestanden)
-- [ ] `ant_colony/colony/scheduler/colony_scheduler.py` (skeleton)
-- [ ] `tests/test_schemas.py`
-- [ ] `tests/test_mission_validation.py`
-- [ ] `tests/test_scheduler_tick.py`
+**Huidige prioriteit: PaperAnt time filter fix**
+
+Probleem: `_process_research_candidates()` en `_process_approved_candidates()` in
+`paper_ant.py` respecteren de TimeFilterAnt niet. Alleen `_process_new_signals()` doet dat.
+
+Fix: extraheer de time filter check naar een helper `_is_trading_allowed() -> bool` en
+roep deze aan aan het begin van alle drie entry-methoden. Exits blijven ongemoeid.
+
+```python
+def _is_trading_allowed(self) -> bool:
+    """True als de TimeFilterAnt trading toestaat (of niet actief is)."""
+    if self.logs_root is None:
+        return True
+    sig = read_latest_time_signal(self.logs_root)
+    if sig is None:
+        return True  # filter niet actief → fail-open
+    return sig.get("trade_allowed", True)
+```
+
+**Equities biome (in bouw):**
+- Yahoo Finance adapter (data) + IBKR adapter (execution)
+- Setup 1: Sector Rotatie (SectorScoutAnt, MomentumRankAnt, RotationAnt)
+- Setup 2: Fundamenteel + Technisch (FundamentalAnt, PiotroskiAnt, BreakoutAnt)
+- Setup 3: Defensief Dividend (DividendScoutAnt, VolatilityAnt, RebalanceAnt)
+- Gate voor live: 30 handelsdagen paper, Sharpe > 0.5, max drawdown < 25%
+
+---
+
+## Environment variabelen
+
+```
+# Bitvavo
+BITVAVO_API_KEY=...
+BITVAVO_API_SECRET=...
+BITVAVO_PAPER_MODE=true
+
+# Claude Ant (opt-in, default uitgeschakeld)
+ANTHROPIC_API_KEY=...
+CLAUDE_ANT_ENABLED=false
+CLAUDE_ANT_MONTHLY_BUDGET_EUR=10.00
+```
 
 ---
 
 *Dit bestand bijhouden bij elke fase-overgang.*
-*Laatste update: Fase 0 start — infrastructuur PC1/PC2 toegevoegd*
+*Laatste update: 2026-04-21 — Time filter fix toegevoegd, colony staat bijgewerkt, startprompt sectie verwijderd (staat in chat AC2-ch2)*
