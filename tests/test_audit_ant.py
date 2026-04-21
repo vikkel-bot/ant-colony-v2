@@ -751,6 +751,82 @@ class TestSequenceGapDeduplicatieEn24uFilter:
         gap_findings = [f for f in findings if f.check_name == "sequence_gap"]
         assert len(gap_findings) == 1
 
+
+# ---------------------------------------------------------------------------
+# 30–34  Gap-state persistentie over sessies
+# ---------------------------------------------------------------------------
+
+class TestGapStatePersistentie:
+    def test_gap_persisteert_naar_disk(self, tmp_path):
+        """Scenario 30: Na eerste melding wordt gap geschreven naar reported_gaps.json."""
+        log_file = tmp_path / "paper" / "ant-paper.jsonl"
+        _write_jsonl_with_gap(log_file, [0, 1, 5, 6])
+
+        ant = make_ant(tmp_path)
+        ant._check_audit_trail_integrity()
+
+        state_path = tmp_path / "audit_state" / "reported_gaps.json"
+        assert state_path.exists()
+        data = json.loads(state_path.read_text())
+        assert isinstance(data, list)
+        assert len(data) >= 1
+
+    def test_gap_niet_opnieuw_na_herstart(self, tmp_path):
+        """Scenario 31: Na herstart van AuditAnt worden bestaande gaps niet opnieuw gemeld."""
+        log_file = tmp_path / "paper" / "ant-paper.jsonl"
+        _write_jsonl_with_gap(log_file, [0, 1, 5, 6])
+
+        # Eerste sessie: gap wordt gevonden en gepersisteerd
+        ant1 = make_ant(tmp_path)
+        findings1 = ant1._check_audit_trail_integrity()
+        assert len([f for f in findings1 if f.check_name == "sequence_gap"]) == 1
+
+        # Tweede sessie (nieuwe instantie = herstart): gap staat al in state
+        ant2 = make_ant(tmp_path)
+        findings2 = ant2._check_audit_trail_integrity()
+        assert len([f for f in findings2 if f.check_name == "sequence_gap"]) == 0
+
+    def test_nieuwe_gap_wel_gemeld_na_herstart(self, tmp_path):
+        """Scenario 32: Nieuwe gap in tweede sessie wordt wél gemeld."""
+        log_file = tmp_path / "paper" / "ant-paper.jsonl"
+        _write_jsonl_with_gap(log_file, [0, 1, 5, 6])
+
+        ant1 = make_ant(tmp_path)
+        ant1._check_audit_trail_integrity()
+
+        # Voeg tweede bestand met nieuwe gap toe
+        log_file2 = tmp_path / "scout" / "ant-scout.jsonl"
+        _write_jsonl_with_gap(log_file2, [0, 1, 10, 11])
+
+        ant2 = make_ant(tmp_path)
+        findings2 = ant2._check_audit_trail_integrity()
+        gap_findings = [f for f in findings2 if f.check_name == "sequence_gap"]
+        assert len(gap_findings) == 1  # alleen de nieuwe gap
+
+    def test_geen_state_file_bij_logs_root_none(self):
+        """Scenario 33: logs_root=None → geen crash, geen state file."""
+        mission = make_mission()
+        ant = AuditAnt(
+            ant_id="ant-audit-no-root",
+            mission=mission,
+            scheduler=MagicMock(),
+            biome_registry=BiomeRegistry(),
+            logs_root=None,
+        )
+        assert ant._gaps_state_path is None
+        findings = ant._check_audit_trail_integrity()
+        assert findings == []
+
+    def test_state_file_geladen_bij_init(self, tmp_path):
+        """Scenario 34: Bij init wordt bestaande state geladen, niet overschreven."""
+        state_path = tmp_path / "audit_state" / "reported_gaps.json"
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        pre_existing_key = "some/file.jsonl:3:7"
+        state_path.write_text(json.dumps([pre_existing_key]))
+
+        ant = make_ant(tmp_path)
+        assert pre_existing_key in ant._reported_gaps
+
     def test_no_crash_with_logs_root_none(self, tmp_path):
         """Scenario 23: logs_root=None → geen crash, geen bestand."""
         ant = AuditAnt(

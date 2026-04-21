@@ -96,7 +96,12 @@ class AuditAnt:
         self._budget_used: float = 0.0
         self._last_action: str = "init"
         self._log_seq: int = 0
-        self._reported_gaps: set[str] = set()
+
+        self._gaps_state_path: Path | None = (
+            logs_root / "audit_state" / "reported_gaps.json"
+            if logs_root is not None else None
+        )
+        self._reported_gaps: set[str] = self._load_reported_gaps()
 
         self._log = logging.getLogger(f"ant.audit.{ant_id[:8]}")
 
@@ -243,6 +248,35 @@ class AuditAnt:
             return []
 
     # ------------------------------------------------------------------
+    # Gap-state persistentie
+    # ------------------------------------------------------------------
+
+    def _load_reported_gaps(self) -> set[str]:
+        """Laad eerder gerapporteerde gap-keys van disk. Fail-open: retourneert lege set."""
+        if self._gaps_state_path is None or not self._gaps_state_path.exists():
+            return set()
+        try:
+            data = json.loads(self._gaps_state_path.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                return set(data)
+        except (OSError, json.JSONDecodeError):
+            pass
+        return set()
+
+    def _persist_gap(self, gap_key: str) -> None:
+        """Voeg een nieuwe gap-key toe aan de persistente state op disk."""
+        if self._gaps_state_path is None:
+            return
+        try:
+            self._gaps_state_path.parent.mkdir(parents=True, exist_ok=True)
+            self._gaps_state_path.write_text(
+                json.dumps(sorted(self._reported_gaps), indent=2),
+                encoding="utf-8",
+            )
+        except OSError:
+            self._log.warning("Kon gap-state niet persisteren: %s", self._gaps_state_path)
+
+    # ------------------------------------------------------------------
     # Check 2: Audit trail integriteit (sequence gaps)
     # ------------------------------------------------------------------
 
@@ -279,6 +313,7 @@ class AuditAnt:
                     if gap_key in self._reported_gaps:
                         continue
                     self._reported_gaps.add(gap_key)
+                    self._persist_gap(gap_key)
                     findings.append(AuditFinding(
                         severity="ANOMALY",
                         component="audit_trail",

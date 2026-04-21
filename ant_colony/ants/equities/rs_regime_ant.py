@@ -158,6 +158,11 @@ class RSRegimeAnt:
         logs_root:       Pad naar ANT_LOGS. None = geen disk-logging.
     """
 
+    # Tick elke 60s — regime-data (20d RS, SMA-50) verandert niet per seconde.
+    _TICK_INTERVAL: int = 60
+    # Log op INFO bij regime-change OF als qqq_vs_50d meer dan 2% verschilt.
+    _QQQ_LOG_THRESHOLD: float = 0.02
+
     def __init__(
         self,
         ant_id: str,
@@ -176,6 +181,10 @@ class RSRegimeAnt:
         self._log_seq: int     = 0
         self._status: AntStatus = AntStatus.IDLE
         self._last_action: str  = "init"
+
+        self._last_logged_regime: str | None   = None
+        self._last_logged_qqq:    float | None = None
+        self._last_tick_at:       float        = 0.0
 
         self._log = logging.getLogger(f"ant.rs_regime.{ant_id[:8]}")
 
@@ -206,7 +215,10 @@ class RSRegimeAnt:
                     self._status = AntStatus.COMPLETED
                     break
 
-                self._tick()
+                now_mono = time.monotonic()
+                if now_mono - self._last_tick_at >= self._TICK_INTERVAL:
+                    self._last_tick_at = now_mono
+                    self._tick()
 
                 time.sleep(1.0)
 
@@ -314,10 +326,23 @@ class RSRegimeAnt:
         self._emit_signal(payload)
         self._last_action = f"tick:regime={regime}"
 
-        self._log.info(
-            "RS Regime | regime=%s  qqq_vs_50d=%.3f  avg_def_rs=%.3f",
-            regime, qqq_vs_50d, avg_defensive_rs,
+        regime_changed = regime != self._last_logged_regime
+        qqq_moved = (
+            self._last_logged_qqq is None
+            or abs(qqq_vs_50d - self._last_logged_qqq) >= self._QQQ_LOG_THRESHOLD
         )
+        if regime_changed or qqq_moved:
+            self._log.info(
+                "RS Regime | regime=%s  qqq_vs_50d=%.3f  avg_def_rs=%.3f",
+                regime, qqq_vs_50d, avg_defensive_rs,
+            )
+            self._last_logged_regime = regime
+            self._last_logged_qqq    = qqq_vs_50d
+        else:
+            self._log.debug(
+                "RS Regime (onveranderd) | regime=%s  qqq_vs_50d=%.3f  avg_def_rs=%.3f",
+                regime, qqq_vs_50d, avg_defensive_rs,
+            )
         return payload
 
     def _fetch_closes(self, symbol: str, get_candles_fn) -> list[float] | None:

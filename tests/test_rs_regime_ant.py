@@ -21,6 +21,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+import logging
+
 from ant_colony.ants.equities.rs_regime_ant import (
     RSRegimeAnt,
     classify_regime,
@@ -270,3 +272,122 @@ class TestReadLatestRsRegime:
         (rs_dir / "ant.jsonl").write_text(json.dumps(noise) + "\n")
         result = read_latest_rs_regime(tmp_path)
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Log-throttling en tick-interval
+# ---------------------------------------------------------------------------
+
+def _make_stable_ant(logs_root, qqq_closes, def_closes):
+    adapter = _make_adapter(qqq_closes, def_closes)
+    return _make_ant(logs_root=logs_root, adapter=adapter)
+
+
+class TestRsRegimeLogThrottling:
+    """Verifieer INFO/DEBUG selectie op basis van regime-change en QQQ-beweging."""
+
+    def _tick_ant(self, qqq_closes, def_closes, logs_root=None):
+        return _make_stable_ant(logs_root, qqq_closes, def_closes)
+
+    def test_eerste_tick_altijd_info(self, tmp_path, caplog):
+        """Eerste tick: _last_logged_regime is None → altijd INFO."""
+        qqq = _build_closes(60, base=100.0)
+        defs = _build_closes(60, base=100.0)
+        defs[-1] = 90.0
+        ant = self._tick_ant(qqq, defs, tmp_path)
+
+        with caplog.at_level(logging.INFO, logger=f"ant.rs_regime.{ant.ant_id[:8]}"):
+            ant._tick()
+
+        info_records = [r for r in caplog.records if r.levelno == logging.INFO
+                        and "RS Regime" in r.message]
+        assert len(info_records) == 1
+
+    def test_zelfde_regime_tweede_tick_debug(self, tmp_path, caplog):
+        """Tweede tick met zelfde regime en stabiele QQQ → DEBUG, geen INFO."""
+        qqq = _build_closes(60, base=100.0)
+        defs = _build_closes(60, base=100.0)
+        defs[-1] = 90.0
+        ant = self._tick_ant(qqq, defs, tmp_path)
+
+        ant._tick()  # eerste tick → INFO + state opslaan
+        caplog.clear()
+
+        with caplog.at_level(logging.DEBUG, logger=f"ant.rs_regime.{ant.ant_id[:8]}"):
+            ant._tick()  # zelfde regime, QQQ niet veranderd → DEBUG
+
+        info_records = [r for r in caplog.records if r.levelno == logging.INFO
+                        and "RS Regime" in r.message]
+        assert len(info_records) == 0
+
+    def test_regime_change_triggert_info(self, tmp_path, caplog):
+        """Na regime-change altijd INFO, ook al is QQQ nauwelijks bewogen."""
+        qqq = _build_closes(60, base=100.0)
+        defs = _build_closes(60, base=100.0)
+        defs[-1] = 90.0
+        ant = self._tick_ant(qqq, defs, tmp_path)
+
+        ant._tick()  # initieel regime vastleggen
+        caplog.clear()
+
+        # Forceer regime-change via instance state
+        ant._last_logged_regime = "CRISIS"  # vorige was CRISIS, nu RISK_ON
+
+        with caplog.at_level(logging.INFO, logger=f"ant.rs_regime.{ant.ant_id[:8]}"):
+            ant._tick()
+
+        info_records = [r for r in caplog.records if r.levelno == logging.INFO
+                        and "RS Regime" in r.message]
+        assert len(info_records) == 1
+
+    def test_grote_qqq_beweging_triggert_info(self, tmp_path, caplog):
+        """QQQ-ratio verandert >2% → INFO ook zonder regime-change."""
+        qqq = _build_closes(60, base=100.0)
+        defs = _build_closes(60, base=100.0)
+        defs[-1] = 90.0
+        ant = self._tick_ant(qqq, defs, tmp_path)
+
+        ant._tick()  # eerste tick
+        caplog.clear()
+
+        # Zet _last_logged_qqq ver genoeg weg dat drempel overschreden wordt
+        ant._last_logged_qqq = ant._last_logged_qqq - 0.10  # simulate 10% drift
+
+        with caplog.at_level(logging.INFO, logger=f"ant.rs_regime.{ant.ant_id[:8]}"):
+            ant._tick()
+
+        info_records = [r for r in caplog.records if r.levelno == logging.INFO
+                        and "RS Regime" in r.message]
+        assert len(info_records) == 1
+
+    def test_tick_interval_60s(self):
+        """TICK_INTERVAL is 60 seconden."""
+        assert RSRegimeAnt._TICK_INTERVAL == 60
+
+    def test_run_skips_tick_when_interval_not_elapsed(self, tmp_path):
+        """run() ticked niet als _last_tick_at recent is (< 60s geleden)."""
+        import time as _time
+        qqq = _build_closes(60, base=100.0)
+        defs = _build_closes(60, base=100.0)
+        ant = _make_stable_ant(tmp_path, qqq, defs)
+
+        tick_count = 0
+        original_tick = ant._tick
+
+        def counting_tick():
+            nonlocal tick_count
+            tick_count += 1
+            return original_tick()
+
+        ant._tick = counting_tick
+        # Zet _last_tick_at naar 1 seconde geleden → interval (60s) nog niet verstreken
+        ant._last_tick_at = _time.monotonic() - 1.0
+        ant._status = AntStatus.RUNNING
+
+        # Simuleer één while-iteratie
+        import time as _t
+        now_mono = _t.monotonic()
+        if now_mono - ant._last_tick_at >= ant._TICK_INTERVAL:
+            ant._tick()
+
+        assert tick_count == 0  # geen tick want interval niet verstreken
