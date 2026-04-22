@@ -526,8 +526,10 @@ class PaperAnt:
 
                     if self._is_stale_timestamp(record.get("timestamp")):
                         self._log.debug(
-                            "Stale research-kandidaat %s overgeslagen (timestamp=%s)",
-                            candidate_id, record.get("timestamp"),
+                            "research candidate skipped | symbol=%s strategy=%s reason=stale_timestamp ts=%s",
+                            payload.get("symbol", "?"),
+                            payload.get("strategy_type", "?"),
+                            record.get("timestamp"),
                         )
                         continue
 
@@ -545,19 +547,21 @@ class PaperAnt:
             return
 
         direction = str(payload.get("direction") or "long")
+        strategy_type = str(payload.get("strategy_type") or "unknown")
+
         if direction != "long":
             self._log.debug(
-                "Research kandidaat heeft direction=%s — overgeslagen", direction
+                "research candidate skipped | symbol=%s strategy=%s reason=direction_not_long direction=%s",
+                symbol, strategy_type, direction,
             )
             return
 
-        strategy_type = str(payload.get("strategy_type") or "unknown")
         tp_pct = float(payload.get("tp_pct") or _TP_PCT)
         sl_pct = float(payload.get("sl_pct") or _SL_PCT)
 
         if self._has_open_research_position(symbol, strategy_type):
             self._log.debug(
-                "Research positie al open voor (%s, %s) — overgeslagen",
+                "research candidate skipped | symbol=%s strategy=%s reason=already_open",
                 symbol, strategy_type,
             )
             return
@@ -565,7 +569,8 @@ class PaperAnt:
         price = self._fetch_price(symbol)
         if price is None or price <= 0:
             self._log.debug(
-                "Geen prijs beschikbaar voor research kandidaat %s", symbol
+                "research candidate skipped | symbol=%s strategy=%s reason=no_live_price",
+                symbol, strategy_type,
             )
             return
 
@@ -624,8 +629,10 @@ class PaperAnt:
         current_open = len(self._ledger.open_positions) + scout_extra + research_extra
         if current_open >= _MAX_OPEN_POSITIONS:
             self._log.debug(
-                "_try_open_position: max open posities (%d) bereikt — %s geblokkeerd",
-                _MAX_OPEN_POSITIONS, symbol,
+                "research candidate skipped | symbol=%s strategy=%s reason=max_positions_reached"
+                " open=%d max=%d",
+                symbol, strategy_type or "scout",
+                current_open, _MAX_OPEN_POSITIONS,
             )
             return
 
