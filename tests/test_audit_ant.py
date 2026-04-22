@@ -94,9 +94,7 @@ def make_ant(
     *,
     mission: Mission | None = None,
     scheduler: MagicMock | None = None,
-    live_root: Path | None = None,
     scheduler_tick_interval: int = 5,
-    max_position_age_days: int = 7,
 ) -> AuditAnt:
     return AuditAnt(
         ant_id="ant-audit-test-0001",
@@ -104,9 +102,7 @@ def make_ant(
         scheduler=scheduler or MagicMock(),
         biome_registry=BiomeRegistry(),
         logs_root=tmp_path,
-        live_root=live_root or tmp_path / "live",
         scheduler_tick_interval=scheduler_tick_interval,
-        max_position_age_days=max_position_age_days,
     )
 
 
@@ -141,43 +137,6 @@ def write_scheduler_log(logs_root: Path, timestamp: datetime, seq: int = 0) -> N
     record = {"event_type": "tick", "sequence": seq, "timestamp": timestamp.isoformat()}
     with p.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(record) + "\n")
-
-
-def write_broker_artifact(
-    live_root: Path,
-    *,
-    market: str = "BTC-EUR",
-    side: str = "buy",
-    status: str = "filled",
-    order_id: str = "ord-001",
-    ts_utc: datetime | None = None,
-    filename: str | None = None,
-) -> Path:
-    """Schrijf een minimaal broker artifact naar live_root/live_test/broker/."""
-    broker_dir = live_root / "live_test" / "broker"
-    broker_dir.mkdir(parents=True, exist_ok=True)
-    ts = (ts_utc or _NOW).isoformat()
-    artifact = {
-        "ts_utc": ts,
-        "data": {
-            "market": market,
-            "side": side,
-            "raw": {"status": status, "orderId": order_id, "filledAmount": "0.01"},
-        },
-    }
-    fname = filename or f"LIVE-{order_id}.json"
-    p = broker_dir / fname
-    p.write_text(json.dumps(artifact), encoding="utf-8")
-    return p
-
-
-def write_v1_heartbeat(live_root: Path, timestamp: datetime) -> Path:
-    """Schrijf een minimaal heartbeat.json naar live_root/."""
-    live_root.mkdir(parents=True, exist_ok=True)
-    hb = {"ts_utc": timestamp.isoformat(), "status": "alive"}
-    p = live_root / "heartbeat.json"
-    p.write_text(json.dumps(hb), encoding="utf-8")
-    return p
 
 
 def write_jsonl_with_sequences(path: Path, sequences: list[int]) -> None:
@@ -374,146 +333,7 @@ class TestAuditTrailIntegrity:
 
 
 # ---------------------------------------------------------------------------
-# 9–12  Positie-leeftijd check
-# ---------------------------------------------------------------------------
-
-class TestOpenPositionAge:
-    def test_old_buy_artifact_emits_warning(self, tmp_path):
-        """Scenario 9: BUY artifact ouder dan max_age → WARNING."""
-        live_root = tmp_path / "live"
-        old_ts = _NOW - timedelta(days=10)
-        write_broker_artifact(live_root, side="buy", ts_utc=old_ts)
-        ant = make_ant(tmp_path, live_root=live_root, max_position_age_days=7)
-
-        with patch("ant_colony.ants.audit_ant.datetime") as mock_dt:
-            mock_dt.now.return_value = _NOW
-            mock_dt.fromisoformat.side_effect = datetime.fromisoformat
-            findings = ant._check_open_position_age()
-
-        assert any(f.severity == "WARNING" and f.check_name == "position_age" for f in findings)
-
-    def test_fresh_buy_artifact_no_warning(self, tmp_path):
-        """Scenario 10: vers BUY artifact → geen WARNING."""
-        live_root = tmp_path / "live"
-        fresh_ts = _NOW - timedelta(days=2)
-        write_broker_artifact(live_root, side="buy", ts_utc=fresh_ts)
-        ant = make_ant(tmp_path, live_root=live_root, max_position_age_days=7)
-
-        with patch("ant_colony.ants.audit_ant.datetime") as mock_dt:
-            mock_dt.now.return_value = _NOW
-            mock_dt.fromisoformat.side_effect = datetime.fromisoformat
-            findings = ant._check_open_position_age()
-
-        assert not any(f.check_name == "position_age" for f in findings)
-
-    def test_old_sell_artifact_not_flagged(self, tmp_path):
-        """Scenario 11: SELL artifact (oud) wordt NIET als open positie gezien."""
-        live_root = tmp_path / "live"
-        old_ts = _NOW - timedelta(days=20)
-        write_broker_artifact(live_root, side="sell", ts_utc=old_ts, order_id="sell-001",
-                              filename="LIVE-sell-001.json")
-        ant = make_ant(tmp_path, live_root=live_root, max_position_age_days=7)
-
-        with patch("ant_colony.ants.audit_ant.datetime") as mock_dt:
-            mock_dt.now.return_value = _NOW
-            mock_dt.fromisoformat.side_effect = datetime.fromisoformat
-            findings = ant._check_open_position_age()
-
-        assert not any(f.check_name == "position_age" for f in findings)
-
-    def test_broker_dir_missing_no_crash(self, tmp_path):
-        """Scenario 12: broker-map ontbreekt → geen crash, geen findings."""
-        live_root = tmp_path / "live"  # map bestaat niet
-        ant = make_ant(tmp_path, live_root=live_root)
-        findings = ant._check_open_position_age()
-        assert findings == []
-
-    def test_duplicate_order_ids_counted_once(self, tmp_path):
-        """Twee LIVE-*.json met zelfde orderId → slechts één WARNING."""
-        live_root = tmp_path / "live"
-        old_ts = _NOW - timedelta(days=10)
-        write_broker_artifact(live_root, order_id="ord-dup", ts_utc=old_ts,
-                              filename="LIVE-dup-1.json")
-        write_broker_artifact(live_root, order_id="ord-dup", ts_utc=old_ts,
-                              filename="LIVE-dup-2.json")
-        ant = make_ant(tmp_path, live_root=live_root, max_position_age_days=7)
-
-        with patch("ant_colony.ants.audit_ant.datetime") as mock_dt:
-            mock_dt.now.return_value = _NOW
-            mock_dt.fromisoformat.side_effect = datetime.fromisoformat
-            findings = ant._check_open_position_age()
-
-        position_warnings = [f for f in findings if f.check_name == "position_age"]
-        assert len(position_warnings) == 1
-
-    def test_unfilled_artifact_ignored(self, tmp_path):
-        """Artifact met status != 'filled' wordt genegeerd."""
-        live_root = tmp_path / "live"
-        old_ts = _NOW - timedelta(days=10)
-        write_broker_artifact(live_root, status="open", ts_utc=old_ts, order_id="unfilled")
-        ant = make_ant(tmp_path, live_root=live_root, max_position_age_days=7)
-
-        with patch("ant_colony.ants.audit_ant.datetime") as mock_dt:
-            mock_dt.now.return_value = _NOW
-            mock_dt.fromisoformat.side_effect = datetime.fromisoformat
-            findings = ant._check_open_position_age()
-
-        assert not any(f.check_name == "position_age" for f in findings)
-
-
-# ---------------------------------------------------------------------------
-# 13–16  Colony v1 heartbeat check
-# ---------------------------------------------------------------------------
-
-class TestV1Heartbeat:
-    def test_stale_v1_heartbeat_emits_warning(self, tmp_path):
-        """Scenario 13: heartbeat ouder dan 10 min → WARNING."""
-        live_root = tmp_path / "live"
-        old_ts = _NOW - timedelta(minutes=15)
-        write_v1_heartbeat(live_root, old_ts)
-        ant = make_ant(tmp_path, live_root=live_root)
-
-        with patch("ant_colony.ants.audit_ant.datetime") as mock_dt:
-            mock_dt.now.return_value = _NOW
-            mock_dt.fromisoformat.side_effect = datetime.fromisoformat
-            findings = ant._check_v1_heartbeat()
-
-        assert any(f.severity == "WARNING" and f.check_name == "v1_heartbeat_age"
-                   for f in findings)
-
-    def test_fresh_v1_heartbeat_emits_info(self, tmp_path):
-        """Scenario 14: vers heartbeat → INFO."""
-        live_root = tmp_path / "live"
-        fresh_ts = _NOW - timedelta(minutes=2)
-        write_v1_heartbeat(live_root, fresh_ts)
-        ant = make_ant(tmp_path, live_root=live_root)
-
-        with patch("ant_colony.ants.audit_ant.datetime") as mock_dt:
-            mock_dt.now.return_value = _NOW
-            mock_dt.fromisoformat.side_effect = datetime.fromisoformat
-            findings = ant._check_v1_heartbeat()
-
-        assert any(f.severity == "INFO" for f in findings)
-
-    def test_missing_heartbeat_no_findings(self, tmp_path):
-        """Scenario 15: heartbeat.json ontbreekt → [], geen crash."""
-        live_root = tmp_path / "live"
-        live_root.mkdir()
-        ant = make_ant(tmp_path, live_root=live_root)
-        assert ant._check_v1_heartbeat() == []
-
-    def test_heartbeat_without_timestamp_emits_warning(self, tmp_path):
-        """Scenario 16: heartbeat.json zonder timestamp → WARNING."""
-        live_root = tmp_path / "live"
-        live_root.mkdir()
-        (live_root / "heartbeat.json").write_text('{"status": "alive"}', encoding="utf-8")
-        ant = make_ant(tmp_path, live_root=live_root)
-        findings = ant._check_v1_heartbeat()
-        assert any(f.severity == "WARNING" for f in findings)
-
-
-# ---------------------------------------------------------------------------
-# 17–18  Heartbeat
+# 9–10  Heartbeat
 # ---------------------------------------------------------------------------
 
 class TestHeartbeat:
@@ -835,7 +655,6 @@ class TestGapStatePersistentie:
             scheduler=MagicMock(),
             biome_registry=BiomeRegistry(),
             logs_root=None,
-            live_root=tmp_path / "live",
         )
         ant._emit(AuditFinding("WARNING", "test", "test_check", "detail"))
 

@@ -395,23 +395,6 @@
     .broker-balance { font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; }
     .broker-rhs { font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; }
 
-    /* ── COLONY V1 ── */
-
-    .v1-status-row {
-      display: flex; align-items: center; gap: 8px;
-      padding: 2px 0 7px;
-    }
-
-    .v1-dot {
-      width: 9px; height: 9px; border-radius: 50%;
-      flex-shrink: 0; transition: background .3s;
-    }
-    .v1-dot.ok  { background: #1D9E75; box-shadow: 0 0 0 3px rgba(29,158,117,.18); }
-    .v1-dot.err { background: #E24B4A; box-shadow: 0 0 0 3px rgba(226,75,74,.18); }
-
-    .v1-meta { display: flex; flex-direction: column; gap: 1px; flex: 1; }
-    .v1-component { font-size: 11px; font-weight: 600; }
-    .v1-hb-time   { font-size: 9px; color: var(--muted); font-variant-numeric: tabular-nums; }
 
     .pos-tbl {
       width: 100%; border-collapse: collapse;
@@ -778,14 +761,6 @@
         </div>
       </div>
 
-      <!-- Colony v1 -->
-      <div class="card">
-        <div class="card-title">Colony v1</div>
-        <div id="v1-content">
-          <div class="empty">Heartbeat laden…</div>
-        </div>
-      </div>
-
       <!-- Operator input -->
       <div class="card">
         <div class="card-title">Geef mier een link of strategie</div>
@@ -833,9 +808,6 @@ const S = {
   metrics:     { capital_total:0, capital_allocated:0, capital_available:0, capital_in_use:null, active_ants:0, utilization_pct:0 },
   brokers:     { brokers:[] },
   ticker:      { events:[] },
-  v1status:    null,
-  v1positions: { positions:[], scanned_at:null },
-  v1loaded:    false,
   activity:    { ants:[] },
   queenStatus: null,
   perfChart:   { points:[], total_pnl:0, curve_label:'vandaag', dag:0, week:0, maand:0, jaar:0, alltime:0 },
@@ -899,10 +871,10 @@ function pnlCls(v) { return v > 0 ? 'pos' : v < 0 ? 'neg' : 'zero'; }
 
 async function fetchAll() {
   const get = url => fetch(url).then(r => r.json()).catch(() => null);
-  const [st, me, br, ti, v1s, v1p, act, qs, pc, eq] = await Promise.all([
+  const [st, me, br, ti, act, qs, pc, eq] = await Promise.all([
     get('/api/status'), get('/api/metrics'),
     get('/api/brokers'), get('/api/ticker'),
-    get('/api/v1status'), get('/api/v1positions'), get('/api/ants/activity'),
+    get('/api/ants/activity'),
     get('/api/queen/status'), get('/api/performance/chart'),
     get('/api/equities/status'),
   ]);
@@ -914,8 +886,6 @@ async function fetchAll() {
   if (me)  S.metrics     = me;
   if (br)  S.brokers     = br;
   if (ti)  S.ticker      = ti;
-  if (v1s) S.v1status    = v1s;
-  if (v1p) { S.v1positions = v1p; S.v1loaded = true; }
   if (act) S.activity    = act;
   if (qs)  S.queenStatus = qs;
   if (pc)  S.perfChart   = pc;
@@ -932,7 +902,6 @@ function render() {
   renderPnlChart();
   renderActivity();
   renderBrokers();
-  renderV1();
   renderQueen();
   renderEquities();
 }
@@ -1144,60 +1113,6 @@ function renderBrokers() {
       <div class="broker-rhs">${fEUR2(b.capital_deployed)} ingezet</div>
     </div>`;
   }).join('');
-}
-
-// ── Colony v1 ─────────────────────────────────
-
-function renderV1() {
-  const el  = document.getElementById('v1-content');
-  const st  = S.v1status;
-  const pos = (S.v1positions && S.v1positions.positions) || [];
-
-  let hdrHtml = '';
-  if (st) {
-    const dotCls    = st.ok ? 'ok' : 'err';
-    const component = st.component || 'Colony v1';
-    const hbTime    = st.last_heartbeat ? new Date(st.last_heartbeat).toLocaleTimeString('nl-NL') : '—';
-    const badge     = st.last_status
-      ? `<span class="badge ${st.ok ? 'b-conn' : 'b-standby'}">${st.last_status}</span>` : '';
-    hdrHtml = `<div class="v1-status-row">
-      <div class="v1-dot ${dotCls}"></div>
-      <div class="v1-meta">
-        <span class="v1-component">${component} ${badge}</span>
-        <span class="v1-hb-time">Heartbeat: ${hbTime}</span>
-      </div>
-    </div>`;
-  }
-
-  let posHtml = '';
-  if (!S.v1loaded) {
-    posHtml = '<div class="empty">Laden...</div>';
-  } else if (!pos.length) {
-    posHtml = '<div class="empty" style="padding:6px 0">Geen open posities</div>';
-  } else {
-    const rows = pos.map(p => {
-      const pCls = p.unrealized_pnl > 0 ? 'pnl-pos' : p.unrealized_pnl < 0 ? 'pnl-neg' : '';
-      const sign = v => v >= 0 ? '+' : '−';
-      const pnlTxt = p.unrealized_pnl != null
-        ? sign(p.unrealized_pnl) + '€\u202f' + Math.abs(p.unrealized_pnl).toFixed(2) : '—';
-      const pctTxt = p.pnl_pct != null
-        ? (p.pnl_pct >= 0 ? '+' : '') + p.pnl_pct.toFixed(2) + '%' : '—';
-
-      return `<tr>
-        <td style="font-weight:600">${p.symbol}</td>
-        <td>${fPrice(p.entry_price)}</td>
-        <td class="${pCls}">${pnlTxt}</td>
-        <td class="${pCls}">${pctTxt}</td>
-      </tr>`;
-    }).join('');
-
-    posHtml = `<table class="pos-tbl">
-      <thead><tr><th>Symbol</th><th>Entry</th><th>PnL €</th><th>PnL %</th></tr></thead>
-      <tbody>${rows}</tbody>
-    </table>`;
-  }
-
-  el.innerHTML = hdrHtml + posHtml;
 }
 
 // ── Mieren activiteit (compact) ───────────────

@@ -11,8 +11,6 @@ Endpoints:
   GET  /api/ants        — actieve agents met TTL countdown
   GET  /api/brokers     — broker connecties en ingezet kapitaal
   GET  /api/ticker      — laatste 20 audit log events
-  GET  /api/v1status    — heartbeat van Colony v1 (ANT_LIVE/heartbeat.json)
-  GET  /api/v1positions — open posities van Colony v1 (ANT_LIVE/live_test/*.json)
   POST /api/missions    — geef een mission uit via de echte colony Queen
   POST /api/killswitch  — level 1/2/3 + scope, vereist operator_confirm=true
 
@@ -75,7 +73,6 @@ class ColonyContext:
     logs_root: Path | None = None
     broker_names: dict[str, str] = field(default_factory=dict)
     biome_registry: BiomeRegistry | None = None
-    v1_live_root: Path | None = None   # ANT_LIVE root van Colony v1
 
 
 # ---------------------------------------------------------------------------
@@ -204,31 +201,6 @@ class KillSwitchResponse(BaseModel):
     message: str
 
 
-class V1StatusResponse(BaseModel):
-    ok: bool
-    component: str | None = None
-    last_heartbeat: str | None = None
-    last_status: str | None = None
-    lane: str | None = None
-
-
-class V1PositionEntry(BaseModel):
-    symbol: str
-    side: str
-    entry_price: float
-    quantity: float
-    current_price: float | None
-    unrealized_pnl: float | None
-    pnl_pct: float | None
-    trigger_high: float | None
-    trigger_low: float | None
-
-
-class V1PositionsResponse(BaseModel):
-    positions: list[V1PositionEntry]
-    scanned_at: str
-
-
 class ChartPoint(BaseModel):
     time: str
     pnl: float
@@ -332,133 +304,7 @@ class EquitiesStatusResponse(BaseModel):
     last_dividend_ts: str | None = None
 
 
-# ---------------------------------------------------------------------------
-# Colony v1 — scan helpers
-# ---------------------------------------------------------------------------
-
-_ANT_LIVE_ROOT = Path(r"C:\Trading\ANT_LIVE")
 _BITVAVO_TICKER = "https://api.bitvavo.com/v2/{market}/ticker/price"
-
-
-def _read_broker_artifacts(live_root: Path) -> list[dict]:
-    """
-    Lees alle LIVE-*.json bestanden uit live_test/broker/.
-
-    Filtert op status=="filled". Dedupliceert op orderId zodat meerdere
-    artifacts voor dezelfde order (bijv. per fill) als één trade tellen.
-    Retourneert gesorteerd op ts_utc (oud→nieuw) zodat buy/sell pairing
-    op volgorde werkt.
-    """
-    broker_dir = live_root / "live_test" / "broker"
-    if not broker_dir.exists():
-        return []
-
-    seen_order_ids: set[str] = set()
-    records: list[dict] = []
-
-    for path in sorted(broker_dir.glob("LIVE-*.json")):
-        try:
-            artifact = json.loads(path.read_text(encoding="utf-8"))
-            data_block = artifact.get("data") or {}
-            raw_block  = data_block.get("raw") or {}
-
-            if raw_block.get("status") != "filled":
-                continue
-
-            # Dedupliceer op orderId — meerdere bestanden per order tellen als één.
-            order_id = str(raw_block.get("orderId") or raw_block.get("order_id") or "")
-            if order_id and order_id in seen_order_ids:
-                continue
-            if order_id:
-                seen_order_ids.add(order_id)
-
-            records.append(artifact)
-        except (OSError, json.JSONDecodeError):
-            pass
-
-    records.sort(key=lambda r: r.get("ts_utc", ""))
-    return records
-
-
-def _scan_open_positions(live_root: Path) -> list[dict]:
-    """
-    Groepeer broker artifacts per market en retourneer open posities.
-
-    Een "buy" zonder opvolgende "sell" voor dezelfde market = open positie.
-    Een "buy" gevolgd door een "sell" = gesloten — niet tonen.
-    """
-    artifacts = _read_broker_artifacts(live_root)
-
-    # Stack per market: elke buy pushed een entry, elke sell popt er één.
-    stacks: dict[str, list[dict]] = {}
-    for artifact in artifacts:
-        data = artifact.get("data") or {}
-        market = str(data.get("market") or "")
-        side   = str(data.get("side") or "").lower()
-        if not market or side not in ("buy", "sell"):
-            continue
-
-        if side == "buy":
-            stacks.setdefault(market, []).append(artifact)
-        else:
-            if stacks.get(market):
-                stacks[market].pop()
-
-    # Wat overblijft in de stacks zijn open posities.
-    open_entries: list[dict] = []
-    for market, stack in stacks.items():
-        for artifact in stack:
-            open_entries.append(artifact)
-
-    return open_entries
-
-
-def _scan_execution_triggers(live_root: Path) -> dict[str, dict]:
-    """
-    Zoek trigger_high / trigger_low per market in live_test/execution/.
-
-    Veldnamen die herkend worden (in volgorde van voorkeur):
-      trigger_high, tp_price, take_profit_price
-      trigger_low,  sl_price, stop_loss_price
-
-    Retourneert: {market: {"trigger_high": float|None, "trigger_low": float|None}}
-    """
-    exec_dir = live_root / "live_test" / "execution"
-    if not exec_dir.exists():
-        return {}
-
-    _HIGH_KEYS = ("trigger_high", "tp_price", "take_profit_price")
-    _LOW_KEYS  = ("trigger_low",  "sl_price", "stop_loss_price")
-
-    def _first_float(d: dict, keys: tuple) -> float | None:
-        for k in keys:
-            v = d.get(k)
-            if v is not None:
-                try:
-                    return float(v)
-                except (TypeError, ValueError):
-                    pass
-        return None
-
-    triggers: dict[str, dict] = {}
-    for path in sorted(exec_dir.glob("*.json")):
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            market = str(data.get("market") or data.get("symbol") or "")
-            if not market:
-                continue
-            th = _first_float(data, _HIGH_KEYS)
-            tl = _first_float(data, _LOW_KEYS)
-            if th is not None or tl is not None:
-                existing = triggers.get(market, {})
-                triggers[market] = {
-                    "trigger_high": th if th is not None else existing.get("trigger_high"),
-                    "trigger_low":  tl if tl is not None else existing.get("trigger_low"),
-                }
-        except (OSError, json.JSONDecodeError):
-            pass
-
-    return triggers
 
 
 def _get_live_price(market: str, registry=None) -> float | None:
@@ -809,95 +655,6 @@ def create_router(ctx: ColonyContext) -> APIRouter:
                 ))
 
         return BrokersResponse(brokers=brokers)
-
-    # ------------------------------------------------------------------
-    # GET /api/v1status
-    # ------------------------------------------------------------------
-
-    @router.get("/v1status", response_model=V1StatusResponse)
-    def get_v1status() -> V1StatusResponse:
-        """Heartbeat van Colony v1 — leest ANT_LIVE/heartbeat.json."""
-        live_root = ctx.v1_live_root or Path(r"C:\Trading\ANT_LIVE")
-        hb_path   = live_root / "heartbeat.json"
-
-        if not hb_path.exists():
-            return V1StatusResponse(ok=False)
-
-        try:
-            data = json.loads(hb_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            return V1StatusResponse(ok=False)
-
-        last_hb_str: str | None = data.get("last_heartbeat")
-        ok = _v1_heartbeat_ok(last_hb_str)
-
-        return V1StatusResponse(
-            ok=ok,
-            component=data.get("component"),
-            last_heartbeat=last_hb_str,
-            last_status=data.get("last_status"),
-            lane=data.get("lane"),
-        )
-
-    # ------------------------------------------------------------------
-    # GET /api/v1positions
-    # ------------------------------------------------------------------
-
-    @router.get("/v1positions", response_model=V1PositionsResponse)
-    def get_v1positions() -> V1PositionsResponse:
-        """Open posities van Colony v1 — broker artifacts + live Bitvavo prijs."""
-        now_str   = _to_local_str(datetime.now(tz=timezone.utc))
-        live_root = ctx.v1_live_root or _ANT_LIVE_ROOT
-
-        open_artifacts = _scan_open_positions(live_root)
-        trigger_map    = _scan_execution_triggers(live_root)
-
-        entries: list[V1PositionEntry] = []
-        for artifact in open_artifacts:
-            data_block = artifact.get("data") or {}
-            raw_block  = data_block.get("raw") or {}
-
-            market   = str(data_block.get("market") or "")
-            raw_side = str(data_block.get("side") or "").lower()
-            side     = "long" if raw_side == "buy" else "short"
-
-            # entry_price: eerste fill, anders price veld
-            fills = raw_block.get("fills") or []
-            if fills and fills[0].get("price") is not None:
-                entry_price = float(fills[0]["price"])
-            else:
-                entry_price = float(raw_block.get("price") or 0)
-
-            quantity = float(raw_block.get("filledAmount") or 0)
-
-            trig     = trigger_map.get(market, {})
-            trigger_high = trig.get("trigger_high")
-            trigger_low  = trig.get("trigger_low")
-
-            current_price = _get_live_price(market, ctx.biome_registry) if market else None
-
-            unrealized_pnl: float | None = None
-            pnl_pct:        float | None = None
-            if current_price is not None and entry_price > 0 and quantity > 0:
-                if side == "long":
-                    unrealized_pnl = round((current_price - entry_price) * quantity, 2)
-                else:
-                    unrealized_pnl = round((entry_price - current_price) * quantity, 2)
-                pnl_pct = round(unrealized_pnl / (entry_price * quantity) * 100, 2)
-
-            entries.append(V1PositionEntry(
-                symbol=market,
-                side=side,
-                entry_price=entry_price,
-                quantity=quantity,
-                current_price=current_price,
-                unrealized_pnl=unrealized_pnl,
-                pnl_pct=pnl_pct,
-                trigger_high=trigger_high,
-                trigger_low=trigger_low,
-            ))
-
-        return V1PositionsResponse(positions=entries, scanned_at=now_str)
 
     # ------------------------------------------------------------------
     # GET /api/ticker
@@ -1367,19 +1124,6 @@ def _read_recent_events(logs_root: Path, limit: int = 20) -> list[TickerEvent]:
             payload=rec.get("payload", {}),
         ))
     return events
-
-
-def _v1_heartbeat_ok(last_heartbeat_str: str | None, max_age_seconds: float = 300.0) -> bool:
-    """True als heartbeat bestaat en niet ouder is dan max_age_seconds (standaard 5 min)."""
-    if not last_heartbeat_str:
-        return False
-    try:
-        dt = datetime.fromisoformat(last_heartbeat_str)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return (datetime.now(tz=timezone.utc) - dt).total_seconds() <= max_age_seconds
-    except (ValueError, TypeError):
-        return False
 
 
 _LOCAL_TZ = ZoneInfo("Europe/Amsterdam")

@@ -41,7 +41,6 @@ from ant_colony.schemas.audit_event import AuditEvent, AuditEventType
 from ant_colony.schemas.heartbeat import Heartbeat, HeartbeatStatus
 from ant_colony.schemas.mission import Mission
 
-_V1_HEARTBEAT_MAX_AGE_SEC: int = 600     # 10 minuten
 _SCHEDULER_STALE_FACTOR: int   = 2       # 2× tick_interval
 
 
@@ -49,7 +48,7 @@ _SCHEDULER_STALE_FACTOR: int   = 2       # 2× tick_interval
 class AuditFinding:
     """Één bevinding uit een audit check."""
     severity:   str    # "INFO" | "WARNING" | "ANOMALY"
-    component:  str    # bijv. "scheduler", "audit_trail", "positions", "v1_heartbeat"
+    component:  str    # bijv. "scheduler", "audit_trail", "positions"
     check_name: str
     detail:     str
 
@@ -64,11 +63,8 @@ class AuditAnt:
         scheduler:               ColonyScheduler voor heartbeat-registratie.
         biome_registry:          BiomeRegistry (voor toekomstige uitbreiding).
         logs_root:               Pad naar ANT_LOGS; None schakelt disk-logging uit.
-        live_root:               Pad naar ANT_LIVE voor broker artifacts en v1 heartbeat.
-                                 Standaard: C:\\Trading\\ANT_LIVE.
         scheduler_tick_interval: Verwacht tick-interval van de scheduler in seconden.
                                  Wordt gebruikt om staleness te berekenen.
-        max_position_age_days:   Maximale leeftijd van een open BUY-artifact in dagen.
     """
 
     def __init__(
@@ -78,19 +74,15 @@ class AuditAnt:
         scheduler: ColonyScheduler,
         biome_registry: BiomeRegistry,
         logs_root: Path | None = None,
-        live_root: Path | None = None,
         scheduler_tick_interval: int = 5,
-        max_position_age_days: int = 7,
     ) -> None:
         self.ant_id         = ant_id
         self.mission        = mission
         self.scheduler      = scheduler
         self.biome_registry = biome_registry
         self.logs_root      = logs_root
-        self.live_root      = live_root or Path(r"C:\Trading\ANT_LIVE")
 
         self._scheduler_tick_interval = scheduler_tick_interval
-        self._max_position_age        = timedelta(days=max_position_age_days)
 
         self._status: AntStatus = AntStatus.IDLE
         self._budget_used: float = 0.0
@@ -102,9 +94,6 @@ class AuditAnt:
             if logs_root is not None else None
         )
         self._reported_gaps: set[str] = self._load_reported_gaps()
-
-        # Per-order_id timestamp of last WARNING for position_age (dedup to 1x/hour)
-        self._position_age_warned_at: dict[str, float] = {}
 
         self._log = logging.getLogger(f"ant.audit.{ant_id[:8]}")
 
@@ -169,13 +158,11 @@ class AuditAnt:
     # ------------------------------------------------------------------
 
     def _tick(self) -> None:
-        """Voer alle vier audit checks uit en log de bevindingen."""
+        """Voer alle audit checks uit en log de bevindingen."""
         findings: list[AuditFinding] = []
 
         findings.extend(self._check_scheduler_heartbeat())
         findings.extend(self._check_audit_trail_integrity())
-        findings.extend(self._check_open_position_age())
-        findings.extend(self._check_v1_heartbeat())
 
         for finding in findings:
             self._emit(finding)
@@ -331,135 +318,6 @@ class AuditAnt:
             self._log.exception("Fout bij audit trail integriteitscheck")
 
         return findings
-
-    # ------------------------------------------------------------------
-    # Check 3: Positie-leeftijd
-    # ------------------------------------------------------------------
-
-    def _check_open_position_age(self) -> list[AuditFinding]:
-        """
-        Leest broker execution artifacts en controleert de leeftijd van BUY-fills.
-
-        Elke unieke BUY-order ouder dan max_position_age_days krijgt een WARNING.
-        Artifacten zonder `ts_utc` veld worden overgeslagen.
-        """
-        broker_dir = self.live_root / "live_test" / "broker"
-        if not broker_dir.exists():
-            return []
-
-        findings: list[AuditFinding] = []
-        now = datetime.now(tz=timezone.utc)
-        seen_order_ids: set[str] = set()
-
-        try:
-            for path in sorted(broker_dir.glob("LIVE-*.json")):
-                try:
-                    artifact = json.loads(path.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError):
-                    continue
-
-                data_block = artifact.get("data") or {}
-                raw_block  = data_block.get("raw") or {}
-
-                if raw_block.get("status") != "filled":
-                    continue
-                if data_block.get("side", "").lower() != "buy":
-                    continue
-
-                order_id = str(raw_block.get("orderId") or raw_block.get("order_id") or "")
-                if order_id and order_id in seen_order_ids:
-                    continue
-                if order_id:
-                    seen_order_ids.add(order_id)
-
-                ts_str = artifact.get("ts_utc")
-                if not ts_str:
-                    continue
-
-                try:
-                    filled_at = datetime.fromisoformat(str(ts_str))
-                    if filled_at.tzinfo is None:
-                        filled_at = filled_at.replace(tzinfo=timezone.utc)
-                except (ValueError, TypeError):
-                    continue
-
-                age = now - filled_at
-                if age > self._max_position_age:
-                    dedup_key = order_id or path.name
-                    last_warned = self._position_age_warned_at.get(dedup_key, 0.0)
-                    if time.monotonic() - last_warned < 3600.0:
-                        continue  # already warned within the last hour
-                    self._position_age_warned_at[dedup_key] = time.monotonic()
-                    market = data_block.get("market", "?")
-                    findings.append(AuditFinding(
-                        severity="WARNING",
-                        component="positions",
-                        check_name="position_age",
-                        detail=(
-                            f"Open BUY {market} (order {order_id or path.name}) "
-                            f"is {age.days} dagen oud "
-                            f"(max {self._max_position_age.days} dagen)"
-                        ),
-                    ))
-
-        except Exception:
-            self._log.exception("Fout bij positie-leeftijdscheck")
-
-        return findings
-
-    # ------------------------------------------------------------------
-    # Check 4: Colony v1 heartbeat
-    # ------------------------------------------------------------------
-
-    def _check_v1_heartbeat(self) -> list[AuditFinding]:
-        """
-        Leest ANT_LIVE/heartbeat.json en controleert de leeftijd.
-
-        WARNING als het bestand ouder is dan _V1_HEARTBEAT_MAX_AGE_SEC (10 min).
-        Retourneert [] als het bestand niet bestaat (v1 mogelijk niet actief).
-        """
-        hb_path = self.live_root / "heartbeat.json"
-        if not hb_path.exists():
-            return []
-
-        try:
-            hb = json.loads(hb_path.read_text(encoding="utf-8"))
-            ts_str = hb.get("ts_utc") or hb.get("timestamp")
-            if not ts_str:
-                return [AuditFinding(
-                    severity="WARNING",
-                    component="v1_heartbeat",
-                    check_name="v1_heartbeat_age",
-                    detail="heartbeat.json heeft geen timestamp veld",
-                )]
-
-            hb_time = datetime.fromisoformat(str(ts_str))
-            if hb_time.tzinfo is None:
-                hb_time = hb_time.replace(tzinfo=timezone.utc)
-
-            age_sec = (datetime.now(tz=timezone.utc) - hb_time).total_seconds()
-
-            if age_sec > _V1_HEARTBEAT_MAX_AGE_SEC:
-                return [AuditFinding(
-                    severity="WARNING",
-                    component="v1_heartbeat",
-                    check_name="v1_heartbeat_age",
-                    detail=(
-                        f"Colony v1 heartbeat is {age_sec:.0f}s oud "
-                        f"(max {_V1_HEARTBEAT_MAX_AGE_SEC}s)"
-                    ),
-                )]
-
-            return [AuditFinding(
-                severity="INFO",
-                component="v1_heartbeat",
-                check_name="v1_heartbeat_age",
-                detail=f"Colony v1 actief — heartbeat {age_sec:.1f}s geleden",
-            )]
-
-        except Exception:
-            self._log.exception("Fout bij v1 heartbeat check")
-            return []
 
     # ------------------------------------------------------------------
     # Emissie en logging
