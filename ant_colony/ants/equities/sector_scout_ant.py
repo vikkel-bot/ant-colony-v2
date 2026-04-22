@@ -73,6 +73,11 @@ class SectorScoutAnt:
         logs_root:       Pad naar ANT_LOGS. None = geen disk-logging.
     """
 
+    # Sector-ranking verandert niet elke seconde; 5 minuten is voldoende.
+    _TICK_INTERVAL: int = 300
+    # Log op INFO bij >5% momentum-verschil in rank-1 ten opzichte van vorige log.
+    _MOMENTUM_LOG_THRESHOLD: float = 0.05
+
     def __init__(
         self,
         ant_id: str,
@@ -92,6 +97,10 @@ class SectorScoutAnt:
         self._status: AntStatus = AntStatus.IDLE
         self._last_action: str = "init"
         self._emitted_signal_ids: set[str] = set()
+
+        self._last_tick_at:       float            = 0.0
+        self._last_top3:          list[str] | None = None
+        self._last_top1_momentum: float | None     = None
 
         self._log = logging.getLogger(f"ant.sector_scout.{ant_id[:8]}")
 
@@ -122,7 +131,10 @@ class SectorScoutAnt:
                     self._status = AntStatus.COMPLETED
                     break
 
-                self._tick()
+                now_mono = time.monotonic()
+                if now_mono - self._last_tick_at >= self._TICK_INTERVAL:
+                    self._last_tick_at = now_mono
+                    self._tick()
 
                 time.sleep(1.0)
 
@@ -179,10 +191,26 @@ class SectorScoutAnt:
         self._emit_top_signals(ranking, adapter)
         self._last_action = f"tick:top={ranking[0][0] if ranking else 'none'}"
 
-        self._log.info(
-            "Sector ranking | top3=%s",
-            [s for s, _ in ranking[:_TOP_N]],
+        current_top3 = [s for s, _ in ranking[:_TOP_N]]
+        top1_momentum = ranking[0][1] if ranking else 0.0
+
+        top3_changed = current_top3 != self._last_top3
+        momentum_moved = (
+            self._last_top1_momentum is None
+            or abs(top1_momentum - self._last_top1_momentum) >= self._MOMENTUM_LOG_THRESHOLD
         )
+        if top3_changed or momentum_moved:
+            self._log.info(
+                "Sector ranking | top3=%s  rank1_momentum=%.2f%%",
+                current_top3, top1_momentum * 100,
+            )
+            self._last_top3          = current_top3
+            self._last_top1_momentum = top1_momentum
+        else:
+            self._log.debug(
+                "Sector ranking (onveranderd) | top3=%s  rank1_momentum=%.2f%%",
+                current_top3, top1_momentum * 100,
+            )
         return signals
 
     def _get_3mo_return(self, symbol: str, get_candles_fn) -> float | None:
