@@ -32,6 +32,7 @@ Regels:
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -104,6 +105,9 @@ def create_app(ctx: ColonyContext | None = None) -> FastAPI:
 # Run helper
 # ---------------------------------------------------------------------------
 
+_SOCKET_RETRY_DELAY_S = 5
+
+
 def run(
     ctx: ColonyContext | None = None,
     host: str = "0.0.0.0",
@@ -116,6 +120,9 @@ def run(
 
     Blocking call — bedoeld om in een aparte thread of process te draaien
     zodat een crash van het dashboard de colony niet raakt.
+
+    Bij OSError (bijv. WinError 64 — Tailscale reconnect of netwerk-flip)
+    wordt de server automatisch herstart na _SOCKET_RETRY_DELAY_S seconden.
 
     Args:
         ctx:       ColonyContext. None = lege context.
@@ -145,9 +152,24 @@ def run(
             reload_dirs=[str(Path(__file__).parent)],
             factory=True,
         )
-    else:
-        app = create_app(ctx)
-        uvicorn.run(app, host=host, port=port, log_level=log_level)
+        return
+
+    app = create_app(ctx)
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            uvicorn.run(app, host=host, port=port, log_level=log_level)
+            return  # clean exit (bijv. SIGINT / shutdown)
+        except OSError as exc:
+            # Windows IocpProactor accept-loop breekt bij transiente netwerkfouten
+            # (bijv. WinError 64 — netwerknaam niet beschikbaar).  Retry in plaats
+            # van crash zodat de colony het dashboard niet verliest na Tailscale flip.
+            logger.warning(
+                "Dashboard socket fout (poging %d) — herstart over %ds: %s",
+                attempt, _SOCKET_RETRY_DELAY_S, exc,
+            )
+            time.sleep(_SOCKET_RETRY_DELAY_S)
 
 
 def _standalone_app() -> "FastAPI":

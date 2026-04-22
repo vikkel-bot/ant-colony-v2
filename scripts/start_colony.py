@@ -176,6 +176,36 @@ def _kill_port(port: int, log: logging.Logger) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Dashboard watchdog thread
+# ---------------------------------------------------------------------------
+
+_DASHBOARD_RESTART_DELAY_S = 5
+
+
+def _run_dashboard_watchdog(run_fn, ctx, host: str, port: int, log: logging.Logger) -> None:
+    """Daemon thread: herstart dashboard automatisch bij onverwachte exit of crash."""
+    attempt = 0
+    while True:
+        attempt += 1
+        if attempt > 1:
+            log.warning(
+                "Dashboard watchdog: herstart poging %d — wacht %ds ...",
+                attempt, _DASHBOARD_RESTART_DELAY_S,
+            )
+            time.sleep(_DASHBOARD_RESTART_DELAY_S)
+        try:
+            run_fn(ctx, host=host, port=port)
+            log.info("Dashboard clean exit — watchdog eindigt.")
+            return
+        except Exception:
+            log.warning(
+                "Dashboard gecrasht (poging %d) — watchdog herstart.",
+                attempt,
+                exc_info=True,
+            )
+
+
+# ---------------------------------------------------------------------------
 # Advisor thread (elke 5 minuten = 60 scheduler-ticks van 5 seconden)
 # ---------------------------------------------------------------------------
 
@@ -1335,7 +1365,7 @@ def main() -> None:
     except Exception:
         log.exception("Equities bootstrap mislukt — colony draait door zonder equities ants.")
 
-    # --- Stap 9: bouw ColonyContext en start dashboard (blocking) ---
+    # --- Stap 9: bouw ColonyContext en start dashboard in watchdog thread ---
     context = ColonyContext(
         queen=queen,
         scheduler=scheduler,
@@ -1345,11 +1375,24 @@ def main() -> None:
     )
 
     log.info(
-        "Dashboard starten op http://%s:%d — bereikbaar vanuit het netwerk.",
+        "Dashboard watchdog starten op http://%s:%d — bereikbaar vanuit het netwerk.",
         args.host,
         args.port,
     )
-    dashboard_run(context, host=args.host, port=args.port)
+    threading.Thread(
+        target=_run_dashboard_watchdog,
+        args=(dashboard_run, context, args.host, args.port, log),
+        name="dashboard-watchdog",
+        daemon=True,
+    ).start()
+
+    # Hoofdthread blijft leven zodat daemon threads (scheduler, ants, dashboard)
+    # niet worden beëindigd bij een clean return van main().
+    try:
+        while True:
+            time.sleep(60)
+    except KeyboardInterrupt:
+        log.info("Colony gestopt door operator (KeyboardInterrupt).")
 
 
 if __name__ == "__main__":
