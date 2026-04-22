@@ -624,6 +624,89 @@
       margin-top: 6px;
     }
 
+    /* ── OPEN POSITIONS (Paper Ant sectie) ── */
+
+    .pos-section {
+      margin-top: 6px;
+      padding-top: 5px;
+      border-top: .5px solid var(--border-soft);
+    }
+
+    .pos-section-title {
+      font-size: 8px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: .5px;
+      color: var(--faint);
+      margin-bottom: 5px;
+    }
+
+    .pos-entry {
+      padding: 5px 0 7px;
+      border-bottom: .5px solid var(--border-soft);
+    }
+    .pos-entry:last-child { border-bottom: none; }
+
+    .pos-hdr {
+      display: flex; align-items: baseline;
+      justify-content: space-between;
+      margin-bottom: 2px;
+    }
+
+    .pos-sym  { font-size: 11px; font-weight: 700; }
+    .pos-meta { font-size: 9px; color: var(--muted); margin-left: 5px; }
+    .pos-age  { font-size: 9px; color: var(--faint); }
+
+    .pos-prices {
+      font-size: 10px; color: var(--muted);
+      font-variant-numeric: tabular-nums;
+      margin-bottom: 5px;
+      display: flex; flex-wrap: wrap; align-items: center; gap: 4px;
+    }
+
+    .pos-arrow { color: var(--faint); }
+    .pos-pnl-pos { color: var(--pnl-pos); font-weight: 700; }
+    .pos-pnl-neg { color: var(--pnl-neg); font-weight: 700; }
+    .pos-pnl-zero { color: var(--muted); }
+
+    /* SL-TP bar */
+    .sltp-wrap { position: relative; margin: 2px 0 10px; }
+
+    .sltp-bar {
+      height: 6px;
+      border-radius: 3px;
+      background: linear-gradient(to right,
+        #ef4444 0%,
+        #d1d5db 38%,
+        #d1d5db 62%,
+        #22c55e 100%
+      );
+      position: relative;
+    }
+
+    .sltp-pointer {
+      position: absolute;
+      top: 50%;
+      width: 12px; height: 12px;
+      border-radius: 50%;
+      background: #1e293b;
+      border: 2px solid #fff;
+      box-shadow: 0 1px 4px rgba(0,0,0,.40);
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+    }
+
+    .sltp-labels {
+      display: flex;
+      justify-content: space-between;
+      font-size: 8px;
+      color: var(--faint);
+      font-variant-numeric: tabular-nums;
+      margin-top: 3px;
+    }
+
+    .sltp-lbl-sl  { color: #ef4444; }
+    .sltp-lbl-tp  { color: #22c55e; }
+    .sltp-lbl-mid { color: var(--faint); text-align: center; }
+
   </style>
 </head>
 <body>
@@ -808,6 +891,7 @@ const S = {
   metrics:     { capital_total:0, capital_allocated:0, capital_available:0, capital_in_use:null, active_ants:0, utilization_pct:0 },
   brokers:     { brokers:[], fetched_at:'' },
   capital:     { total_eur:0, available_eur:0, holdings_eur:0, brokers:[], fetched_at:'' },
+  positions:   { positions:[], count:0, total_pnl_eur:null, total_pnl_pct:null, fetched_at:'' },
   ticker:      { events:[] },
   activity:    { ants:[] },
   queenStatus: null,
@@ -872,9 +956,10 @@ function pnlCls(v) { return v > 0 ? 'pos' : v < 0 ? 'neg' : 'zero'; }
 
 async function fetchAll() {
   const get = url => fetch(url).then(r => r.json()).catch(() => null);
-  const [st, me, br, cap, ti, act, qs, pc, eq] = await Promise.all([
+  const [st, me, br, cap, pos, ti, act, qs, pc, eq] = await Promise.all([
     get('/api/status'), get('/api/metrics'),
     get('/api/brokers'), get('/api/capital'),
+    get('/api/positions'),
     get('/api/ticker'), get('/api/ants/activity'),
     get('/api/queen/status'), get('/api/performance/chart'),
     get('/api/equities/status'),
@@ -887,6 +972,7 @@ async function fetchAll() {
   if (me)  S.metrics     = me;
   if (br)  S.brokers     = br;
   if (cap) S.capital     = cap;
+  if (pos) S.positions   = pos;
   if (ti)  S.ticker      = ti;
   if (act) S.activity    = act;
   if (qs)  S.queenStatus = qs;
@@ -903,6 +989,7 @@ function render() {
   renderMetrics();
   renderPnlChart();
   renderActivity();
+  renderOpenPositions();
   renderBrokers();
   renderQueen();
   renderEquities();
@@ -1169,6 +1256,103 @@ function renderBrokers() {
   }).join('');
 }
 
+// ── Open posities helpers ─────────────────────
+
+function fAge(seconds) {
+  if (seconds == null || seconds < 0) return '';
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  if (h > 0) return `${h}u ${m}m oud`;
+  if (m > 0) return `${m}m oud`;
+  return '< 1m oud';
+}
+
+function fPosPrice(v) {
+  if (v == null) return '—';
+  const n = Number(v);
+  const dec = n >= 1000 ? 0 : n >= 1 ? 2 : 4;
+  return '€ ' + n.toLocaleString('nl-NL', {minimumFractionDigits: dec, maximumFractionDigits: dec});
+}
+
+function fPosPnl(eur, pct) {
+  if (eur == null) return '<span class="pos-pnl-zero">—</span>';
+  const sign  = eur >= 0 ? '+' : '−';
+  const abs   = Math.abs(eur).toLocaleString('nl-NL', {minimumFractionDigits:2, maximumFractionDigits:2});
+  const pctTxt = pct != null ? ` (${eur >= 0 ? '+' : ''}${Number(pct).toFixed(2)}%)` : '';
+  const cls   = eur > 0 ? 'pos-pnl-pos' : eur < 0 ? 'pos-pnl-neg' : 'pos-pnl-zero';
+  return `<span class="${cls}">${sign}€ ${abs}${pctTxt}</span>`;
+}
+
+function renderSltpBar(pos) {
+  const progress = pos.sl_tp_progress;
+  if (progress == null) return '';
+  const pct  = Math.max(0, Math.min(100, progress * 100)).toFixed(1);
+  // Pointer kleur: groen als > 0.55, rood als < 0.35, anders donker
+  const dotColor = progress > 0.55 ? '#16a34a' : progress < 0.35 ? '#dc2626' : '#1e293b';
+  return `<div class="sltp-wrap">
+    <div class="sltp-bar">
+      <div class="sltp-pointer" style="left:${pct}%;background:${dotColor}"></div>
+    </div>
+    <div class="sltp-labels">
+      <span class="sltp-lbl-sl">SL ${fPosPrice(pos.stop_loss_price)}</span>
+      <span class="sltp-lbl-mid">Entry ${fPosPrice(pos.entry_price)}</span>
+      <span class="sltp-lbl-tp">TP ${fPosPrice(pos.take_profit_price)}</span>
+    </div>
+  </div>`;
+}
+
+// ── Open posities (injectie in Paper Ant kaart) ─
+
+function renderOpenPositions() {
+  const slot = document.getElementById('paper-positions-slot');
+  if (!slot) return;   // paper_ant niet actief in activity
+
+  const list = (S.positions && S.positions.positions) || [];
+  if (!list.length) {
+    slot.innerHTML = '';
+    return;
+  }
+
+  const rows = list.map(pos => {
+    const side     = (pos.side || 'long').toUpperCase();
+    const strategy = pos.strategy_type ? ` · ${pos.strategy_type}` : '';
+    const age      = fAge(pos.age_seconds);
+    const sltpBar  = renderSltpBar(pos);
+    const arrow    = '<span class="pos-arrow">→</span>';
+    const curHtml  = pos.current_price != null
+      ? `${arrow} <span style="color:var(--text);font-weight:600">${fPosPrice(pos.current_price)}</span>`
+      : '';
+
+    return `<div class="pos-entry">
+      <div class="pos-hdr">
+        <div>
+          <span class="pos-sym">${pos.symbol}</span>
+          <span class="pos-meta">${side}${strategy}</span>
+        </div>
+        <span class="pos-age">${age}</span>
+      </div>
+      <div class="pos-prices">
+        <span>${fPosPrice(pos.entry_price)}</span>
+        ${curHtml}
+        <span style="margin-left:4px">${fPosPnl(pos.pnl_eur, pos.pnl_pct)}</span>
+      </div>
+      ${sltpBar}
+    </div>`;
+  }).join('');
+
+  const totalHtml = S.positions.total_pnl_eur != null
+    ? `<div style="font-size:9px;color:var(--muted);text-align:right;margin-top:2px">
+         Totaal open PnL: ${fPosPnl(S.positions.total_pnl_eur, S.positions.total_pnl_pct)}
+       </div>`
+    : '';
+
+  slot.innerHTML = `<div class="pos-section">
+    <div class="pos-section-title">${list.length} open positie${list.length !== 1 ? 's' : ''}</div>
+    ${rows}
+    ${totalHtml}
+  </div>`;
+}
+
 // ── Mieren activiteit (compact) ───────────────
 
 function renderActivity() {
@@ -1213,6 +1397,10 @@ function renderActivity() {
 
     const statsHtml = badges.length ? `<div class="ac-stats">${badges.join('')}</div>` : '';
 
+    const posSlot = a.ant_type === 'paper_ant'
+      ? '<div id="paper-positions-slot"></div>'
+      : '';
+
     return `<div class="ac-card">
       <div class="ac-hdr">
         <div class="ac-dot" style="background:${c}"></div>
@@ -1221,6 +1409,7 @@ function renderActivity() {
         ${ts}
       </div>
       <div class="ac-summary">${a.summary}</div>
+      ${posSlot}
     </div>`;
   }).join('');
 }
