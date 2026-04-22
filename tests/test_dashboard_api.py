@@ -27,6 +27,7 @@ from ant_colony.colony.scheduler.colony_scheduler import ColonyScheduler, Colony
 from ant_colony.dashboard.api import (
     ColonyContext, create_router, _parse_ts,
     _compute_sl_tp_progress, _read_open_positions_from_logs,
+    _build_event_summary,
 )
 from ant_colony.dashboard.server import create_app
 from ant_colony.queen.queen import Queen
@@ -838,6 +839,185 @@ class TestPositionsEndpoint:
         assert d["count"] == 2
         # pnl: 10 + 10 = 20
         assert d["total_pnl_eur"] == pytest.approx(20.0)
+
+
+# ---------------------------------------------------------------------------
+# TestBuildEventSummary — unit tests voor de helper
+# ---------------------------------------------------------------------------
+
+class TestBuildEventSummary:
+
+    def test_trade_opened(self):
+        s = _build_event_summary("trade_opened", {
+            "symbol": "BTC-EUR", "side": "long",
+            "quantity": 0.00075, "entry_price": 66402.0,
+        })
+        assert "BTC-EUR" in s
+        assert "LONG" in s
+        assert "66402" in s
+
+    def test_trade_closed(self):
+        s = _build_event_summary("trade_closed", {
+            "symbol": "ETH-EUR", "exit_reason": "stop_loss", "realized_pnl": 0.54,
+        })
+        assert "ETH-EUR" in s
+        assert "stop_loss" in s
+        assert "+0.54" in s
+
+    def test_trade_closed_negative_pnl(self):
+        s = _build_event_summary("trade_closed", {
+            "symbol": "BTC-EUR", "exit_reason": "stop_loss", "realized_pnl": -2.10,
+        })
+        assert "-2.10" in s
+
+    def test_candidate_accepted(self):
+        s = _build_event_summary("candidate_accepted", {
+            "symbol": "BTC-EUR", "sharpe": 0.245, "win_rate": 0.587,
+        })
+        assert "sharpe=0.245" in s
+        assert "win_rate=0.587" in s
+
+    def test_opportunity_detected(self):
+        s = _build_event_summary("opportunity_detected", {
+            "symbol": "ETH-EUR", "confidence": 0.83,
+        })
+        assert "ETH-EUR" in s
+        assert "confidence=0.83" in s
+
+    def test_repo_ingested(self):
+        s = _build_event_summary("repo_ingested", {
+            "repo": "user/repo-name", "stars": 142,
+        })
+        assert "user/repo-name" in s
+        assert "stars=142" in s
+
+    def test_pnl_summary(self):
+        s = _build_event_summary("pnl_summary", {
+            "trade_count": 5, "total_realized_pnl": 3.12, "win_rate": 0.60,
+        })
+        assert "5 closed" in s
+        assert "+3.12" in s
+        assert "winrate=60%" in s
+
+    def test_unknown_action_returns_action_or_symbol(self):
+        s = _build_event_summary("some_unknown_action", {"symbol": "BTC-EUR"})
+        assert "BTC-EUR" in s
+
+    def test_unknown_action_no_symbol_returns_action(self):
+        s = _build_event_summary("heartbeat_sent", {})
+        assert s == "heartbeat sent"
+
+
+# ---------------------------------------------------------------------------
+# TestAntEventsEndpoint
+# ---------------------------------------------------------------------------
+
+class TestAntEventsEndpoint:
+
+    def _write_event(self, path: Path, action: str, payload: dict,
+                     source: str = "ant-1", ts: str | None = None) -> None:
+        ts = ts or datetime.now(tz=timezone.utc).isoformat()
+        record = {
+            "timestamp": ts,
+            "source": source,
+            "payload": {"action": action, **payload},
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record) + "\n")
+
+    def test_empty_when_no_logs_root(self):
+        r = _client(ColonyContext()).get("/api/ants/research/events")
+        assert r.status_code == 200
+        d = r.json()
+        assert d["count"] == 0
+        assert d["events"] == []
+        assert d["ant_type"] == "research"
+
+    def test_unknown_ant_type_returns_404(self):
+        r = _client(ColonyContext()).get("/api/ants/nonexistent/events")
+        assert r.status_code == 404
+
+    def test_returns_events_for_known_type(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "research" / "ant-1.jsonl"
+            for i in range(3):
+                self._write_event(p, "candidate_accepted", {
+                    "symbol": "BTC-EUR", "sharpe": 0.3 + i * 0.1,
+                })
+            ctx = ColonyContext(logs_root=Path(tmp))
+            r = _client(ctx).get("/api/ants/research/events")
+        d = r.json()
+        assert d["count"] == 3
+        assert d["ant_type"] == "research"
+        for ev in d["events"]:
+            assert "action" in ev
+            assert "summary" in ev
+            assert "payload" in ev
+            assert "timestamp" in ev
+
+    def test_limit_respected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "research" / "ant-1.jsonl"
+            for i in range(10):
+                self._write_event(p, "candidate_accepted", {"symbol": "BTC-EUR"})
+            ctx = ColonyContext(logs_root=Path(tmp))
+            r = _client(ctx).get("/api/ants/research/events?limit=5")
+        d = r.json()
+        assert d["count"] == 5
+        assert d["has_more"] is True
+
+    def test_events_sorted_descending(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "scouts" / "ant-1.jsonl"
+            now = datetime.now(tz=timezone.utc)
+            for delta in [60, 30, 10]:   # oldest first in file
+                ts = (now - timedelta(seconds=delta)).isoformat()
+                self._write_event(p, "signal_detected", {"symbol": "BTC-EUR"}, ts=ts)
+            ctx = ColonyContext(logs_root=Path(tmp))
+            r = _client(ctx).get("/api/ants/scout/events")
+        events = r.json()["events"]
+        assert len(events) == 3
+        # Newest first → smallest delta first
+        ts0 = events[0]["timestamp"]
+        ts1 = events[1]["timestamp"]
+        ts2 = events[2]["timestamp"]
+        assert ts0 > ts1 > ts2
+
+    def test_events_older_than_24h_excluded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "research" / "ant-1.jsonl"
+            old_ts  = (datetime.now(tz=timezone.utc) - timedelta(hours=25)).isoformat()
+            new_ts  = datetime.now(tz=timezone.utc).isoformat()
+            self._write_event(p, "candidate_accepted", {"symbol": "OLD"}, ts=old_ts)
+            self._write_event(p, "candidate_accepted", {"symbol": "NEW"}, ts=new_ts)
+            ctx = ColonyContext(logs_root=Path(tmp))
+            r = _client(ctx).get("/api/ants/research/events")
+        d = r.json()
+        assert d["count"] == 1
+        assert d["events"][0]["payload"]["symbol"] == "NEW"
+
+    def test_has_more_false_when_all_fit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "research" / "ant-1.jsonl"
+            for _ in range(3):
+                self._write_event(p, "candidate_accepted", {"symbol": "BTC-EUR"})
+            ctx = ColonyContext(logs_root=Path(tmp))
+            r = _client(ctx).get("/api/ants/research/events?limit=10")
+        assert r.json()["has_more"] is False
+
+    def test_summary_populated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "paper" / "ant-1.jsonl"
+            self._write_event(p, "trade_opened", {
+                "symbol": "ETH-EUR", "side": "long",
+                "entry_price": 3000.0, "quantity": 0.01,
+            })
+            ctx = ColonyContext(logs_root=Path(tmp))
+            r = _client(ctx).get("/api/ants/paper/events")
+        ev = r.json()["events"][0]
+        assert "ETH-EUR" in ev["summary"]
+        assert ev["action"] == "trade_opened"
 
 
 # ---------------------------------------------------------------------------

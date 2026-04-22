@@ -12,6 +12,7 @@ Endpoints:
   GET  /api/brokers     — broker connecties en ingezet kapitaal (+ data-leeftijd)
   GET  /api/capital     — totaal/beschikbaar kapitaal per broker, inclusief holdings
   GET  /api/positions   — open paper posities met live PnL + SL/TP progress
+  GET  /api/ants/{ant_type}/events — laatste N events per ant-type (uitklap)
   GET  /api/ticker      — laatste 20 audit log events
   POST /api/missions    — geef een mission uit via de echte colony Queen
   POST /api/killswitch  — level 1/2/3 + scope, vereist operator_confirm=true
@@ -206,6 +207,20 @@ class OpenPositionsResponse(BaseModel):
     total_pnl_pct: float | None = None
     count: int
     fetched_at: str
+
+
+class AntEventEntry(BaseModel):
+    timestamp: str
+    action: str
+    summary: str
+    payload: dict[str, Any]
+
+
+class AntEventsResponse(BaseModel):
+    ant_type: str
+    events: list[AntEventEntry]
+    count: int
+    has_more: bool
 
 
 class TickerEvent(BaseModel):
@@ -1134,6 +1149,64 @@ def create_router(ctx: ColonyContext) -> APIRouter:
         return AntActivityResponse(ants=result)
 
     # ------------------------------------------------------------------
+    # GET /api/ants/{ant_type}/events
+    # ------------------------------------------------------------------
+
+    @router.get("/ants/{ant_type}/events", response_model=AntEventsResponse)
+    def get_ant_events(ant_type: str, limit: int = 10) -> AntEventsResponse:
+        """
+        Laatste N events voor een specifiek ant-type.
+
+        ant_type: korte naam zonder _ant suffix (bijv. "scout", "research",
+                  "paper") of equities sub-type ("sector_scout", "rs_regime").
+        limit:    aantal events (default 10, max 100).
+
+        Events zijn gesorteerd op timestamp descending (nieuwste eerst).
+        Alleen events van de laatste 24 uur worden teruggegeven.
+        """
+        if ant_type not in _ANT_EVENTS_DIRS:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=404, detail=f"Onbekend ant_type: {ant_type!r}")
+
+        limit = max(1, min(limit, 100))
+
+        if ctx.logs_root is None:
+            return AntEventsResponse(ant_type=ant_type, events=[], count=0, has_more=False)
+
+        subdir = _ANT_EVENTS_DIRS[ant_type]
+        records, _ = _read_ant_dir(ctx.logs_root, subdir)
+
+        cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=24)
+        recent = [
+            r for r in records
+            if (_parse_ts(r.get("timestamp")) or datetime.min.replace(tzinfo=timezone.utc)) >= cutoff
+        ]
+
+        # Nieuwste eerst
+        recent.sort(key=lambda r: r.get("timestamp", ""), reverse=True)
+
+        has_more  = len(recent) > limit
+        page      = recent[:limit]
+
+        events: list[AntEventEntry] = []
+        for r in page:
+            payload = r.get("payload") or {}
+            action  = _action_of(r)
+            events.append(AntEventEntry(
+                timestamp=r.get("timestamp") or "",
+                action=action,
+                summary=_build_event_summary(action, payload),
+                payload=payload,
+            ))
+
+        return AntEventsResponse(
+            ant_type=ant_type,
+            events=events,
+            count=len(events),
+            has_more=has_more,
+        )
+
+    # ------------------------------------------------------------------
     # GET /api/performance/chart
     # ------------------------------------------------------------------
 
@@ -1566,6 +1639,31 @@ _ANT_LOG_DIRS: dict[str, str] = {
     "claude_ant":    "claude",
 }
 
+# Kortere namen voor GET /api/ants/{ant_type}/events
+_ANT_EVENTS_DIRS: dict[str, str] = {
+    # Core ants (zonder _ant suffix)
+    "scout":        "scouts",
+    "research":     "research",
+    "paper":        "paper",
+    "audit":        "audit",
+    "ingestion":    "ingestion",
+    "strategy":     "strategy",
+    "execution":    "execution",
+    "operator":     "operator",
+    "claude":       "claude",
+    # Equities sub-ants
+    "sector_scout":  "equities/sector_scout",
+    "rs_regime":     "rs_regime",
+    "dividend":      "equities/dividend",
+    "fundamental":   "equities/fundamental",
+    "piotroski":     "equities/piotroski",
+    "breakout":      "equities/breakout",
+    "momentum_rank": "equities/momentum_rank",
+    "rotation":      "equities/rotation",
+    "rebalance":     "equities/rebalance",
+    "volatility":    "equities/volatility",
+}
+
 
 def _today_cutoff() -> datetime:
     now = datetime.now(tz=timezone.utc)
@@ -1604,6 +1702,89 @@ def _read_ant_dir(logs_root: Path, subdir: str) -> tuple[list[dict], bool]:
 
 def _action_of(rec: dict) -> str:
     return (rec.get("payload") or {}).get("action") or rec.get("event_type", "")
+
+
+def _build_event_summary(action: str, payload: dict) -> str:
+    """
+    Genereer een mensleesbare samenvatting van een log event.
+
+    Produceert een compacte string per action-type, bijv.:
+      trade_opened        → "BTC-EUR LONG 0.00075 @ 66402"
+      trade_closed        → "BTC-EUR stop_loss pnl=+0.54"
+      candidate_accepted  → "BTC-EUR sharpe=0.245 win_rate=0.587"
+      opportunity_detected→ "ETH-EUR confidence=0.83"
+    """
+    sym  = str(payload.get("symbol") or "")
+    side = str(payload.get("side") or "").upper()
+
+    if action == "trade_opened":
+        entry = payload.get("entry_price")
+        qty   = payload.get("quantity")
+        entry_s = f"{entry:.2f}" if entry is not None else "?"
+        qty_s   = f"{qty:.6g}" if qty is not None else "?"
+        return f"{sym} {side} {qty_s} @ {entry_s}".strip()
+
+    if action == "trade_closed":
+        reason = str(payload.get("exit_reason") or "")
+        pnl    = payload.get("realized_pnl")
+        pnl_s  = (f"pnl={'+' if pnl >= 0 else ''}{pnl:.2f}" if pnl is not None else "")
+        return " ".join(p for p in [sym, reason, pnl_s] if p)
+
+    if action in ("candidate_accepted", "candidate_evaluated", "candidate_proposed"):
+        sharpe = payload.get("sharpe")
+        wr     = payload.get("win_rate")
+        st     = str(payload.get("strategy_type") or "")
+        parts  = [p for p in [sym, st] if p]
+        if sharpe is not None:
+            parts.append(f"sharpe={sharpe:.3f}")
+        if wr is not None:
+            parts.append(f"win_rate={wr:.3f}")
+        return " ".join(parts)
+
+    if action in ("opportunity_detected", "signal_detected", "price_move", "volume_spike"):
+        conf = payload.get("confidence")
+        conf_s = f"confidence={conf:.2f}" if conf is not None else ""
+        sig_type = str(payload.get("signal_type") or "")
+        return " ".join(p for p in [sym, sig_type, conf_s] if p)
+
+    if action == "repo_ingested":
+        repo  = str(payload.get("repo") or payload.get("repo_name") or "")
+        stars = payload.get("stars")
+        stars_s = f"stars={stars}" if stars is not None else ""
+        return " ".join(p for p in [repo, stars_s] if p)
+
+    if action == "pnl_summary":
+        count = payload.get("trade_count")
+        pnl   = payload.get("total_realized_pnl")
+        wr    = payload.get("win_rate")
+        parts = []
+        if count is not None:
+            parts.append(f"{count} closed")
+        if pnl is not None:
+            parts.append(f"pnl={'+' if pnl >= 0 else ''}{pnl:.2f}")
+        if wr is not None:
+            parts.append(f"winrate={wr * 100:.0f}%")
+        return " ".join(parts)
+
+    if action == "audit_finding":
+        severity   = str(payload.get("severity") or "")
+        component  = str(payload.get("component") or "")
+        check_name = str(payload.get("check_name") or "")
+        detail     = str(payload.get("detail") or "")
+        label = " ".join(p for p in [severity, component, check_name] if p)
+        return f"{label} — {detail}" if detail else label
+
+    if action == "variant_generated":
+        st    = str(payload.get("strategy_type") or "")
+        grade = str(payload.get("grade") or "")
+        sharpe = payload.get("sharpe")
+        parts = [p for p in [sym, st, grade] if p]
+        if sharpe is not None:
+            parts.append(f"sharpe={sharpe:.3f}")
+        return " ".join(parts)
+
+    # Standaard: symbol (indien aanwezig), anders de action zelf
+    return sym if sym else action.replace("_", " ")
 
 
 def _event_short(rec: dict) -> str:
