@@ -435,7 +435,10 @@
       padding: 6px 9px;
       background: #faf9f5;
       flex-shrink: 0;
+      cursor: pointer;
+      transition: background .1s;
     }
+    .ac-card:hover { background: #f3f0e9; }
 
     .ac-hdr {
       display: flex; align-items: center;
@@ -476,6 +479,56 @@
       margin-left: 12px;
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
+
+    .ac-chevron {
+      font-size: 9px; color: var(--faint);
+      transition: transform .2s;
+      flex-shrink: 0; margin-left: 2px;
+    }
+    .ac-card.expanded .ac-chevron { transform: rotate(90deg); }
+
+    .ac-expand {
+      overflow: hidden;
+      max-height: 0;
+      transition: max-height .22s ease-out;
+    }
+    .ac-card.expanded .ac-expand { max-height: 420px; }
+
+    .ev-list {
+      padding-top: 5px;
+      border-top: .5px solid var(--border-soft);
+      margin-top: 4px;
+    }
+
+    .ev-row {
+      display: flex; align-items: baseline; gap: 5px;
+      padding: 3px 0;
+      border-bottom: .5px solid var(--border-soft);
+      font-size: 10px;
+    }
+    .ev-row:last-child { border-bottom: none; }
+
+    .ev-ts {
+      font-size: 9px;
+      font-family: 'SF Mono','Cascadia Code','Consolas',monospace;
+      color: var(--faint); flex-shrink: 0; min-width: 58px;
+    }
+
+    .ev-b {
+      display: inline-flex; align-items: center;
+      padding: 1px 5px; border-radius: 3px;
+      font-size: 8px; font-weight: 700;
+      letter-spacing: .2px; text-transform: uppercase; flex-shrink: 0;
+    }
+    .ev-b-green  { background: #d1fae5; color: #065f46; }
+    .ev-b-blue   { background: #dbeafe; color: #1e40af; }
+    .ev-b-yellow { background: #fef3c7; color: #92400e; }
+    .ev-b-muted  { background: #f3f4f6; color: #6b7280; }
+    .ev-b-orange { background: #ffedd5; color: #9a3412; }
+    .ev-b-red    { background: #fee2e2; color: #991b1b; }
+
+    .ev-summary { flex: 1; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .ev-empty { font-size: 10px; color: var(--faint); padding: 5px 0; }
 
     /* scrollable ant section */
     .card-scroll {
@@ -897,6 +950,8 @@ const S = {
   queenStatus: null,
   perfChart:   { points:[], total_pnl:0, curve_label:'vandaag', dag:0, week:0, maand:0, jaar:0, alltime:0 },
   equities:    null,
+  antEvents:   {},
+  expandedAnt: null,
   activeTab:   'colony',
   tickerIdx:   0,
   hbBase:      null,
@@ -1353,6 +1408,67 @@ function renderOpenPositions() {
   </div>`;
 }
 
+// ── Ant expand panel ──────────────────────────
+
+function evBadge(action) {
+  const a = (action || '').toLowerCase();
+  if (['trade_opened','candidate_accepted','trade_profit','repo_ingested'].some(k => a === k || a.includes(k)) && a.includes('open'))
+    return `<span class="ev-b ev-b-green">${action}</span>`;
+  if (a === 'trade_opened' || a === 'candidate_accepted')
+    return `<span class="ev-b ev-b-green">${action}</span>`;
+  if (a === 'trade_closed' || a.includes('close'))
+    return `<span class="ev-b ev-b-blue">${action}</span>`;
+  if (a === 'opportunity_detected' || a.includes('signal') || a.includes('candidate'))
+    return `<span class="ev-b ev-b-yellow">${action}</span>`;
+  if (a === 'repo_ingested' || a.includes('ingest'))
+    return `<span class="ev-b ev-b-muted">${action}</span>`;
+  if (a.includes('warning') || a.includes('audit'))
+    return `<span class="ev-b ev-b-orange">${action}</span>`;
+  if (a.includes('error') || a.includes('fail'))
+    return `<span class="ev-b ev-b-red">${action}</span>`;
+  return `<span class="ev-b ev-b-muted">${action}</span>`;
+}
+
+function _expandPanelHtml(antType) {
+  const data = S.antEvents[antType];
+  if (!data) return '<div class="ev-empty">Laden…</div>';
+  const evs = data.events || [];
+  if (!evs.length) return '<div class="ev-empty">Geen events in de laatste 24u</div>';
+  const rows = evs.map(e => {
+    let ts = '—';
+    try { ts = new Date(e.timestamp).toLocaleTimeString('nl-NL',{hour:'2-digit',minute:'2-digit',second:'2-digit'}); } catch {}
+    return `<div class="ev-row">
+      <span class="ev-ts">${ts}</span>
+      ${evBadge(e.action)}
+      <span class="ev-summary">${e.summary}</span>
+    </div>`;
+  }).join('');
+  const more = data.has_more
+    ? `<div style="font-size:9px;color:var(--faint);padding-top:3px">+ meer events…</div>`
+    : '';
+  return `<div class="ev-list">${rows}${more}</div>`;
+}
+
+async function refreshAntEvents(antType) {
+  if (!antType) return;
+  const d = await fetch(`/api/ants/${antType}/events?limit=10`).then(r => r.json()).catch(() => null);
+  if (d && !d.detail) {
+    S.antEvents[antType] = d;
+    renderActivity();
+  }
+}
+
+async function toggleAntExpand(antType) {
+  if (S.expandedAnt === antType) {
+    S.expandedAnt = null;
+    renderActivity();
+    return;
+  }
+  S.expandedAnt = antType;
+  renderActivity();
+  await refreshAntEvents(antType);
+}
+
 // ── Mieren activiteit (compact) ───────────────
 
 function renderActivity() {
@@ -1401,15 +1517,22 @@ function renderActivity() {
       ? '<div id="paper-positions-slot"></div>'
       : '';
 
-    return `<div class="ac-card">
+    const shortType  = a.ant_type.replace(/_ant$/, '');
+    const isExpanded = S.expandedAnt === shortType;
+    const expandedCls = isExpanded ? ' expanded' : '';
+    const expandHtml  = `<div class="ac-expand">${isExpanded ? _expandPanelHtml(shortType) : ''}</div>`;
+
+    return `<div class="ac-card${expandedCls}" onclick="toggleAntExpand('${shortType}')">
       <div class="ac-hdr">
         <div class="ac-dot" style="background:${c}"></div>
         <span class="ac-name">${name}</span>
         ${statsHtml}
         ${ts}
+        <span class="ac-chevron">▸</span>
       </div>
       <div class="ac-summary">${a.summary}</div>
       ${posSlot}
+      ${expandHtml}
     </div>`;
   }).join('');
 }
@@ -1749,6 +1872,9 @@ setInterval(rotateTicker, 4000);
 setInterval(async () => {
   const d = await fetch('/api/ants/activity').then(r => r.json()).catch(() => null);
   if (d) { S.activity = d; renderActivity(); }
+}, 10000);
+setInterval(async () => {
+  if (S.expandedAnt) await refreshAntEvents(S.expandedAnt);
 }, 10000);
 perSecond();
 
