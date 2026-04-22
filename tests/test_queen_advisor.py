@@ -80,11 +80,16 @@ def write_research_record(tmp_path: Path, candidate_id: str, symbol: str = "BTC-
         fh.write(json.dumps(record) + "\n")
 
 
-def write_trade(tmp_path: Path, symbol: str, pnl: float,
-                mission_id: str = "paper-mission-001") -> None:
+def write_trade(
+    tmp_path: Path,
+    symbol: str,
+    pnl: float,
+    mission_id: str = "paper-mission-001",
+    closed_at: str | None = None,
+) -> None:
     paper_dir = tmp_path / "paper"
     paper_dir.mkdir(parents=True, exist_ok=True)
-    trade = {
+    trade: dict = {
         "position_id":  str(uuid.uuid4()),
         "symbol":       symbol,
         "side":         "long",
@@ -92,6 +97,8 @@ def write_trade(tmp_path: Path, symbol: str, pnl: float,
         "realized_pnl": pnl,
         "exit_reason":  "take_profit",
     }
+    if closed_at is not None:
+        trade["closed_at"] = closed_at
     path = paper_dir / f"{mission_id}_trades.jsonl"
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(trade) + "\n")
@@ -203,6 +210,95 @@ def test_read_paper_stats_multiple_symbols(tmp_path: Path) -> None:
     stats = advisor._read_paper_stats()
     assert "BTC-EUR" in stats
     assert "ETH-EUR" in stats
+
+
+def test_read_paper_stats_recent_trade_included(tmp_path: Path) -> None:
+    """Trade met closed_at binnen het venster → meegenomen."""
+    advisor = make_advisor(tmp_path)
+    recent_ts = (datetime.now(tz=timezone.utc) - timedelta(days=1)).isoformat()
+    write_trade(tmp_path, "BTC-EUR", pnl=10.0, closed_at=recent_ts)
+    stats = advisor._read_paper_stats()
+    assert stats["BTC-EUR"]["total_trades"] == 1
+
+
+def test_read_paper_stats_old_trade_excluded(tmp_path: Path) -> None:
+    """Trade met closed_at ouder dan stats_window_days → genegeerd."""
+    advisor = make_advisor(tmp_path)
+    old_ts = (datetime.now(tz=timezone.utc) - timedelta(days=8)).isoformat()
+    write_trade(tmp_path, "ETH-EUR", pnl=-5.0, closed_at=old_ts)
+    stats = advisor._read_paper_stats()
+    assert "ETH-EUR" not in stats
+
+
+def test_read_paper_stats_no_closed_at_included(tmp_path: Path) -> None:
+    """Trade zonder closed_at → fail-open: altijd meegenomen."""
+    advisor = make_advisor(tmp_path)
+    write_trade(tmp_path, "SOL-EUR", pnl=3.0)   # geen closed_at
+    stats = advisor._read_paper_stats()
+    assert "SOL-EUR" in stats
+    assert stats["SOL-EUR"]["total_trades"] == 1
+
+
+def test_read_paper_stats_mixed_old_and_recent(tmp_path: Path) -> None:
+    """Combinatie van oude en recente trades — alleen recente tellen mee voor win_rate."""
+    advisor = make_advisor(tmp_path)
+    old_ts    = (datetime.now(tz=timezone.utc) - timedelta(days=10)).isoformat()
+    recent_ts = (datetime.now(tz=timezone.utc) - timedelta(hours=12)).isoformat()
+    # 5 oude verliezen (worden genegeerd)
+    for _ in range(5):
+        write_trade(tmp_path, "BTC-EUR", pnl=-10.0, closed_at=old_ts)
+    # 4 recente winsten
+    for _ in range(4):
+        write_trade(tmp_path, "BTC-EUR", pnl=10.0, closed_at=recent_ts)
+    stats = advisor._read_paper_stats()
+    assert stats["BTC-EUR"]["total_trades"] == 4
+    assert abs(stats["BTC-EUR"]["win_rate"] - 1.0) < 1e-6
+
+
+def test_read_paper_stats_old_losses_no_longer_trigger_deprioriteer(tmp_path: Path) -> None:
+    """Win_rate 0% op 35 oude trades triggert geen deprioriteer meer na tijdfilter."""
+    queen = make_queen(tmp_path)
+    mission_mock = MagicMock()
+    mission_mock.ant_type = "paper_ant"
+    mission_mock.market_scope.symbols = ["ETH-EUR"]
+    queen.active_missions = {"paper-mission-eth": mission_mock}
+    advisor = QueenAdvisor(queen=queen, logs_root=tmp_path)
+
+    cid = str(uuid.uuid4())
+    write_research_record(tmp_path, cid, symbol="ETH-EUR")
+
+    old_ts = (datetime.now(tz=timezone.utc) - timedelta(days=30)).isoformat()
+    for _ in range(35):   # 35 verlies-trades uit het verleden (bevroren prijzen)
+        write_trade(tmp_path, "ETH-EUR", pnl=-5.0, closed_at=old_ts)
+
+    decision = advisor.advise()
+    assert cid not in decision.deprioriteer_kandidaten
+    assert "paper-mission-eth" not in decision.kapitaal_verlagen
+
+
+def test_read_paper_stats_startup_log_written_once(tmp_path: Path, caplog) -> None:
+    """Startup-log met historisch/recent tally wordt precies één keer geschreven."""
+    import logging
+    advisor = make_advisor(tmp_path)
+    old_ts = (datetime.now(tz=timezone.utc) - timedelta(days=14)).isoformat()
+    write_trade(tmp_path, "BTC-EUR", pnl=-1.0, closed_at=old_ts)
+
+    with caplog.at_level(logging.INFO, logger="ant_colony.queen.queen_advisor"):
+        advisor._read_paper_stats()
+        advisor._read_paper_stats()   # tweede aanroep
+
+    startup_logs = [r for r in caplog.records if "Queen stats:" in r.message]
+    assert len(startup_logs) == 1   # precies één keer
+
+
+def test_read_paper_stats_window_respects_custom_days(tmp_path: Path) -> None:
+    """stats_window_days=3 negeert trades van 4 dagen oud."""
+    queen = make_queen(tmp_path)
+    advisor = QueenAdvisor(queen=queen, logs_root=tmp_path, stats_window_days=3)
+    borderline_ts = (datetime.now(tz=timezone.utc) - timedelta(days=4)).isoformat()
+    write_trade(tmp_path, "BTC-EUR", pnl=10.0, closed_at=borderline_ts)
+    stats = advisor._read_paper_stats()
+    assert "BTC-EUR" not in stats
 
 
 # ---------------------------------------------------------------------------

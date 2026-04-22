@@ -13,7 +13,7 @@ import pytest
 
 # Voeg scripts/ toe aan het pad zodat we de module kunnen importeren
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
-from reset_paper_state import _archive_paper_logs, _collect_paper_files
+from reset_paper_state import _archive_paper_logs, _archive_queen_log, _collect_paper_files
 
 
 # ---------------------------------------------------------------------------
@@ -141,3 +141,45 @@ class TestArchivePaperLogs:
         approved_file = _write(tmp_path / "approved" / "candidate.jsonl")
         _archive_paper_logs(tmp_path, yes=True)
         assert approved_file.exists()
+
+
+# ---------------------------------------------------------------------------
+# _archive_queen_log (FIX 2 — optionele Queen audit-log reset)
+# ---------------------------------------------------------------------------
+
+class TestArchiveQueenLog:
+    def test_no_queen_dir_returns_zero(self, tmp_path: Path) -> None:
+        count = _archive_queen_log(tmp_path, yes=True)
+        assert count == 0
+
+    def test_empty_queen_dir_returns_zero(self, tmp_path: Path) -> None:
+        (tmp_path / "queen").mkdir()
+        count = _archive_queen_log(tmp_path, yes=True)
+        assert count == 0
+
+    def test_archives_decisions_jsonl(self, tmp_path: Path) -> None:
+        _write(tmp_path / "queen" / "decisions.jsonl", '{"timestamp": "2026-04-22"}')
+        count = _archive_queen_log(tmp_path, yes=True)
+        assert count == 1
+        assert not (tmp_path / "queen" / "decisions.jsonl").exists()
+        archives = list((tmp_path / "queen_archive").rglob("decisions.jsonl"))
+        assert len(archives) == 1
+
+    def test_dry_run_does_not_move(self, tmp_path: Path) -> None:
+        src = _write(tmp_path / "queen" / "decisions.jsonl")
+        count = _archive_queen_log(tmp_path, dry_run=True)
+        assert count == 0
+        assert src.exists()
+
+    def test_paper_dir_untouched(self, tmp_path: Path) -> None:
+        """_archive_queen_log raakt ANT_LOGS/paper/ niet aan."""
+        paper_file = _write(tmp_path / "paper" / "ant.jsonl")
+        _write(tmp_path / "queen" / "decisions.jsonl")
+        _archive_queen_log(tmp_path, yes=True)
+        assert paper_file.exists()
+
+    def test_archives_multiple_queen_files(self, tmp_path: Path) -> None:
+        for name in ("decisions.jsonl", "allocations.jsonl"):
+            _write(tmp_path / "queen" / name)
+        count = _archive_queen_log(tmp_path, yes=True)
+        assert count == 2

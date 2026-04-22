@@ -1206,6 +1206,51 @@ class TestZombiePositionDetection:
         ant = make_ant(logs_root=tmp_path)
         assert ("ETH-EUR", "rsi_oversold") in ant._open_research_keys
 
+    def test_zombie_filter_consistent_scout_and_research(self, tmp_path: Path) -> None:
+        """
+        Zombie-filter (>24u) wordt consistent toegepast op zowel scout- als
+        research-posities bij herstel na herstart.
+
+        Verifies FIX 3: beide _load_open_symbols_from_logs() en
+        _load_research_keys_from_logs() moeten identiek gedrag tonen voor
+        posities ouder dan _ZOMBIE_POSITION_HOURS.
+        """
+        old_ts    = (datetime.now(tz=timezone.utc) - timedelta(hours=25)).isoformat()
+        recent_ts = (datetime.now(tz=timezone.utc) - timedelta(hours=2)).isoformat()
+        paper_dir = tmp_path / "paper"
+
+        old_pid    = str(uuid.uuid4())
+        recent_pid = str(uuid.uuid4())
+
+        # Oude scout positie (>24u) — moet genegeerd worden
+        _write_paper_log_with_ts(paper_dir, "ant-old", "trade_opened", old_pid, "BTC-EUR", old_ts)
+        # Recente scout positie (<24u) — moet hersteld worden
+        _write_paper_log_with_ts(paper_dir, "ant-new", "trade_opened", recent_pid, "ETH-EUR", recent_ts)
+
+        old_r_pid    = str(uuid.uuid4())
+        recent_r_pid = str(uuid.uuid4())
+
+        # Oude research positie (>24u) — moet genegeerd worden
+        _write_paper_log_with_ts(
+            paper_dir, "ant-old", "trade_opened", old_r_pid, "BTC-EUR", old_ts,
+            strategy_type="sma_crossover",
+        )
+        # Recente research positie (<24u) — moet hersteld worden
+        _write_paper_log_with_ts(
+            paper_dir, "ant-new", "trade_opened", recent_r_pid, "ETH-EUR", recent_ts,
+            strategy_type="rsi_oversold",
+        )
+
+        ant = make_ant(logs_root=tmp_path)
+
+        # Scout: BTC-EUR (oud) weg, ETH-EUR (recent) aanwezig
+        assert "BTC-EUR" not in ant._open_symbols
+        assert "ETH-EUR" in ant._open_symbols
+
+        # Research: BTC/sma_crossover (oud) weg, ETH/rsi_oversold (recent) aanwezig
+        assert ("BTC-EUR", "sma_crossover") not in ant._open_research_keys
+        assert ("ETH-EUR", "rsi_oversold") in ant._open_research_keys
+
 
 # ---------------------------------------------------------------------------
 # Biome-filter in _read_new_scout_signals

@@ -46,6 +46,10 @@ _MIN_TRADES_HIGH  = 20     # minimale trades voor verhogen
 _MIN_TRADES_LOW   = 10     # minimale trades voor verlagen
 _CLAUDE_MIN_CONF  = 6      # minimale confidence voor Claude advies
 
+# Paper stats tijdvenster — historische trades (pre-reset, bevroren prijzen) buiten
+# dit venster worden genegeerd bij win_rate berekening.
+_STATS_WINDOW_DAYS = 7
+
 
 # ---------------------------------------------------------------------------
 # Diversiteitselectie — top-N met unieke symbolen én strategy_types
@@ -167,11 +171,14 @@ class QueenAdvisor:
         queen,
         logs_root: Path | None,
         advice_ttl_minutes: int = 60,
+        stats_window_days: int = _STATS_WINDOW_DAYS,
     ) -> None:
-        self._queen       = queen
-        self._logs_root   = logs_root
-        self._advice_ttl  = timedelta(minutes=advice_ttl_minutes)
-        self._log         = logging.getLogger(f"{__name__}.advisor")
+        self._queen             = queen
+        self._logs_root         = logs_root
+        self._advice_ttl        = timedelta(minutes=advice_ttl_minutes)
+        self._stats_window      = timedelta(days=stats_window_days)
+        self._log               = logging.getLogger(f"{__name__}.advisor")
+        self._stats_window_logged = False   # one-time startup log guard
 
     # ------------------------------------------------------------------
     # Publieke interface
@@ -247,6 +254,14 @@ class QueenAdvisor:
         """
         Bereken paper-trade statistieken per symbool.
 
+        Alleen trades van de afgelopen _stats_window_days dagen worden meegenomen
+        (op basis van het 'closed_at' veld). Trades zonder geldige closed_at worden
+        altijd meegenomen (fail-open). Historische trades worden genegeerd zodat
+        bevroren entry-prijzen uit voor een reset de win_rate niet vertekenen.
+
+        Eenmalig bij de eerste aanroep wordt een startup-log geschreven met het
+        aantal recente vs. historische trades per symbool.
+
         Retourneert: symbol → {"total_trades": int, "win_count": int,
                                 "win_rate": float, "total_pnl": float}
         """
@@ -256,7 +271,9 @@ class QueenAdvisor:
         if not paper_dir.exists():
             return {}
 
+        cutoff = datetime.now(tz=timezone.utc) - self._stats_window
         stats: dict[str, dict] = {}
+        skipped_per_symbol: dict[str, int] = {}
 
         for path in paper_dir.glob("*_trades.jsonl"):
             try:
@@ -271,6 +288,22 @@ class QueenAdvisor:
                     pnl    = trade.get("realized_pnl", 0.0) or 0.0
                     if not symbol:
                         continue
+
+                    # Tijdfilter op closed_at — trades buiten het venster overslaan.
+                    closed_at_str = trade.get("closed_at")
+                    if closed_at_str:
+                        try:
+                            closed_at = datetime.fromisoformat(
+                                str(closed_at_str).replace("Z", "+00:00")
+                            )
+                            if closed_at < cutoff:
+                                skipped_per_symbol[symbol] = (
+                                    skipped_per_symbol.get(symbol, 0) + 1
+                                )
+                                continue
+                        except (ValueError, TypeError):
+                            pass  # ongeldig formaat → fail-open, trade meenemen
+
                     if symbol not in stats:
                         stats[symbol] = {"total_trades": 0, "win_count": 0, "total_pnl": 0.0}
                     stats[symbol]["total_trades"] += 1
@@ -283,6 +316,24 @@ class QueenAdvisor:
         for s in stats.values():
             t = s["total_trades"]
             s["win_rate"] = s["win_count"] / t if t > 0 else 0.0
+
+        if not self._stats_window_logged:
+            self._stats_window_logged = True
+            total_recent   = sum(s["total_trades"] for s in stats.values())
+            total_skipped  = sum(skipped_per_symbol.values())
+            self._log.info(
+                "Queen stats: %d trades van laatste %dd, %d historisch genegeerd%s",
+                total_recent,
+                self._stats_window.days,
+                total_skipped,
+                (
+                    " — " + ", ".join(
+                        f"{sym}: {n} overgeslagen"
+                        for sym, n in sorted(skipped_per_symbol.items())
+                    )
+                    if skipped_per_symbol else ""
+                ),
+            )
 
         return stats
 
