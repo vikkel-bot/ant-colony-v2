@@ -890,6 +890,7 @@ class PaperAnt:
             "action":           "trade_opened",
             "position_id":      position.position_id,
             "symbol":           position.symbol,
+            "biome":            position.biome,
             "side":             position.side.value,
             "entry_price":      position.entry_price,
             "effective_entry":  effective_entry,

@@ -24,7 +24,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 from ant_colony.colony.scheduler.colony_scheduler import ColonyScheduler, ColonyStatus
-from ant_colony.dashboard.api import ColonyContext, create_router, _parse_ts
+from ant_colony.dashboard.api import (
+    ColonyContext, create_router, _parse_ts,
+    _compute_sl_tp_progress, _read_open_positions_from_logs,
+)
 from ant_colony.dashboard.server import create_app
 from ant_colony.queen.queen import Queen
 from ant_colony.schemas.mission import MarketScope, Mission, RiskLimits, SuccessConditions
@@ -622,6 +625,219 @@ class TestCapitalEndpoint:
         assert d["available_eur"] == pytest.approx(1080.0)
         assert d["holdings_eur"] == pytest.approx(700.0)
         assert len(d["brokers"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# TestSlTpProgress — unit tests voor de helper
+# ---------------------------------------------------------------------------
+
+class TestSlTpProgress:
+
+    def test_long_at_sl_returns_zero(self):
+        assert _compute_sl_tp_progress("long", 90.0, sl=90.0, tp=110.0) == pytest.approx(0.0)
+
+    def test_long_at_tp_returns_one(self):
+        assert _compute_sl_tp_progress("long", 110.0, sl=90.0, tp=110.0) == pytest.approx(1.0)
+
+    def test_long_at_entry_symmetric_is_half(self):
+        # entry = 100, SL = 90, TP = 110 → (100-90)/(110-90) = 0.5
+        assert _compute_sl_tp_progress("long", 100.0, sl=90.0, tp=110.0) == pytest.approx(0.5)
+
+    def test_short_at_sl_returns_zero(self):
+        # SHORT: SL is above entry, TP is below
+        assert _compute_sl_tp_progress("short", 110.0, sl=110.0, tp=90.0) == pytest.approx(0.0)
+
+    def test_short_at_tp_returns_one(self):
+        assert _compute_sl_tp_progress("short", 90.0, sl=110.0, tp=90.0) == pytest.approx(1.0)
+
+    def test_short_at_entry_symmetric_is_half(self):
+        # entry = 100, SL = 110, TP = 90 → (110-100)/(110-90) = 0.5
+        assert _compute_sl_tp_progress("short", 100.0, sl=110.0, tp=90.0) == pytest.approx(0.5)
+
+    def test_none_current_returns_none(self):
+        assert _compute_sl_tp_progress("long", None, sl=90.0, tp=110.0) is None
+
+    def test_clamped_below_zero(self):
+        # price below SL → clamped to 0.0
+        assert _compute_sl_tp_progress("long", 80.0, sl=90.0, tp=110.0) == pytest.approx(0.0)
+
+    def test_clamped_above_one(self):
+        # price above TP → clamped to 1.0
+        assert _compute_sl_tp_progress("long", 120.0, sl=90.0, tp=110.0) == pytest.approx(1.0)
+
+    def test_zero_range_returns_none(self):
+        # sl == tp → invalid
+        assert _compute_sl_tp_progress("long", 100.0, sl=100.0, tp=100.0) is None
+
+
+# ---------------------------------------------------------------------------
+# TestReadOpenPositionsFromLogs
+# ---------------------------------------------------------------------------
+
+class TestReadOpenPositionsFromLogs:
+
+    def _write_event(self, path: Path, action: str, payload: dict,
+                     source: str = "ant-1", ts: str | None = None) -> None:
+        ts = ts or datetime.now(tz=timezone.utc).isoformat()
+        record = {"timestamp": ts, "source": source, "payload": {"action": action, **payload}}
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record) + "\n")
+
+    def test_no_paper_dir_returns_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = _read_open_positions_from_logs(Path(tmp))
+        assert result == []
+
+    def test_opened_without_closed_returned(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "paper" / "ant-1.jsonl"
+            self._write_event(p, "trade_opened", {
+                "position_id": "pos-1", "symbol": "BTC-EUR", "biome": "crypto",
+                "side": "long", "entry_price": 100.0, "quantity": 0.01,
+                "stop_loss": 90.0, "take_profit": 120.0, "strategy_type": "sma",
+            })
+            result = _read_open_positions_from_logs(Path(tmp))
+        assert len(result) == 1
+        assert result[0]["position_id"] == "pos-1"
+        assert result[0]["symbol"] == "BTC-EUR"
+
+    def test_opened_and_closed_not_returned(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "paper" / "ant-1.jsonl"
+            self._write_event(p, "trade_opened", {"position_id": "pos-1", "symbol": "BTC-EUR"})
+            self._write_event(p, "trade_closed", {"position_id": "pos-1"})
+            result = _read_open_positions_from_logs(Path(tmp))
+        assert result == []
+
+    def test_zombie_position_skipped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "paper" / "ant-1.jsonl"
+            old_ts = (datetime.now(tz=timezone.utc) - timedelta(hours=25)).isoformat()
+            self._write_event(p, "trade_opened", {
+                "position_id": "old-pos", "symbol": "ETH-EUR",
+            }, ts=old_ts)
+            result = _read_open_positions_from_logs(Path(tmp))
+        assert result == []
+
+
+# ---------------------------------------------------------------------------
+# TestPositionsEndpoint
+# ---------------------------------------------------------------------------
+
+class TestPositionsEndpoint:
+
+    def _write_event(self, path: Path, action: str, payload: dict,
+                     source: str = "ant-1", ts: str | None = None) -> None:
+        ts = ts or datetime.now(tz=timezone.utc).isoformat()
+        record = {"timestamp": ts, "source": source, "payload": {"action": action, **payload}}
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record) + "\n")
+
+    def _make_adapter(self, close_price: float) -> MagicMock:
+        from ant_colony.biome.biome_adapter import MarketData
+        md = MagicMock(spec=MarketData)
+        md.close = close_price
+        adapter = MagicMock()
+        adapter.get_market_data.return_value = md
+        return adapter
+
+    def test_empty_when_no_logs_root(self):
+        r = _client(ColonyContext()).get("/api/positions")
+        d = r.json()
+        assert d["count"] == 0
+        assert d["positions"] == []
+        assert "fetched_at" in d
+
+    def test_empty_when_no_positions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = ColonyContext(logs_root=Path(tmp))
+            r = _client(ctx).get("/api/positions")
+        assert r.json()["count"] == 0
+
+    def test_pnl_calculated_correctly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "paper" / "ant-1.jsonl"
+            self._write_event(p, "trade_opened", {
+                "position_id": "pos-1", "symbol": "BTC-EUR", "biome": "crypto",
+                "side": "long", "entry_price": 100.0, "quantity": 1.0,
+                "stop_loss": 90.0, "take_profit": 120.0,
+            })
+            adapter = self._make_adapter(close_price=110.0)
+            registry = MagicMock()
+            registry.list_biomes.return_value = ["crypto"]
+            registry.get.return_value = adapter
+            ctx = ColonyContext(logs_root=Path(tmp), biome_registry=registry)
+            r = _client(ctx).get("/api/positions")
+        d = r.json()
+        assert d["count"] == 1
+        pos = d["positions"][0]
+        assert pos["current_price"] == pytest.approx(110.0)
+        assert pos["pnl_eur"]       == pytest.approx(10.0)
+        assert pos["pnl_pct"]       == pytest.approx(10.0)
+        assert d["total_pnl_eur"]   == pytest.approx(10.0)
+
+    def test_sl_tp_progress_at_entry(self):
+        # entry=100, SL=90, TP=120 → current=100 → progress=(100-90)/(120-90)=0.333
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "paper" / "ant-1.jsonl"
+            self._write_event(p, "trade_opened", {
+                "position_id": "pos-1", "symbol": "BTC-EUR", "biome": "crypto",
+                "side": "long", "entry_price": 100.0, "quantity": 1.0,
+                "stop_loss": 90.0, "take_profit": 120.0,
+            })
+            adapter = self._make_adapter(close_price=100.0)
+            registry = MagicMock()
+            registry.list_biomes.return_value = ["crypto"]
+            registry.get.return_value = adapter
+            ctx = ColonyContext(logs_root=Path(tmp), biome_registry=registry)
+            r = _client(ctx).get("/api/positions")
+        pos = r.json()["positions"][0]
+        assert pos["sl_tp_progress"] == pytest.approx(10/30, rel=1e-3)
+
+    def test_no_live_price_returns_null_pnl(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "paper" / "ant-1.jsonl"
+            self._write_event(p, "trade_opened", {
+                "position_id": "pos-1", "symbol": "BTC-EUR", "biome": "crypto",
+                "side": "long", "entry_price": 100.0, "quantity": 1.0,
+                "stop_loss": 90.0, "take_profit": 120.0,
+            })
+            ctx = ColonyContext(logs_root=Path(tmp))   # geen registry
+            r = _client(ctx).get("/api/positions")
+        pos = r.json()["positions"][0]
+        assert pos["current_price"]  is None
+        assert pos["pnl_eur"]        is None
+        assert pos["pnl_pct"]        is None
+        assert pos["sl_tp_progress"] is None
+        assert r.json()["total_pnl_eur"] is None
+
+    def test_multiple_positions_summed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "paper" / "ant-1.jsonl"
+            for i, (entry, price) in enumerate([(100.0, 110.0), (200.0, 210.0)]):
+                self._write_event(p, "trade_opened", {
+                    "position_id": f"pos-{i}", "symbol": "BTC-EUR", "biome": "crypto",
+                    "side": "long", "entry_price": entry, "quantity": 1.0,
+                    "stop_loss": entry * 0.9, "take_profit": entry * 1.2,
+                })
+            adapter = MagicMock()
+            from ant_colony.biome.biome_adapter import MarketData
+            # Return different price per call
+            adapter.get_market_data.side_effect = [
+                MagicMock(spec=MarketData, close=110.0),
+                MagicMock(spec=MarketData, close=210.0),
+            ]
+            registry = MagicMock()
+            registry.list_biomes.return_value = ["crypto"]
+            registry.get.return_value = adapter
+            ctx = ColonyContext(logs_root=Path(tmp), biome_registry=registry)
+            r = _client(ctx).get("/api/positions")
+        d = r.json()
+        assert d["count"] == 2
+        # pnl: 10 + 10 = 20
+        assert d["total_pnl_eur"] == pytest.approx(20.0)
 
 
 # ---------------------------------------------------------------------------

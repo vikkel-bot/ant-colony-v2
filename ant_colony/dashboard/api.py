@@ -11,6 +11,7 @@ Endpoints:
   GET  /api/ants        — actieve agents met TTL countdown
   GET  /api/brokers     — broker connecties en ingezet kapitaal (+ data-leeftijd)
   GET  /api/capital     — totaal/beschikbaar kapitaal per broker, inclusief holdings
+  GET  /api/positions   — open paper posities met live PnL + SL/TP progress
   GET  /api/ticker      — laatste 20 audit log events
   POST /api/missions    — geef een mission uit via de echte colony Queen
   POST /api/killswitch  — level 1/2/3 + scope, vereist operator_confirm=true
@@ -26,6 +27,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -74,6 +76,7 @@ class ColonyContext:
     logs_root: Path | None = None
     broker_names: dict[str, str] = field(default_factory=dict)
     biome_registry: BiomeRegistry | None = None
+    paper_ledgers: list = field(default_factory=list)  # list[PaperLedger] — optioneel in-memory
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +180,32 @@ class CapitalSummaryResponse(BaseModel):
     holdings_eur: float            # som holdings-waarde over alle brokers
     brokers: list[CapitalBrokerEntry]
     fetched_at: str                # ISO timestamp van deze response
+
+
+class OpenPositionEntry(BaseModel):
+    position_id: str
+    symbol: str
+    biome: str
+    side: str                              # "long" | "short"
+    entry_price: float
+    current_price: float | None = None     # None als live prijs niet beschikbaar
+    quantity: float
+    stop_loss_price: float
+    take_profit_price: float
+    pnl_eur: float | None = None           # None als current_price ontbreekt
+    pnl_pct: float | None = None           # None als current_price ontbreekt
+    opened_at: str                         # ISO timestamp
+    age_seconds: float
+    strategy_type: str | None = None
+    sl_tp_progress: float | None = None    # 0.0=bij SL, 1.0=bij TP; None als geen prijs
+
+
+class OpenPositionsResponse(BaseModel):
+    positions: list[OpenPositionEntry]
+    total_pnl_eur: float | None = None
+    total_pnl_pct: float | None = None
+    count: int
+    fetched_at: str
 
 
 class TickerEvent(BaseModel):
@@ -782,6 +811,116 @@ def create_router(ctx: ColonyContext) -> APIRouter:
         )
 
     # ------------------------------------------------------------------
+    # GET /api/positions
+    # ------------------------------------------------------------------
+
+    @router.get("/positions", response_model=OpenPositionsResponse)
+    def get_positions() -> OpenPositionsResponse:
+        """
+        Open paper posities met live PnL en SL/TP progress.
+
+        Data bronnen (prioriteit):
+          1. ctx.paper_ledgers — directe in-memory toegang (als geïnjecteerd)
+          2. ctx.logs_root     — scan ANT_LOGS/paper/*.jsonl
+
+        Fail-closed: als live prijs niet beschikbaar is, worden current_price,
+        pnl_eur, pnl_pct en sl_tp_progress gevuld met None.
+        """
+        fetched_at = datetime.now(tz=timezone.utc).isoformat()
+        now        = datetime.now(tz=timezone.utc)
+
+        # --- Verzamel ruwe positiedata ---
+        raw: list[dict] = []
+
+        if ctx.paper_ledgers:
+            for ledger in ctx.paper_ledgers:
+                for pos in ledger.open_positions:
+                    raw.append({
+                        "position_id":      pos.position_id,
+                        "symbol":           pos.symbol,
+                        "biome":            pos.biome,
+                        "side":             pos.side.value,
+                        "entry_price":      pos.entry_price,
+                        "quantity":         pos.quantity,
+                        "stop_loss_price":  pos.stop_loss_price,
+                        "take_profit_price": pos.take_profit_price,
+                        "opened_at":        pos.opened_at.isoformat(),
+                        "strategy_type":    None,  # niet beschikbaar via ledger
+                    })
+        elif ctx.logs_root is not None:
+            raw = _read_open_positions_from_logs(ctx.logs_root)
+
+        # --- Verrijk met live prijs en bereken PnL ---
+        entries: list[OpenPositionEntry] = []
+        total_pnl_eur = 0.0
+        has_any_pnl   = False
+
+        for r in raw:
+            opened_at_str = r.get("opened_at") or ""
+            opened_dt     = _parse_ts(opened_at_str)
+            age_sec       = (now - opened_dt).total_seconds() if opened_dt else 0.0
+
+            entry    = float(r.get("entry_price") or 0)
+            qty      = float(r.get("quantity")    or 0)
+            sl_price = float(r.get("stop_loss_price") or r.get("stop_loss") or 0)
+            tp_price = float(r.get("take_profit_price") or r.get("take_profit") or 0)
+            side     = str(r.get("side") or "long")
+            biome_id = str(r.get("biome") or "crypto")
+
+            # Live prijs ophalen
+            current: float | None = None
+            if ctx.biome_registry is not None and r.get("symbol"):
+                current = _get_live_price(ctx.biome_registry, biome_id, str(r["symbol"]))
+
+            # PnL berekenen
+            pnl_eur: float | None = None
+            pnl_pct: float | None = None
+            if current is not None and entry > 0 and qty > 0:
+                raw_pnl = (current - entry) * qty if side == "long" else (entry - current) * qty
+                pnl_eur = round(raw_pnl, 4)
+                pnl_pct = round(raw_pnl / (entry * qty) * 100, 4)
+                total_pnl_eur += pnl_eur
+                has_any_pnl = True
+
+            # SL/TP progress
+            progress = _compute_sl_tp_progress(side, current, sl_price, tp_price)
+
+            entries.append(OpenPositionEntry(
+                position_id=str(r.get("position_id") or ""),
+                symbol=str(r.get("symbol") or ""),
+                biome=biome_id,
+                side=side,
+                entry_price=entry,
+                current_price=current,
+                quantity=qty,
+                stop_loss_price=sl_price,
+                take_profit_price=tp_price,
+                pnl_eur=pnl_eur,
+                pnl_pct=pnl_pct,
+                opened_at=opened_at_str,
+                age_seconds=round(age_sec, 0),
+                strategy_type=r.get("strategy_type"),
+                sl_tp_progress=progress,
+            ))
+
+        # Totaal PnL als percentage van ingezette waarde
+        total_entry_val = sum(
+            float(r.get("entry_price") or 0) * float(r.get("quantity") or 0)
+            for r in raw
+        )
+        total_pnl_pct: float | None = None
+        if has_any_pnl and total_entry_val > 0:
+            total_pnl_pct = round(total_pnl_eur / total_entry_val * 100, 4)
+
+        return OpenPositionsResponse(
+            positions=entries,
+            total_pnl_eur=round(total_pnl_eur, 4) if has_any_pnl else None,
+            total_pnl_pct=total_pnl_pct,
+            count=len(entries),
+            fetched_at=fetched_at,
+        )
+
+    # ------------------------------------------------------------------
     # GET /api/ticker
     # ------------------------------------------------------------------
 
@@ -1115,6 +1254,145 @@ def create_router(ctx: ColonyContext) -> APIRouter:
         )
 
     return router
+
+
+# ---------------------------------------------------------------------------
+# Intern — open posities helpers
+# ---------------------------------------------------------------------------
+
+_POSITION_ZOMBIE_SECONDS: int = 24 * 3600   # posities ouder dan 24u = zombie
+
+
+def _read_open_positions_from_logs(logs_root: Path) -> list[dict]:
+    """
+    Lees openstaande paper posities uit ANT_LOGS/paper/*.jsonl.
+
+    Strategie:
+      - Verzamel alle trade_opened en trade_closed events uit de meest recente
+        ant-sessie (latest source UUID — voorkomt zombie-posities van vorige runs).
+      - Retourneer posities met trade_opened maar zonder matching trade_closed.
+      - Posities ouder dan 24u worden als zombie beschouwd en overgeslagen.
+
+    Retourneert een lijst van payload-dicts (keys: position_id, symbol, biome,
+    side, entry_price, quantity, stop_loss, take_profit, strategy_type, opened_at).
+    """
+    paper_dir = logs_root / "paper"
+    if not paper_dir.exists():
+        return []
+
+    records: list[dict] = []
+    for path in paper_dir.glob("*.jsonl"):
+        if "_trades" in path.name:
+            continue
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line:
+                    try:
+                        records.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        pass
+        except OSError:
+            pass
+
+    session_recs = _latest_session_records(records)
+    now          = time.time()
+
+    opened:     dict[str, dict]  = {}   # position_id → payload
+    opened_age: dict[str, float] = {}   # position_id → unix timestamp (from event ts)
+    closed_ids: set[str]         = set()
+
+    for r in session_recs:
+        payload = r.get("payload") or {}
+        action  = payload.get("action")
+        pos_id  = str(payload.get("position_id") or "")
+        if not pos_id:
+            continue
+
+        if action == "trade_opened":
+            rec_ts = _parse_ts(r.get("timestamp"))
+            opened[pos_id] = {
+                "position_id":       pos_id,
+                "symbol":            str(payload.get("symbol") or ""),
+                "biome":             str(payload.get("biome") or "crypto"),
+                "side":              str(payload.get("side") or "long"),
+                "entry_price":       float(payload.get("entry_price") or 0),
+                "quantity":          float(payload.get("quantity") or 0),
+                "stop_loss_price":   float(payload.get("stop_loss") or 0),
+                "take_profit_price": float(payload.get("take_profit") or 0),
+                "strategy_type":     payload.get("strategy_type"),
+                "opened_at":         r.get("timestamp") or "",
+            }
+            if rec_ts is not None:
+                opened_age[pos_id] = rec_ts.timestamp()
+
+        elif action == "trade_closed":
+            closed_ids.add(pos_id)
+
+    result: list[dict] = []
+    for pos_id, pos in opened.items():
+        if pos_id in closed_ids:
+            continue
+        age_sec = now - opened_age.get(pos_id, now)
+        if age_sec > _POSITION_ZOMBIE_SECONDS:
+            continue
+        result.append(pos)
+
+    return result
+
+
+def _get_live_price(
+    registry: BiomeRegistry,
+    biome_id: str,
+    symbol: str,
+) -> float | None:
+    """
+    Haal de meest recente close-prijs op voor een symbool.
+
+    Probeert eerst de opgegeven biome_id, daarna alle andere geregistreerde biomes.
+    Retourneert None als geen adapter beschikbaar is of data ontbreekt.
+    """
+    biomes_to_try = [biome_id] + [b for b in registry.list_biomes() if b != biome_id]
+    for bid in biomes_to_try:
+        adapter = registry.get(bid)
+        if adapter is None:
+            continue
+        try:
+            md = adapter.get_market_data(symbol, "1m")
+            if md is not None and md.close > 0:
+                return md.close
+        except Exception:
+            logger.exception("_get_live_price: fout voor %s/%s", bid, symbol)
+    return None
+
+
+def _compute_sl_tp_progress(
+    side: str,
+    current: float | None,
+    sl: float,
+    tp: float,
+) -> float | None:
+    """
+    Positie van de huidige prijs tussen SL (0.0) en TP (1.0).
+
+    LONG : progress = (current - sl) / (tp - sl)
+    SHORT: progress = (sl - current) / (sl - tp)
+
+    Geclamped naar [0.0, 1.0]. Retourneert None als current ontbreekt of
+    de range nul is (zou duiden op ongeldige SL/TP).
+    """
+    if current is None:
+        return None
+    if side == "long":
+        denom = tp - sl
+        if denom <= 0:
+            return None
+        return max(0.0, min(1.0, (current - sl) / denom))
+    else:  # short
+        denom = sl - tp
+        if denom <= 0:
+            return None
+        return max(0.0, min(1.0, (sl - current) / denom))
 
 
 # ---------------------------------------------------------------------------
