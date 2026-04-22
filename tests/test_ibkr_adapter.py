@@ -9,6 +9,7 @@ lazy-import inside de adapter de mock module ziet.
 
 from __future__ import annotations
 
+import os
 import sys
 import uuid
 from contextlib import contextmanager
@@ -126,7 +127,9 @@ class TestConstruction:
         assert adapter._port == _PORT_PAPER
 
     def test_live_mode_default_port(self) -> None:
-        adapter = IBKRAdapter(paper_mode=False)
+        with patch.dict("os.environ", {}, clear=False):
+            os.environ.pop("IBKR_PORT", None)
+            adapter = IBKRAdapter(paper_mode=False)
         assert adapter._port == _PORT_LIVE
 
     def test_port_constructor_override(self) -> None:
@@ -232,9 +235,11 @@ class TestConnect:
 
     def test_connect_uses_live_port(self) -> None:
         ib = MagicMock()
-        with patched_ib(ib):
-            adapter = IBKRAdapter(paper_mode=False)
-            adapter.connect()
+        with patch.dict("os.environ", {}, clear=False):
+            os.environ.pop("IBKR_PORT", None)
+            with patched_ib(ib):
+                adapter = IBKRAdapter(paper_mode=False)
+                adapter.connect()
         args, _ = ib.connect.call_args
         assert args[1] == _PORT_LIVE
 

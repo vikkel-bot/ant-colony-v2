@@ -951,11 +951,12 @@ const S = {
   perfChart:   { points:[], total_pnl:0, curve_label:'vandaag', dag:0, week:0, maand:0, jaar:0, alltime:0 },
   equities:    null,
   antEvents:   {},
-  expandedAnt: null,
-  activeTab:   'colony',
-  tickerIdx:   0,
-  hbBase:      null,
-  hbAt:        null,
+  expandedAnt:    null,
+  activeTab:      'colony',
+  tickerIdx:      0,
+  hbBase:         null,
+  hbAt:           null,
+  _emptyPosCount: 0,
 };
 
 const BIOME_COLOR = { crypto:'#1D9E75', equities:'#378ADD', commodities:'#EF9F27' };
@@ -1027,7 +1028,17 @@ async function fetchAll() {
   if (me)  S.metrics     = me;
   if (br)  S.brokers     = br;
   if (cap) S.capital     = cap;
-  if (pos) S.positions   = pos;
+  if (pos) {
+    if (pos.count > 0) {
+      S._emptyPosCount = 0;
+      S.positions = pos;
+    } else {
+      S._emptyPosCount++;
+      if (S._emptyPosCount >= 3) {
+        S.positions = pos;
+      }
+    }
+  }
   if (ti)  S.ticker      = ti;
   if (act) S.activity    = act;
   if (qs)  S.queenStatus = qs;
@@ -1481,6 +1492,7 @@ function renderActivity() {
   el.innerHTML = ants.map(a => {
     const c    = antColor(a.ant_type);
     const name = fType(a.ant_type);
+
     const ts   = a.last_seen ? `<span class="ac-time">${a.last_seen}</span>` : '';
 
     const st = a.stats || {};
@@ -1535,6 +1547,7 @@ function renderActivity() {
       ${expandHtml}
     </div>`;
   }).join('');
+  renderOpenPositions();
 }
 
 // ── Ticker rotation ────────────────────────────
