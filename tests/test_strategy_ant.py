@@ -17,6 +17,7 @@ import pytest
 from ant_colony.ants.strategy_ant import (
     StrategyAnt,
     _SourceCandidate,
+    _MIN_TEST_BARS,
     _SHARPE_THRESHOLD,
     _TRAIN_SPLIT,
     _WIN_RATE_THRESHOLD,
@@ -111,16 +112,17 @@ def make_source_candidate(
     )
 
 
-def make_ohlcv_bars(n: int = 100, base: float = 100.0) -> list[OHLCVBar]:
+def make_ohlcv_bars(n: int = 700, base: float = 100.0) -> list[OHLCVBar]:
     """Stijgende prijsreeks met lichte variatie — geeft positieve sharpe op LONG."""
+    from datetime import timedelta
     bars = []
     price = base
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
     for i in range(n):
-        # Algemeen stijgend + alternerend patroon voor win-rate variatie
         delta = 0.5 + (1.5 if i % 5 == 0 else -0.2)
         price = max(1.0, price + delta)
         bars.append(OHLCVBar(
-            timestamp=datetime(2026, 1, 1, i // 24, i % 24, tzinfo=timezone.utc),
+            timestamp=start + timedelta(hours=i),
             open=price - 0.1,
             high=price + 0.3,
             low=price - 0.3,
@@ -149,7 +151,7 @@ def stub_backtester(
 
 def make_adapter_with_candles(bars: list[OHLCVBar] | None = None) -> MagicMock:
     if bars is None:
-        bars = make_ohlcv_bars(100)
+        bars = make_ohlcv_bars(700)
 
     # Convert OHLCVBar → mock MarketData objects
     md_list = []
@@ -516,17 +518,18 @@ class TestWalkForwardBacktest:
     def test_uses_test_split(self, tmp_path: Path) -> None:
         ant = make_ant(logs_root=tmp_path)
         stub_backtester(ant, sharpe=0.9, win_rate=0.6)
-        adapter = make_adapter_with_candles(make_ohlcv_bars(100))
+        n = 700
+        adapter = make_adapter_with_candles(make_ohlcv_bars(n))
         ant.biome_registry.get.return_value = adapter
 
         c = make_source_candidate()
         spec = ant._generate_mutations(c)[0]
         ant._try_backtest_and_emit(_SYMBOL, spec)
 
-        # Check that Backtester.run was called with the test-set bars (30% of 100 = 30 bars)
+        # Check that Backtester.run was called with the test-set bars (30% of 700 = 210 bars)
         call_args = ant._backtester.run.call_args
         bars_used = call_args[0][0]
-        expected_test_size = 100 - int(100 * _TRAIN_SPLIT)
+        expected_test_size = n - int(n * _TRAIN_SPLIT)
         assert len(bars_used) == expected_test_size
 
     def test_too_few_candles_not_emitted(self, tmp_path: Path) -> None:
@@ -562,6 +565,41 @@ class TestWalkForwardBacktest:
         result = ant._try_backtest_and_emit(_SYMBOL, spec)
 
         assert result is False
+
+    def test_too_few_test_bars_skipped(self, tmp_path: Path) -> None:
+        """Test-set te klein (<200 bars) → backtest niet aangeroepen, False terug."""
+        ant = make_ant(logs_root=tmp_path)
+        stub_backtester(ant, sharpe=0.9, win_rate=0.6)
+        # 100 bars × 30% test = 30 bars < _MIN_TEST_BARS
+        adapter = make_adapter_with_candles(make_ohlcv_bars(100))
+        ant.biome_registry.get.return_value = adapter
+
+        c = make_source_candidate()
+        spec = ant._generate_mutations(c)[0]
+        result = ant._try_backtest_and_emit(_SYMBOL, spec)
+
+        assert result is False
+        ant._backtester.run.assert_not_called()
+
+    def test_min_test_bars_constant_is_200(self) -> None:
+        assert _MIN_TEST_BARS == 200
+
+    def test_exactly_min_test_bars_runs_backtest(self, tmp_path: Path) -> None:
+        """Precies _MIN_TEST_BARS test-bars → backtester wél aangeroepen."""
+        ant = make_ant(logs_root=tmp_path)
+        stub_backtester(ant, sharpe=0.9, win_rate=0.6)
+        # Need total bars such that test-set == _MIN_TEST_BARS exactly
+        # test = n - int(n * 0.70); solve for n * 0.30 == 200 → n = 667
+        n = 667
+        adapter = make_adapter_with_candles(make_ohlcv_bars(n))
+        ant.biome_registry.get.return_value = adapter
+
+        c = make_source_candidate()
+        spec = ant._generate_mutations(c)[0]
+        ant._try_backtest_and_emit(_SYMBOL, spec)
+
+        # backtester.run must have been called
+        ant._backtester.run.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

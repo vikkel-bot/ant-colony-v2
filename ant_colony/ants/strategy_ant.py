@@ -58,7 +58,8 @@ from ant_colony.schemas.strategy_candidate import (
 # ---------------------------------------------------------------------------
 
 _MIN_CANDLES        = 50    # minimum totaal candles voor walk-forward split
-_CANDLE_LIMIT       = 150   # candles ophalen per tick per symbool
+_MIN_TEST_BARS      = 200   # backtester vereist ≥200 bars op de test-set
+_CANDLE_LIMIT       = 700   # candles ophalen — genoeg voor 200 test bars na 70/30 split
 _TRAIN_SPLIT        = 0.70  # 70% train, 30% test
 _SHARPE_THRESHOLD   = 0.5
 _WIN_RATE_THRESHOLD = 0.45
@@ -557,7 +558,11 @@ class StrategyAnt:
         # Walk-forward split: gebruik alleen test-set voor evaluatie
         split     = int(len(candles) * _TRAIN_SPLIT)
         test_bars = candles[split:]
-        if len(test_bars) < 2:
+        if len(test_bars) < _MIN_TEST_BARS:
+            self._log.debug(
+                "Te weinig test-bars voor %s (%d/%d) — backtest overgeslagen",
+                symbol, len(test_bars), _MIN_TEST_BARS,
+            )
             return False
 
         try:
