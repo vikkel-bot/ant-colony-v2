@@ -27,7 +27,7 @@ from ant_colony.colony.scheduler.colony_scheduler import ColonyScheduler, Colony
 from ant_colony.dashboard.api import (
     ColonyContext, create_router, _parse_ts,
     _compute_sl_tp_progress, _read_open_positions_from_logs,
-    _build_event_summary,
+    _build_event_summary, _parse_queen_decision, _read_queen_decisions,
 )
 from ant_colony.dashboard.server import create_app
 from ant_colony.queen.queen import Queen

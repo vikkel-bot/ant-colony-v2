@@ -297,6 +297,21 @@ class QueenStatusResponse(BaseModel):
     last_decision: dict[str, Any] | None
 
 
+class QueenDecisionEntry(BaseModel):
+    timestamp:     str
+    decision_type: str
+    mission_id:    str | None
+    title:         str
+    summary:       str
+    payload:       dict[str, Any]
+
+
+class QueenDecisionsResponse(BaseModel):
+    decisions: list[QueenDecisionEntry]
+    count:     int
+    has_more:  bool
+
+
 class AntStatsEntry(BaseModel):
     signals_found:              int   | None = None
     candidates_above_threshold: int   | None = None
@@ -1294,6 +1309,17 @@ def create_router(ctx: ColonyContext) -> APIRouter:
         )
 
     # ------------------------------------------------------------------
+    # GET /api/queen/decisions
+    # ------------------------------------------------------------------
+
+    @router.get("/queen/decisions", response_model=QueenDecisionsResponse)
+    def get_queen_decisions(limit: int = 10) -> QueenDecisionsResponse:
+        """Laatste N Queen beslissingen, nieuwste eerst, max 7 dagen terug."""
+        if ctx.logs_root is None:
+            return QueenDecisionsResponse(decisions=[], count=0, has_more=False)
+        return _read_queen_decisions(ctx.logs_root, max(1, min(limit, 100)))
+
+    # ------------------------------------------------------------------
     # GET /api/equities/status
     # ------------------------------------------------------------------
 
@@ -2109,6 +2135,107 @@ def _read_queen_status_data(logs_root: Path) -> dict:
             pass
 
     return {"regime": regime, "top_strategies": top_strategies, "last_decision": last_decision}
+
+
+def _parse_queen_decision(rec: dict) -> QueenDecisionEntry:
+    """Vertaal één raw decisions.jsonl record naar een QueenDecisionEntry."""
+    verhogen    = rec.get("kapitaal_verhogen")   or []
+    verlagen    = rec.get("kapitaal_verlagen")   or []
+    prioriteit  = rec.get("prioriteit_kandidaten") or []
+    deprio      = rec.get("deprioriteer_kandidaten") or []
+    gevolgd     = rec.get("adviezen_gevolgd")    or []
+    genegeerd   = rec.get("adviezen_genegeerd")  or []
+    alloc       = rec.get("allocatie_aanpassingen") or {}
+
+    # decision_type: meest specifiek aanwezige actie
+    if verhogen:
+        decision_type = "capital_increase"
+        n = len(verhogen)
+        title   = f"Kapitaal verhogen ({n} mission{'s' if n != 1 else ''})"
+        summary = "; ".join(gevolgd[:2]) if gevolgd else verhogen[0]
+        mission_id = verhogen[0] if verhogen else None
+    elif verlagen:
+        decision_type = "capital_decrease"
+        n = len(verlagen)
+        title   = f"Kapitaal verlagen ({n} mission{'s' if n != 1 else ''})"
+        summary = "; ".join(gevolgd[:2]) if gevolgd else verlagen[0]
+        mission_id = verlagen[0] if verlagen else None
+    elif prioriteit:
+        decision_type = "mission_promote"
+        n = len(prioriteit)
+        title   = f"Missie geprioriteerd ({n} kandidaat{'en' if n != 1 else ''})"
+        summary = "; ".join(gevolgd[:2]) if gevolgd else prioriteit[0]
+        mission_id = prioriteit[0] if prioriteit else None
+    elif deprio:
+        decision_type = "mission_demote"
+        n = len(deprio)
+        title   = f"Missie gedeprioriteerd ({n} kandidaat{'en' if n != 1 else ''})"
+        summary = "; ".join(genegeerd[:2]) if genegeerd else deprio[0]
+        mission_id = deprio[0] if deprio else None
+    elif alloc:
+        decision_type = "regime_change"
+        biomes  = ", ".join(alloc.keys())
+        title   = f"Allocatie aangepast ({biomes})"
+        summary = "; ".join(gevolgd[:2]) if gevolgd else f"biomes: {biomes}"
+        mission_id = None
+    elif gevolgd:
+        decision_type = "strategy_select"
+        title   = "Aanpassingen doorgevoerd"
+        summary = "; ".join(gevolgd[:2])
+        mission_id = None
+    elif genegeerd:
+        decision_type = "mission_pause"
+        title   = "Neutraal — onvoldoende bewijs"
+        summary = "; ".join(genegeerd[:2])
+        mission_id = None
+    else:
+        decision_type = "neutral"
+        title   = "Neutraal"
+        summary = "Geen aanpassingen"
+        mission_id = None
+
+    return QueenDecisionEntry(
+        timestamp     = rec.get("timestamp") or "",
+        decision_type = decision_type,
+        mission_id    = mission_id,
+        title         = title,
+        summary       = summary[:200],
+        payload       = rec,
+    )
+
+
+def _read_queen_decisions(logs_root: Path, limit: int) -> QueenDecisionsResponse:
+    """Lees laatste `limit` Queen beslissingen uit decisions.jsonl (nieuwste eerst)."""
+    decisions_path = logs_root / "queen" / "decisions.jsonl"
+    if not decisions_path.exists():
+        return QueenDecisionsResponse(decisions=[], count=0, has_more=False)
+
+    cutoff = datetime.now(tz=timezone.utc) - timedelta(days=7)
+    raw: list[dict] = []
+    try:
+        with decisions_path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                ts = _parse_ts(rec.get("timestamp"))
+                if ts is None or ts < cutoff:
+                    continue
+                raw.append(rec)
+    except OSError:
+        return QueenDecisionsResponse(decisions=[], count=0, has_more=False)
+
+    # Sorteer descending op timestamp
+    raw.sort(key=lambda r: r.get("timestamp") or "", reverse=True)
+
+    has_more = len(raw) > limit
+    selected = raw[:limit]
+    entries  = [_parse_queen_decision(r) for r in selected]
+    return QueenDecisionsResponse(decisions=entries, count=len(entries), has_more=has_more)
 
 
 # ---------------------------------------------------------------------------
