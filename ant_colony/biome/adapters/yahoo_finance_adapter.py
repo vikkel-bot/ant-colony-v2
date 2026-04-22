@@ -268,7 +268,27 @@ class YahooFinanceAdapter:
             ticker = yf.Ticker(symbol)
             info   = ticker.info or {}
 
-            dividend_yield = float(info.get("dividendYield") or 0.0)
+            # yfinance dividendYield is inconsistent: sometimes fraction (0.0237),
+            # sometimes percentage (2.37). Use dividendRate/price as ground truth.
+            div_rate = float(
+                info.get("dividendRate") or
+                info.get("trailingAnnualDividendRate") or 0.0
+            )
+            current_price = float(
+                info.get("currentPrice") or
+                info.get("regularMarketPrice") or
+                info.get("previousClose") or 0.0
+            )
+            if div_rate > 0 and current_price > 0:
+                dividend_yield = div_rate / current_price
+            else:
+                raw = float(
+                    info.get("dividendYield") or
+                    info.get("trailingAnnualDividendYield") or 0.0
+                )
+                # If raw > 1.0 it was returned as percentage — normalise to fraction
+                dividend_yield = raw / 100.0 if raw > 1.0 else raw
+
             payout_ratio   = float(info.get("payoutRatio")   or 0.0)
 
             consecutive_years = 0

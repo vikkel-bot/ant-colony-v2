@@ -210,7 +210,7 @@ class DividendScoutAnt:
             self._log.debug("%s: yield %.2f%% <= %.0f%% — overgeslagen", symbol, yield_val * 100, _MIN_YIELD * 100)
             return None
         if yield_val > _MAX_YIELD:
-            self._log.warning(
+            self._log.debug(
                 "%s: yield %.2f%% > %.0f%% — waarschijnlijk data-artefact, overgeslagen",
                 symbol, yield_val * 100, _MAX_YIELD * 100,
             )

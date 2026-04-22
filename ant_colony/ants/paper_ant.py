@@ -200,9 +200,19 @@ class PaperAnt:
           2. Verwerk nieuwe scout-signalen en open eventueel nieuwe posities
         """
         self._process_exits()
-        self._process_new_signals()
-        self._process_approved_candidates()
-        self._process_research_candidates()
+        open_before = len(self._ledger.open_positions)
+        trading_allowed = self._is_trading_allowed()
+        scout_count    = self._process_new_signals()
+        approved_count = self._process_approved_candidates()
+        research_count = self._process_research_candidates()
+        opened = len(self._ledger.open_positions) - open_before
+        filtered = 1 if not trading_allowed else 0
+        self._log.info(
+            "paper tick | scout=%d research=%d approved=%d filtered=%s opened=%d",
+            scout_count, research_count, approved_count,
+            "blocked" if filtered else 0,
+            opened,
+        )
         self._last_action = "tick"
 
     # ------------------------------------------------------------------
@@ -279,10 +289,10 @@ class PaperAnt:
         except (ValueError, TypeError):
             return False
 
-    def _process_new_signals(self) -> None:
+    def _process_new_signals(self) -> int:
         """Verwerk nieuwe scout-signalen en open posities indien van toepassing."""
         if not self._is_trading_allowed():
-            return
+            return 0
 
         signals = self._read_new_scout_signals()
         for sig in signals:
@@ -311,6 +321,8 @@ class PaperAnt:
                 continue
 
             self._try_open_position(sig)
+
+        return len(signals)
 
     def _has_open_position(self, symbol: str) -> bool:
         """True als er al een scout-positie open is voor dit symbool."""
@@ -481,16 +493,17 @@ class PaperAnt:
                 pass
         return seen
 
-    def _process_research_candidates(self) -> None:
+    def _process_research_candidates(self) -> int:
         """Verwerk ACCEPTED StrategyCandidate records uit ANT_LOGS/research/*.jsonl."""
         if not self._is_trading_allowed():
-            return
+            return 0
         if self.logs_root is None:
-            return
+            return 0
         research_dir = self.logs_root / "research"
         if not research_dir.exists():
-            return
+            return 0
 
+        count = 0
         for jsonl_path in sorted(research_dir.glob("*.jsonl")):
             try:
                 for line in jsonl_path.read_text(encoding="utf-8").splitlines():
@@ -509,6 +522,7 @@ class PaperAnt:
                     if not candidate_id or candidate_id in self._seen_research_ids:
                         continue
                     self._seen_research_ids.add(candidate_id)
+                    count += 1
 
                     if self._is_stale_timestamp(record.get("timestamp")):
                         self._log.debug(
@@ -521,6 +535,8 @@ class PaperAnt:
 
             except OSError:
                 self._log.warning("Kan research-log niet lezen: %s", jsonl_path)
+
+        return count
 
     def _open_from_research_candidate(self, payload: dict) -> None:
         """Open een paper positie op basis van een candidate_accepted research record."""
@@ -676,17 +692,18 @@ class PaperAnt:
     # Approved-kandidaten verwerken
     # ------------------------------------------------------------------
 
-    def _process_approved_candidates(self) -> None:
+    def _process_approved_candidates(self) -> int:
         """Verwerk APPROVED StrategyCandidate records uit ANT_LOGS/approved/*.jsonl."""
         if not self._is_trading_allowed():
-            return
+            return 0
         if self.logs_root is None:
-            return
+            return 0
 
         approved_dir = self.logs_root / "approved"
         if not approved_dir.exists():
-            return
+            return 0
 
+        count = 0
         for jsonl_path in sorted(approved_dir.glob("*.jsonl")):
             try:
                 for line in jsonl_path.read_text(encoding="utf-8").splitlines():
@@ -701,6 +718,7 @@ class PaperAnt:
                     if not candidate_id or candidate_id in self._seen_approved_ids:
                         continue
                     self._seen_approved_ids.add(candidate_id)
+                    count += 1
 
                     if self._is_stale_timestamp(record.get("timestamp")):
                         self._log.debug(
@@ -713,6 +731,8 @@ class PaperAnt:
 
             except OSError:
                 self._log.warning("Kan approved-log niet lezen: %s", jsonl_path)
+
+        return count
 
     def _open_from_candidate(self, record: dict) -> None:
         """Open een paper positie op basis van een APPROVED StrategyCandidate record."""

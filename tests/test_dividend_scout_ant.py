@@ -195,7 +195,7 @@ class TestScreenSymbol:
         ant = make_ant(adapter=adapter)
         assert ant._screen_symbol("KO") is None
 
-    def test_extreme_yield_logs_warning(self, caplog) -> None:
+    def test_extreme_yield_logs_debug_not_warning(self, caplog) -> None:
         import logging
         adapter = MagicMock(spec=YahooFinanceAdapter)
         adapter.get_dividend_info.return_value = {
@@ -204,12 +204,15 @@ class TestScreenSymbol:
         }
         ant = make_ant(adapter=adapter)
 
-        with caplog.at_level(logging.WARNING, logger=f"ant.dividend_scout.{ant.ant_id[:8]}"):
+        with caplog.at_level(logging.DEBUG, logger=f"ant.dividend_scout.{ant.ant_id[:8]}"):
             ant._screen_symbol("KO")
 
+        debug_records = [r for r in caplog.records if r.levelno == logging.DEBUG
+                         and "artefact" in r.message]
         warning_records = [r for r in caplog.records if r.levelno == logging.WARNING
                            and "artefact" in r.message]
-        assert len(warning_records) == 1
+        assert len(debug_records) == 1
+        assert len(warning_records) == 0
 
 
 # ---------------------------------------------------------------------------

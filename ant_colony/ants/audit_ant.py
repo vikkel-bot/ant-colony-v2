@@ -103,6 +103,9 @@ class AuditAnt:
         )
         self._reported_gaps: set[str] = self._load_reported_gaps()
 
+        # Per-order_id timestamp of last WARNING for position_age (dedup to 1x/hour)
+        self._position_age_warned_at: dict[str, float] = {}
+
         self._log = logging.getLogger(f"ant.audit.{ant_id[:8]}")
 
     # ------------------------------------------------------------------
@@ -382,6 +385,11 @@ class AuditAnt:
 
                 age = now - filled_at
                 if age > self._max_position_age:
+                    dedup_key = order_id or path.name
+                    last_warned = self._position_age_warned_at.get(dedup_key, 0.0)
+                    if time.monotonic() - last_warned < 3600.0:
+                        continue  # already warned within the last hour
+                    self._position_age_warned_at[dedup_key] = time.monotonic()
                     market = data_block.get("market", "?")
                     findings.append(AuditFinding(
                         severity="WARNING",

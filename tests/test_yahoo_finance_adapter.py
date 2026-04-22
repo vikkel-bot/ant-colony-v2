@@ -382,3 +382,37 @@ class TestGetDividendInfo:
         assert result["dividend_yield"]    == 0.0
         assert result["consecutive_years"] == 0
         assert result["payout_ratio"]      == 0.0
+
+    def test_yield_from_dividend_rate_and_price(self) -> None:
+        """Primary path: dividendRate / currentPrice — e.g. JNJ $4.76 / $155 ≈ 3.07%."""
+        adapter = YahooFinanceAdapter()
+        ticker = make_ticker_mock(info={
+            "dividendRate": 4.76,
+            "currentPrice": 155.0,
+            "payoutRatio": 0.44,
+        })
+        with patch_yfinance(ticker):
+            result = adapter.get_dividend_info("JNJ")
+        assert result["dividend_yield"] == pytest.approx(4.76 / 155.0, rel=1e-4)
+
+    def test_percentage_format_dividendyield_normalised(self) -> None:
+        """Fallback: dividendYield=2.37 (percentage) must be normalised to 0.0237."""
+        adapter = YahooFinanceAdapter()
+        ticker = make_ticker_mock(info={
+            "dividendYield": 2.37,   # yfinance percentage format
+            "payoutRatio": 0.44,
+        })
+        with patch_yfinance(ticker):
+            result = adapter.get_dividend_info("JNJ")
+        assert result["dividend_yield"] == pytest.approx(0.0237, rel=1e-4)
+
+    def test_fraction_format_dividendyield_unchanged(self) -> None:
+        """Fallback: dividendYield=0.0237 (fraction) must remain unchanged."""
+        adapter = YahooFinanceAdapter()
+        ticker = make_ticker_mock(info={
+            "dividendYield": 0.0237,
+            "payoutRatio": 0.44,
+        })
+        with patch_yfinance(ticker):
+            result = adapter.get_dividend_info("JNJ")
+        assert result["dividend_yield"] == pytest.approx(0.0237, rel=1e-4)
