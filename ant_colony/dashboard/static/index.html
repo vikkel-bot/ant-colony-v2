@@ -806,7 +806,8 @@
 const S = {
   status:      { status:'UNKNOWN', last_tick:null, seconds_ago:null },
   metrics:     { capital_total:0, capital_allocated:0, capital_available:0, capital_in_use:null, active_ants:0, utilization_pct:0 },
-  brokers:     { brokers:[] },
+  brokers:     { brokers:[], fetched_at:'' },
+  capital:     { total_eur:0, available_eur:0, holdings_eur:0, brokers:[], fetched_at:'' },
   ticker:      { events:[] },
   activity:    { ants:[] },
   queenStatus: null,
@@ -871,10 +872,10 @@ function pnlCls(v) { return v > 0 ? 'pos' : v < 0 ? 'neg' : 'zero'; }
 
 async function fetchAll() {
   const get = url => fetch(url).then(r => r.json()).catch(() => null);
-  const [st, me, br, ti, act, qs, pc, eq] = await Promise.all([
+  const [st, me, br, cap, ti, act, qs, pc, eq] = await Promise.all([
     get('/api/status'), get('/api/metrics'),
-    get('/api/brokers'), get('/api/ticker'),
-    get('/api/ants/activity'),
+    get('/api/brokers'), get('/api/capital'),
+    get('/api/ticker'), get('/api/ants/activity'),
     get('/api/queen/status'), get('/api/performance/chart'),
     get('/api/equities/status'),
   ]);
@@ -885,6 +886,7 @@ async function fetchAll() {
   }
   if (me)  S.metrics     = me;
   if (br)  S.brokers     = br;
+  if (cap) S.capital     = cap;
   if (ti)  S.ticker      = ti;
   if (act) S.activity    = act;
   if (qs)  S.queenStatus = qs;
@@ -915,17 +917,34 @@ function renderStatus() {
 }
 
 function renderMetrics() {
-  const m = S.metrics;
-  document.getElementById('m-total').textContent = fEUR(m.capital_total);
+  const m   = S.metrics;
+  const cap = S.capital;
+
+  // Totaal kapitaal: gebruik /api/capital als primaire bron (echte broker equity),
+  // val terug op metrics als capital nog niet geladen is.
+  const totalEur = cap && cap.total_eur > 0 ? cap.total_eur : m.capital_total;
+  const totalEl  = document.getElementById('m-total');
+  totalEl.textContent = fEUR(totalEur);
+  // Subtitel: toon holdings opsplitsing als beschikbaar
+  const totalSubEl = document.getElementById('m-util');
+  if (cap && cap.holdings_eur > 0) {
+    totalSubEl.textContent =
+      fEUR2(cap.available_eur) + ' vrij · ' + fEUR2(cap.holdings_eur) + ' holdings';
+  } else {
+    totalSubEl.textContent = (m.utilization_pct ?? 0).toFixed(1) + '% ingezet';
+  }
 
   // Ingezet: gebruik echte paper waarde als beschikbaar, anders queen allocated
   const inUse = m.capital_in_use != null ? m.capital_in_use : m.capital_allocated;
   document.getElementById('m-alloc').textContent = fEUR2(inUse);
 
-  // Beschikbaar: live broker saldo (als beschikbaar) of berekend totaal − ingezet
+  // Beschikbaar: gebruik /api/capital.available_eur als primaire bron
   const availEl    = document.getElementById('m-avail');
   const availSubEl = document.getElementById('m-avail-sub');
-  if (m.live_eur_balance != null) {
+  if (cap && cap.available_eur > 0) {
+    availEl.textContent    = fEUR2(cap.available_eur);
+    availSubEl.textContent = 'vrij saldo bij broker';
+  } else if (m.live_eur_balance != null) {
     availEl.textContent    = fEUR2(m.live_eur_balance);
     availSubEl.textContent = `beschikbaar op ${m.live_eur_source || 'broker'}`;
   } else {
@@ -937,7 +956,6 @@ function renderMetrics() {
   }
 
   document.getElementById('m-ants').textContent = m.active_ants ?? '—';
-  document.getElementById('m-util').textContent = (m.utilization_pct ?? 0).toFixed(1) + '% ingezet';
 }
 
 // ── PnL Chart ─────────────────────────────────
@@ -1081,36 +1099,72 @@ function renderQueen() {
 
 // ── Brokers ───────────────────────────────────
 
+// Bouw een lookup van biome_id → capital entry (uit /api/capital)
+function _capitalByBiome() {
+  const map = {};
+  ((S.capital && S.capital.brokers) || []).forEach(b => { map[b.biome_id] = b; });
+  return map;
+}
+
+function _dataAgeBadge(cap) {
+  // cap = CapitalBrokerEntry of null
+  if (!cap) return '';
+  if (cap.data_age_seconds != null) {
+    return `<span style="font-size:9px;color:#4ade80;background:rgba(74,222,128,.12);padding:1px 5px;border-radius:10px;margin-left:4px">live</span>`;
+  }
+  return '';
+}
+
 function renderBrokers() {
-  const el   = document.getElementById('broker-list');
-  const list = S.brokers.brokers || [];
+  const el      = document.getElementById('broker-list');
+  const list    = S.brokers.brokers || [];
   if (!list.length) { el.innerHTML = '<div class="empty">Geen brokers geconfigureerd</div>'; return; }
 
+  const capMap  = _capitalByBiome();
+
   el.innerHTML = list.map(b => {
-    const c = bcolor(b.biome_id);
+    const c   = bcolor(b.biome_id);
+    const cap = capMap[b.biome_id] || null;
+
     const badge = b.status === 'connected'
       ? '<span class="badge b-conn">verbonden</span>'
       : b.status === 'disconnected'
         ? '<span class="badge b-disconn">offline</span>'
         : '<span class="badge b-standby">standby</span>';
 
+    const ageBadge = _dataAgeBadge(cap);
+
+    // Balansregel: gebruik capital data als beschikbaar, anders brokers data
     let balanceHtml = '';
-    if (b.balance_available != null) {
+    if (cap && cap.status === 'connected') {
+      const parts = [`${fEUR2(cap.available_eur)} vrij`];
+      if (cap.holdings_eur > 0)
+        parts.push(`${fEUR2(cap.holdings_eur)} holdings`);
+      balanceHtml = `<div class="broker-balance">${parts.join(' · ')}</div>`;
+    } else if (b.balance_available != null) {
       const parts = [`${fEUR2(b.balance_available)} vrij`];
       if (b.balance_in_orders != null && b.balance_in_orders > 0)
         parts.push(`${fEUR2(b.balance_in_orders)} in orders`);
       balanceHtml = `<div class="broker-balance">${parts.join(' · ')}</div>`;
     }
 
+    // Rechts: totaal broker equity (primair) of ingezet kapitaal
+    const rhsValue = (cap && cap.status === 'connected' && cap.total_eur > 0)
+      ? fEUR2(cap.total_eur)
+      : fEUR2(b.capital_deployed);
+    const rhsLabel = (cap && cap.status === 'connected' && cap.total_eur > 0)
+      ? 'totaal'
+      : 'ingezet';
+
     return `<div class="broker-row">
       <div class="broker-lhs">
         <div class="broker-nm">
           <div style="width:7px;height:7px;border-radius:50%;background:${c};flex-shrink:0"></div>
-          ${b.name} ${badge}
+          ${b.name} ${badge}${ageBadge}
         </div>
         ${balanceHtml}
       </div>
-      <div class="broker-rhs">${fEUR2(b.capital_deployed)} ingezet</div>
+      <div class="broker-rhs" title="${rhsLabel}">${rhsValue}</div>
     </div>`;
   }).join('');
 }

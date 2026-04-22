@@ -9,7 +9,8 @@ Endpoints:
   GET  /api/performance — PnL dag/week/maand/jaar/alltime (uit trade logs)
   GET  /api/biomes      — allocatie per biome
   GET  /api/ants        — actieve agents met TTL countdown
-  GET  /api/brokers     — broker connecties en ingezet kapitaal
+  GET  /api/brokers     — broker connecties en ingezet kapitaal (+ data-leeftijd)
+  GET  /api/capital     — totaal/beschikbaar kapitaal per broker, inclusief holdings
   GET  /api/ticker      — laatste 20 audit log events
   POST /api/missions    — geef een mission uit via de echte colony Queen
   POST /api/killswitch  — level 1/2/3 + scope, vereist operator_confirm=true
@@ -145,15 +146,37 @@ class AntsResponse(BaseModel):
 class BrokerEntry(BaseModel):
     name: str
     biome_id: str
-    status: str                         # "connected" | "disconnected" | "standby"
+    status: str                              # "connected" | "disconnected" | "standby"
     capital_deployed: float
     balance_available: float | None = None   # vrij beschikbaar saldo bij exchange
     balance_in_orders: float | None = None   # vergrendeld in open orders
     paper_mode: bool | None = None           # True = paper trading, False = live
+    last_updated: str | None = None          # ISO timestamp laatste succesvolle API-call
+    data_age_seconds: float | None = None    # seconden geleden; 0 = zojuist opgehaald
 
 
 class BrokersResponse(BaseModel):
     brokers: list[BrokerEntry]
+    fetched_at: str = ""                     # ISO timestamp waarop de response is gebouwd
+
+
+class CapitalBrokerEntry(BaseModel):
+    name: str
+    biome_id: str
+    status: str
+    total_eur: float               # balance + marktwaarde holdings
+    available_eur: float           # vrij EUR saldo bij exchange
+    holdings_eur: float            # EUR-waarde van openstaande posities
+    last_updated: str | None = None
+    data_age_seconds: float | None = None
+
+
+class CapitalSummaryResponse(BaseModel):
+    total_eur: float               # som over alle brokers
+    available_eur: float           # som vrij EUR over alle brokers
+    holdings_eur: float            # som holdings-waarde over alle brokers
+    brokers: list[CapitalBrokerEntry]
+    fetched_at: str                # ISO timestamp van deze response
 
 
 class TickerEvent(BaseModel):
@@ -569,8 +592,10 @@ def create_router(ctx: ColonyContext) -> APIRouter:
         """Broker connecties, live saldo en ingezet kapitaal per biome."""
         import os
 
+        fetched_at = datetime.now(tz=timezone.utc).isoformat()
+
         if ctx.queen is None:
-            return BrokersResponse(brokers=[])
+            return BrokersResponse(brokers=[], fetched_at=fetched_at)
 
         equities_enabled = os.getenv("EQUITIES_ENABLED", "false").lower() == "true"
 
@@ -594,6 +619,8 @@ def create_router(ctx: ColonyContext) -> APIRouter:
             balance_available: float | None = None
             balance_in_orders: float | None = None
             paper_mode: bool | None = None
+            last_updated: str | None = None
+            data_age_seconds: float | None = None
 
             if ctx.biome_registry is not None:
                 adapter = ctx.biome_registry.get(b.biome_id)
@@ -606,6 +633,8 @@ def create_router(ctx: ColonyContext) -> APIRouter:
                                 balance_available = account.balance
                                 balance_in_orders = account.positions_value
                             status = "connected"
+                            last_updated = fetched_at
+                            data_age_seconds = 0.0
                         else:
                             status = "disconnected"
                         pm = getattr(adapter, "_paper_mode", None)
@@ -623,6 +652,8 @@ def create_router(ctx: ColonyContext) -> APIRouter:
                 balance_available=balance_available,
                 balance_in_orders=balance_in_orders,
                 paper_mode=paper_mode,
+                last_updated=last_updated,
+                data_age_seconds=data_age_seconds,
             ))
             seen_biomes.add(b.biome_id)
 
@@ -634,6 +665,8 @@ def create_router(ctx: ColonyContext) -> APIRouter:
                 balance_available = None
                 balance_in_orders = None
                 paper_mode = bool(getattr(adapter, "_paper_mode", True))
+                last_updated = None
+                data_age_seconds = None
                 try:
                     if adapter.is_available():
                         status = "connected"
@@ -641,6 +674,8 @@ def create_router(ctx: ColonyContext) -> APIRouter:
                         if account is not None:
                             balance_available = account.balance
                             balance_in_orders = account.positions_value
+                        last_updated = fetched_at
+                        data_age_seconds = 0.0
                 except Exception:
                     logger.exception("/api/brokers: IBKR fallback check mislukt")
 
@@ -652,9 +687,99 @@ def create_router(ctx: ColonyContext) -> APIRouter:
                     balance_available=balance_available,
                     balance_in_orders=balance_in_orders,
                     paper_mode=paper_mode,
+                    last_updated=last_updated,
+                    data_age_seconds=data_age_seconds,
                 ))
 
-        return BrokersResponse(brokers=brokers)
+        return BrokersResponse(brokers=brokers, fetched_at=fetched_at)
+
+    # ------------------------------------------------------------------
+    # GET /api/capital
+    # ------------------------------------------------------------------
+
+    @router.get("/capital", response_model=CapitalSummaryResponse)
+    def get_capital() -> CapitalSummaryResponse:
+        """
+        Totaal en beschikbaar kapitaal, uitgesplitst per broker.
+
+        Per broker:
+          total_eur     = vrij saldo + marktwaarde open posities
+          available_eur = vrij EUR saldo
+          holdings_eur  = marktwaarde van crypto/equity holdings
+        """
+        fetched_at = datetime.now(tz=timezone.utc).isoformat()
+
+        if ctx.biome_registry is None:
+            return CapitalSummaryResponse(
+                total_eur=0.0,
+                available_eur=0.0,
+                holdings_eur=0.0,
+                brokers=[],
+                fetched_at=fetched_at,
+            )
+
+        _DEFAULT_NAMES = {
+            "crypto": "Bitvavo",
+            "equities": "Interactive Brokers",
+            "commodities": "Saxo Bank",
+        }
+
+        cap_brokers: list[CapitalBrokerEntry] = []
+        grand_total    = 0.0
+        grand_available = 0.0
+        grand_holdings  = 0.0
+
+        for biome_id in ctx.biome_registry.list_biomes():
+            adapter = ctx.biome_registry.get(biome_id)
+            if adapter is None:
+                continue
+
+            name = ctx.broker_names.get(biome_id) or _DEFAULT_NAMES.get(biome_id, biome_id)
+            status = "disconnected"
+            available_eur = 0.0
+            holdings_eur  = 0.0
+            last_updated: str | None = None
+            data_age_seconds: float | None = None
+
+            try:
+                if adapter.is_available():
+                    account = adapter.get_account_state()
+                    if account is not None:
+                        available_eur = account.balance or 0.0
+
+                    positions = adapter.get_positions()
+                    if positions:
+                        holdings_eur = sum(p.market_value for p in positions)
+
+                    status       = "connected"
+                    last_updated = fetched_at
+                    data_age_seconds = 0.0
+            except Exception:
+                logger.exception("/api/capital: fout voor biome_id=%s", biome_id)
+
+            total_eur = available_eur + holdings_eur
+            grand_total     += total_eur
+            grand_available += available_eur
+            grand_holdings  += holdings_eur
+
+            cap_brokers.append(CapitalBrokerEntry(
+                name=name,
+                biome_id=biome_id,
+                status=status,
+                total_eur=round(total_eur, 2),
+                available_eur=round(available_eur, 2),
+                holdings_eur=round(holdings_eur, 2),
+                last_updated=last_updated,
+                data_age_seconds=data_age_seconds,
+            ))
+
+        return CapitalSummaryResponse(
+            total_eur=round(grand_total, 2),
+            available_eur=round(grand_available, 2),
+            holdings_eur=round(grand_holdings, 2),
+            brokers=cap_brokers,
+            fetched_at=fetched_at,
+        )
 
     # ------------------------------------------------------------------
     # GET /api/ticker

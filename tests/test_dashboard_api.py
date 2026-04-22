@@ -453,6 +453,178 @@ class TestBrokersEndpoint:
 
 
 # ---------------------------------------------------------------------------
+# TestBrokersDataAge — last_updated / data_age_seconds in BrokerEntry
+# ---------------------------------------------------------------------------
+
+class TestBrokersDataAge:
+
+    def _make_registry(self, *, available: bool, balance: float = 100.0) -> MagicMock:
+        from ant_colony.biome.biome_adapter import AccountState
+        account = AccountState(
+            biome_id="crypto", balance=balance, positions_value=0.0,
+            timestamp=datetime.now(tz=timezone.utc),
+        )
+        adapter = MagicMock()
+        adapter.is_available.return_value = available
+        adapter.get_account_state.return_value = account if available else None
+        registry = MagicMock()
+        registry.get.return_value = adapter
+        return registry
+
+    def test_connected_broker_has_last_updated(self):
+        queen = _make_queen()
+        queen.set_biome_capital("crypto", 10_000.0)
+        _issue(queen, _make_mission())
+        registry = self._make_registry(available=True)
+        ctx = ColonyContext(queen=queen, scheduler=_make_scheduler(), biome_registry=registry)
+        r = _client(ctx).get("/api/brokers")
+        b = r.json()["brokers"][0]
+        assert b["last_updated"] is not None
+        assert b["data_age_seconds"] == pytest.approx(0.0)
+
+    def test_disconnected_broker_has_no_last_updated(self):
+        queen = _make_queen()
+        queen.set_biome_capital("crypto", 10_000.0)
+        _issue(queen, _make_mission())
+        registry = self._make_registry(available=False)
+        ctx = ColonyContext(queen=queen, scheduler=_make_scheduler(), biome_registry=registry)
+        r = _client(ctx).get("/api/brokers")
+        b = r.json()["brokers"][0]
+        assert b["last_updated"] is None
+        assert b["data_age_seconds"] is None
+
+    def test_response_has_fetched_at(self):
+        queen = _make_queen()
+        queen.set_biome_capital("crypto", 10_000.0)
+        ctx = ColonyContext(queen=queen, scheduler=_make_scheduler())
+        r = _client(ctx).get("/api/brokers")
+        assert "fetched_at" in r.json()
+        assert r.json()["fetched_at"] != ""
+
+    def test_empty_queen_returns_fetched_at(self):
+        r = _client(ColonyContext()).get("/api/brokers")
+        assert r.json()["fetched_at"] != ""
+
+
+# ---------------------------------------------------------------------------
+# TestCapitalEndpoint
+# ---------------------------------------------------------------------------
+
+class TestCapitalEndpoint:
+
+    def _make_registry(
+        self,
+        balance: float = 80.0,
+        holdings: float = 500.0,
+        available: bool = True,
+    ) -> MagicMock:
+        from ant_colony.biome.biome_adapter import AccountState, LivePosition
+        account = AccountState(
+            biome_id="crypto", balance=balance, positions_value=holdings,
+            timestamp=datetime.now(tz=timezone.utc),
+        )
+        pos = MagicMock(spec=LivePosition)
+        pos.market_value = holdings
+        adapter = MagicMock()
+        adapter.is_available.return_value = available
+        adapter.get_account_state.return_value = account if available else None
+        adapter.get_positions.return_value = [pos] if available and holdings > 0 else []
+        registry = MagicMock()
+        registry.list_biomes.return_value = ["crypto"]
+        registry.get.return_value = adapter
+        return registry
+
+    def test_empty_registry_returns_zeros(self):
+        r = _client(ColonyContext()).get("/api/capital")
+        d = r.json()
+        assert d["total_eur"] == 0.0
+        assert d["available_eur"] == 0.0
+        assert d["holdings_eur"] == 0.0
+        assert d["brokers"] == []
+        assert "fetched_at" in d
+
+    def test_connected_adapter_sums_balance_and_holdings(self):
+        registry = self._make_registry(balance=80.0, holdings=500.0)
+        ctx = ColonyContext(biome_registry=registry, broker_names={"crypto": "Bitvavo"})
+        r = _client(ctx).get("/api/capital")
+        d = r.json()
+        assert d["total_eur"] == pytest.approx(580.0)
+        assert d["available_eur"] == pytest.approx(80.0)
+        assert d["holdings_eur"] == pytest.approx(500.0)
+        assert len(d["brokers"]) == 1
+        b = d["brokers"][0]
+        assert b["name"] == "Bitvavo"
+        assert b["status"] == "connected"
+        assert b["total_eur"] == pytest.approx(580.0)
+        assert b["available_eur"] == pytest.approx(80.0)
+        assert b["holdings_eur"] == pytest.approx(500.0)
+
+    def test_connected_broker_data_age_is_zero(self):
+        registry = self._make_registry(balance=100.0, holdings=0.0)
+        ctx = ColonyContext(biome_registry=registry)
+        r = _client(ctx).get("/api/capital")
+        b = r.json()["brokers"][0]
+        assert b["data_age_seconds"] == pytest.approx(0.0)
+        assert b["last_updated"] is not None
+
+    def test_disconnected_adapter_status_and_no_data_age(self):
+        registry = self._make_registry(balance=0.0, holdings=0.0, available=False)
+        ctx = ColonyContext(biome_registry=registry)
+        r = _client(ctx).get("/api/capital")
+        d = r.json()
+        assert d["total_eur"] == pytest.approx(0.0)
+        b = d["brokers"][0]
+        assert b["status"] == "disconnected"
+        assert b["last_updated"] is None
+        assert b["data_age_seconds"] is None
+
+    def test_adapter_exception_treated_as_disconnected(self):
+        adapter = MagicMock()
+        adapter.is_available.side_effect = RuntimeError("timeout")
+        registry = MagicMock()
+        registry.list_biomes.return_value = ["crypto"]
+        registry.get.return_value = adapter
+        ctx = ColonyContext(biome_registry=registry)
+        r = _client(ctx).get("/api/capital")
+        assert r.status_code == 200
+        assert r.json()["total_eur"] == pytest.approx(0.0)
+
+    def test_response_has_fetched_at(self):
+        registry = self._make_registry()
+        ctx = ColonyContext(biome_registry=registry)
+        r = _client(ctx).get("/api/capital")
+        assert r.json()["fetched_at"] != ""
+
+    def test_multiple_brokers_sum_correctly(self):
+        from ant_colony.biome.biome_adapter import AccountState
+        def _make_adapter(balance: float, holdings: float) -> MagicMock:
+            acc = AccountState(
+                biome_id="x", balance=balance, positions_value=holdings,
+                timestamp=datetime.now(tz=timezone.utc),
+            )
+            pos = MagicMock()
+            pos.market_value = holdings
+            a = MagicMock()
+            a.is_available.return_value = True
+            a.get_account_state.return_value = acc
+            a.get_positions.return_value = [pos] if holdings > 0 else []
+            return a
+
+        registry = MagicMock()
+        registry.list_biomes.return_value = ["crypto", "equities"]
+        registry.get.side_effect = lambda b: (
+            _make_adapter(80.0, 500.0) if b == "crypto" else _make_adapter(1000.0, 200.0)
+        )
+        ctx = ColonyContext(biome_registry=registry)
+        r = _client(ctx).get("/api/capital")
+        d = r.json()
+        assert d["total_eur"] == pytest.approx(1780.0)
+        assert d["available_eur"] == pytest.approx(1080.0)
+        assert d["holdings_eur"] == pytest.approx(700.0)
+        assert len(d["brokers"]) == 2
+
+
+# ---------------------------------------------------------------------------
 # TestTickerEndpoint
 # ---------------------------------------------------------------------------
 
