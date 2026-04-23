@@ -312,6 +312,21 @@ class QueenDecisionsResponse(BaseModel):
     has_more:  bool
 
 
+class ActivityFeedEntry(BaseModel):
+    timestamp: str
+    ant_type:  str
+    action:    str
+    summary:   str
+    level:     str   # "info" | "warning" | "error"
+
+
+class ActivityFeedResponse(BaseModel):
+    events:     list[ActivityFeedEntry]
+    count:      int
+    filter:     str
+    fetched_at: str
+
+
 class AntStatsEntry(BaseModel):
     signals_found:              int   | None = None
     candidates_above_threshold: int   | None = None
@@ -1320,6 +1335,34 @@ def create_router(ctx: ColonyContext) -> APIRouter:
         return _read_queen_decisions(ctx.logs_root, max(1, min(limit, 100)))
 
     # ------------------------------------------------------------------
+    # GET /api/activity
+    # ------------------------------------------------------------------
+
+    @router.get("/activity", response_model=ActivityFeedResponse)
+    def get_activity_feed(
+        limit: int = 50,
+        filter: str = "all",
+    ) -> ActivityFeedResponse:
+        """
+        Gecombineerde activity feed van alle ants, nieuwste eerst.
+
+        limit:  aantal events (10–200, default 50)
+        filter: "all" | "errors" | ant_type (scout, research, paper, …)
+        """
+        from datetime import datetime, timezone as _tz
+        limit_  = max(10, min(limit, 200))
+        filter_ = (filter or "all").lower().strip()
+
+        if ctx.logs_root is None:
+            return ActivityFeedResponse(
+                events=[],
+                count=0,
+                filter=filter_,
+                fetched_at=datetime.now(tz=_tz.utc).isoformat(),
+            )
+        return _read_activity_feed(ctx.logs_root, limit_, filter_)
+
+    # ------------------------------------------------------------------
     # GET /api/equities/status
     # ------------------------------------------------------------------
 
@@ -2236,6 +2279,115 @@ def _read_queen_decisions(logs_root: Path, limit: int) -> QueenDecisionsResponse
     selected = raw[:limit]
     entries  = [_parse_queen_decision(r) for r in selected]
     return QueenDecisionsResponse(decisions=entries, count=len(entries), has_more=has_more)
+
+
+# ---------------------------------------------------------------------------
+# Intern — activity feed
+# ---------------------------------------------------------------------------
+
+_ACTIVITY_DIRS: dict[str, str] = {
+    "scout":     "scouts",
+    "research":  "research",
+    "paper":     "paper",
+    "audit":     "audit",
+    "ingestion": "ingestion",
+    "strategy":  "strategy",
+    "execution": "execution",
+    "operator":  "operator",
+    "claude":    "claude",
+    "queen":     "queen",
+}
+
+
+def _read_ant_dir_recent(logs_root: Path, subdir: str, n_files: int = 2) -> list[dict]:
+    """Lees records uit de N meest recente JSONL files in een ant subdir."""
+    ant_dir = logs_root / subdir
+    if not ant_dir.exists():
+        return []
+    files = sorted(
+        [p for p in ant_dir.glob("*.jsonl") if "_trades" not in p.name],
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )[:n_files]
+    records: list[dict] = []
+    for path in files:
+        try:
+            with path.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if line:
+                        try:
+                            records.append(json.loads(line))
+                        except json.JSONDecodeError:
+                            pass
+        except OSError:
+            pass
+    return records
+
+
+def _event_level(rec: dict) -> str:
+    """Bepaal het log level van een event record."""
+    raw = str(rec.get("level") or "").lower()
+    if raw in ("error", "critical"):
+        return "error"
+    if raw == "warning":
+        return "warning"
+    return "info"
+
+
+def _read_activity_feed(logs_root: Path, limit: int, filter_: str) -> ActivityFeedResponse:
+    """Gecombineerde activity feed: alle ant log dirs, 24u, nieuwste eerst."""
+    now     = datetime.now(tz=timezone.utc)
+    cutoff  = now - timedelta(hours=24)
+
+    if filter_ in ("all", "errors"):
+        dirs_to_scan: list[tuple[str, str]] = list(_ACTIVITY_DIRS.items())
+    elif filter_ in _ACTIVITY_DIRS:
+        dirs_to_scan = [(filter_, _ACTIVITY_DIRS[filter_])]
+    else:
+        dirs_to_scan = list(_ACTIVITY_DIRS.items())
+
+    all_entries: list[ActivityFeedEntry] = []
+
+    for ant_type, subdir in dirs_to_scan:
+        records = _read_ant_dir_recent(logs_root, subdir)
+        for rec in records:
+            rec_ts = _parse_ts(rec.get("timestamp"))
+            if rec_ts is None or rec_ts < cutoff:
+                continue
+            if ant_type == "queen":
+                parsed = _parse_queen_decision(rec)
+                all_entries.append(ActivityFeedEntry(
+                    timestamp=rec.get("timestamp") or "",
+                    ant_type="queen",
+                    action=parsed.decision_type,
+                    summary=parsed.summary,
+                    level=_event_level(rec),
+                ))
+            else:
+                action  = _action_of(rec)
+                payload = rec.get("payload") or {}
+                all_entries.append(ActivityFeedEntry(
+                    timestamp=rec.get("timestamp") or "",
+                    ant_type=ant_type,
+                    action=action,
+                    summary=_build_event_summary(action, payload),
+                    level=_event_level(rec),
+                ))
+
+    if filter_ == "errors":
+        all_entries = [e for e in all_entries if e.level in ("error", "warning")]
+
+    all_entries.sort(key=lambda e: e.timestamp, reverse=True)
+    capped = all_entries[:200]
+    page   = capped[:limit]
+
+    return ActivityFeedResponse(
+        events=page,
+        count=len(page),
+        filter=filter_ or "all",
+        fetched_at=now.isoformat(),
+    )
 
 
 # ---------------------------------------------------------------------------
