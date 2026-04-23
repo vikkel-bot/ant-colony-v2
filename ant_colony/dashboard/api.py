@@ -401,6 +401,18 @@ class EquitiesStatusResponse(BaseModel):
     last_dividend_ts: str | None = None
 
 
+class ClaudeAntStatusResponse(BaseModel):
+    enabled: bool
+    budget_used: float
+    budget_total: float
+    budget_remaining: float
+
+
+class ClaudeAntActivateResponse(BaseModel):
+    status: str          # "activated" | "already_running" | "budget_exhausted" | "error"
+    budget_remaining: float
+
+
 _BITVAVO_TICKER = "https://api.bitvavo.com/v2/{market}/ticker/price"
 
 
@@ -434,6 +446,38 @@ def _get_live_price(market: str, registry=None) -> float | None:
 
 
 # ---------------------------------------------------------------------------
+# Claude Ant budget helper
+# ---------------------------------------------------------------------------
+
+def _read_claude_budget(logs_root: Path | None) -> float:
+    """Lees maandelijkse API-kosten uit ANT_LOGS/claude/costs.jsonl."""
+    if logs_root is None:
+        return 0.0
+    costs_path = logs_root / "claude" / "costs.jsonl"
+    if not costs_path.exists():
+        return 0.0
+    now = datetime.now(tz=timezone.utc)
+    total = 0.0
+    try:
+        for line in costs_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            try:
+                ts = datetime.fromisoformat(rec.get("timestamp", ""))
+                if ts.year == now.year and ts.month == now.month:
+                    total += rec.get("cost_eur", 0.0)
+            except (ValueError, TypeError):
+                pass
+    except OSError:
+        pass
+    return round(total, 4)
+
+
+# ---------------------------------------------------------------------------
 # Router factory
 # ---------------------------------------------------------------------------
 
@@ -448,6 +492,7 @@ def create_router(ctx: ColonyContext) -> APIRouter:
         Geconfigureerde APIRouter — te mounten in de FastAPI app.
     """
     router = APIRouter(prefix="/api")
+    _claude_state: dict = {"running": False, "thread": None}
 
     # ------------------------------------------------------------------
     # GET /api/status
@@ -1393,6 +1438,128 @@ def create_router(ctx: ColonyContext) -> APIRouter:
             last_piotroski_ts=data["last_piotroski_ts"],
             last_breakout_ts=data["last_breakout_ts"],
             last_dividend_ts=data["last_dividend_ts"],
+        )
+
+    # ------------------------------------------------------------------
+    # GET /api/claude-ant/status
+    # ------------------------------------------------------------------
+
+    @router.get("/claude-ant/status", response_model=ClaudeAntStatusResponse)
+    def get_claude_ant_status() -> ClaudeAntStatusResponse:
+        """Claude Ant status: actief, budget verbruikt en resterend."""
+        import os as _os
+        budget_total    = float(_os.getenv("CLAUDE_ANT_MONTHLY_BUDGET_EUR", "10.0"))
+        budget_used     = _read_claude_budget(ctx.logs_root)
+        budget_remaining = round(max(0.0, budget_total - budget_used), 4)
+        running = (
+            _claude_state["running"]
+            and _claude_state["thread"] is not None
+            and _claude_state["thread"].is_alive()
+        )
+        return ClaudeAntStatusResponse(
+            enabled=running,
+            budget_used=round(budget_used, 4),
+            budget_total=budget_total,
+            budget_remaining=budget_remaining,
+        )
+
+    # ------------------------------------------------------------------
+    # POST /api/claude-ant/activate
+    # ------------------------------------------------------------------
+
+    @router.post("/claude-ant/activate", response_model=ClaudeAntActivateResponse)
+    def activate_claude_ant() -> ClaudeAntActivateResponse:
+        """Start Claude Ant voor één analyse-cyclus (single-shot, TTL 600s)."""
+        import os as _os
+        import threading
+        import uuid
+
+        from ant_colony.ants.claude_ant import ClaudeAnt
+        from ant_colony.schemas.mission import (
+            AbortConditions,
+            MarketScope,
+            Mission,
+            RiskLimits,
+            SuccessConditions,
+        )
+
+        budget_total     = float(_os.getenv("CLAUDE_ANT_MONTHLY_BUDGET_EUR", "10.0"))
+        budget_used      = _read_claude_budget(ctx.logs_root)
+        budget_remaining = round(max(0.0, budget_total - budget_used), 4)
+
+        if budget_remaining <= 0:
+            return ClaudeAntActivateResponse(
+                status="budget_exhausted", budget_remaining=0.0
+            )
+
+        already_running = (
+            _claude_state["running"]
+            and _claude_state["thread"] is not None
+            and _claude_state["thread"].is_alive()
+        )
+        if already_running:
+            return ClaudeAntActivateResponse(
+                status="already_running", budget_remaining=budget_remaining
+            )
+
+        if ctx.scheduler is None or ctx.logs_root is None:
+            return ClaudeAntActivateResponse(
+                status="error", budget_remaining=budget_remaining
+            )
+
+        ts     = datetime.now(tz=timezone.utc).strftime("%Y%m%d-%H%M%S")
+        ant_id = f"ant-claude-dash-{uuid.uuid4().hex[:8]}"
+        mission = Mission(
+            mission_id=f"claude-dash-{ts}",
+            ant_type="claude_ant",
+            allowed_node="dashboard",
+            allowed_actions=["read_data", "report"],
+            market_scope=MarketScope(
+                biome="crypto",
+                symbols=["BTC-EUR", "ETH-EUR", "SOL-EUR", "XRP-EUR", "ADA-EUR",
+                         "LINK-EUR", "DOT-EUR", "LTC-EUR"],
+            ),
+            capital_limit=0.0,
+            risk_limits=RiskLimits(
+                max_drawdown_pct=0.01, max_position_size=1.0,
+                daily_loss_limit=1.0, stop_loss_required=False,
+            ),
+            ttl=600,
+            heartbeat_interval=60,
+            success_conditions=SuccessConditions(
+                description="Dashboard-geactiveerde analyse — één cyclus."
+            ),
+            abort_conditions=AbortConditions(
+                stale_heartbeat=False, capital_limit_breach=False,
+                risk_limit_breach=False, ttl_expired=True,
+            ),
+        )
+
+        ant = ClaudeAnt(
+            ant_id=ant_id,
+            mission=mission,
+            scheduler=ctx.scheduler,
+            logs_root=ctx.logs_root,
+        )
+
+        _claude_state["running"] = True
+
+        def _run() -> None:
+            try:
+                ant.run()
+            finally:
+                _claude_state["running"] = False
+
+        t = threading.Thread(
+            target=_run,
+            name=f"claude-dash-{ant_id[:16]}",
+            daemon=True,
+        )
+        _claude_state["thread"] = t
+        t.start()
+
+        return ClaudeAntActivateResponse(
+            status="activated", budget_remaining=budget_remaining
         )
 
     return router

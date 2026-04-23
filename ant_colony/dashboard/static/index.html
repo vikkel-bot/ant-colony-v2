@@ -168,6 +168,22 @@
     .btn-ks-tb:hover { background: var(--danger); color: #fff; border-color: var(--danger); }
     .btn-ks-tb:active { transform: scale(.97); }
 
+    .btn-claude-ant {
+      background: rgba(124,58,237,.12);
+      color: #7c3aed;
+      border: 1px solid rgba(124,58,237,.3);
+      padding: 4px 9px;
+      border-radius: 5px;
+      font-size: 10px; font-weight: 800;
+      letter-spacing: .3px;
+      cursor: pointer; transition: all .15s;
+      white-space: nowrap;
+    }
+    .btn-claude-ant:hover { background: #7c3aed; color: #fff; border-color: #7c3aed; }
+    .btn-claude-ant:active { transform: scale(.97); }
+    .btn-claude-ant.active { background: #7c3aed; color: #fff; border-color: #7c3aed; }
+    .btn-claude-ant:disabled { opacity: .45; cursor: not-allowed; }
+
     .btn-noodstop {
       background: var(--danger);
       color: #fff;
@@ -922,6 +938,7 @@
     <button class="btn-ks-tb" onclick="doKill(1)" title="Stop één agent (geeft prompt voor agent ID)">L1 Agent</button>
     <button class="btn-ks-tb" onclick="doKill(2)" title="Stop node (geeft prompt voor node ID)">L2 Node</button>
     <button class="btn-ks-tb" onclick="doKill(3)" title="Stop de volledige colony">L3 Colony</button>
+    <button id="btn-claude-ant" class="btn-claude-ant" onclick="activateClaudeAnt()" title="Activeer Claude Ant voor AI-analyse van top kandidaten">🧠 CLAUDE ANT</button>
     <button class="btn-noodstop" onclick="noodstop()">⛔ NOODSTOP</button>
   </div>
 
@@ -1104,6 +1121,7 @@ const S = {
   queenDecisions: { decisions: [], count: 0, loaded_at: null },
   activityFeed:   { events: [], count: 0, filter: 'all', loaded_at: null },
   afOpen:         false,
+  claudeAnt:      { enabled: false, budget_used: 0, budget_total: 10.0, budget_remaining: 10.0 },
   activeTab:      'colony',
   tickerIdx:      0,
   hbBase:         null,
@@ -2287,6 +2305,49 @@ function onActivityFilterChange() {
   refreshActivityFeed();
 }
 
+// ── Claude Ant ────────────────────────────────
+
+async function fetchClaudeAntStatus() {
+  const d = await fetch('/api/claude-ant/status').then(r => r.json()).catch(() => null);
+  if (d) { S.claudeAnt = d; renderClaudeAntBtn(); }
+}
+
+function renderClaudeAntBtn() {
+  const btn = document.getElementById('btn-claude-ant');
+  if (!btn) return;
+  const ca = S.claudeAnt || {};
+  const remaining = ca.budget_remaining != null ? ca.budget_remaining : ca.budget_total;
+  if (remaining <= 0) {
+    btn.disabled = true;
+    btn.textContent = 'BUDGET OP';
+    btn.classList.remove('active');
+  } else if (ca.enabled) {
+    btn.disabled = false;
+    btn.classList.add('active');
+    btn.textContent = `🧠 ACTIEF €${Number(remaining).toFixed(2)}`;
+  } else {
+    btn.disabled = false;
+    btn.classList.remove('active');
+    btn.textContent = '🧠 CLAUDE ANT';
+  }
+}
+
+async function activateClaudeAnt() {
+  const btn = document.getElementById('btn-claude-ant');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ ...'; }
+  const d = await fetch('/api/claude-ant/activate', { method: 'POST' })
+    .then(r => r.json())
+    .catch(e => { console.error('[dashboard] Claude Ant activate failed:', e.message); return null; });
+  if (d) {
+    S.claudeAnt = {
+      ...S.claudeAnt,
+      enabled: d.status === 'activated' || d.status === 'already_running',
+      budget_remaining: d.budget_remaining,
+    };
+  }
+  await fetchClaudeAntStatus();
+}
+
 function onAfToggle() {
   S.afOpen = !S.afOpen;
   const arrow  = document.getElementById('af-toggle-arrow');
@@ -2350,11 +2411,13 @@ async function initWithRetry() {
   window._intervals.push(setInterval(async () => {
     if (S.expandedQueen) await refreshQueenDecisions();
   }, 30000));
+  window._intervals.push(setInterval(fetchClaudeAntStatus, 30000));
 }
 
 document.addEventListener('DOMContentLoaded', () => {
   initWithRetry();
   refreshActivityFeed();
+  fetchClaudeAntStatus();
   perSecond();
 });
 
