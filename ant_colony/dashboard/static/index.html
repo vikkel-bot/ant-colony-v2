@@ -1163,7 +1163,9 @@ function pnlCls(v) { return v > 0 ? 'pos' : v < 0 ? 'neg' : 'zero'; }
 // ── Fetch ──────────────────────────────────────
 
 async function fetchAll() {
-  const get = url => fetch(url).then(r => r.json()).catch(() => null);
+  const get = url => fetch(url)
+    .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+    .catch(e => { console.error(`[dashboard] GET ${url} failed:`, e.message); return null; });
   const [st, me, br, cap, pos, ti, act, qs, pc, eq] = await Promise.all([
     get('/api/status'), get('/api/metrics'),
     get('/api/brokers'), get('/api/capital'),
@@ -2298,23 +2300,41 @@ function onAfToggle() {
 
 // ── Bootstrap ─────────────────────────────────
 
-fetchAll();
-refreshActivityFeed();
-setInterval(fetchAll,     5000);
-setInterval(perSecond,    1000);
-setInterval(rotateTicker, 4000);
-setInterval(refreshActivityFeed, 5000);
-setInterval(async () => {
-  const d = await fetch('/api/ants/activity').then(r => r.json()).catch(() => null);
-  if (d) { S.activity = d; renderActivity(); }
-}, 10000);
-setInterval(async () => {
-  if (S.expandedAnt) await refreshAntEvents(S.expandedAnt);
-}, 10000);
-setInterval(async () => {
-  if (S.expandedQueen) await refreshQueenDecisions();
-}, 30000);
-perSecond();
+async function initWithRetry() {
+  const MAX = 5;
+  for (let i = 1; i <= MAX; i++) {
+    try {
+      const r = await fetch('/api/capital');
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      await fetchAll();
+      return;
+    } catch (e) {
+      console.error(`[dashboard] init poging ${i}/${MAX} mislukt:`, e.message);
+      if (i < MAX) await new Promise(res => setTimeout(res, 2000));
+    }
+  }
+  console.error('[dashboard] init: alle pogingen mislukt, dashboard blijft leeg');
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  initWithRetry();
+  refreshActivityFeed();
+  setInterval(fetchAll,     5000);
+  setInterval(perSecond,    1000);
+  setInterval(rotateTicker, 4000);
+  setInterval(refreshActivityFeed, 5000);
+  setInterval(async () => {
+    const d = await fetch('/api/ants/activity').then(r => r.json()).catch(e => { console.error('[dashboard] GET /api/ants/activity failed:', e.message); return null; });
+    if (d) { S.activity = d; renderActivity(); }
+  }, 10000);
+  setInterval(async () => {
+    if (S.expandedAnt) await refreshAntEvents(S.expandedAnt);
+  }, 10000);
+  setInterval(async () => {
+    if (S.expandedQueen) await refreshQueenDecisions();
+  }, 30000);
+  perSecond();
+});
 
 </script>
 </body>
