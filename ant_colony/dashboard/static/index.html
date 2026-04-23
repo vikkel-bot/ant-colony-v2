@@ -484,9 +484,8 @@
     }
 
     .ac-dot {
-      width: 8px; height: 8px;
+      width: 6px; height: 6px;
       border-radius: 50%; flex-shrink: 0;
-      display: inline-block; margin-right: 6px;
     }
     .ant-dot-green  { background: #22c55e; }
     .ant-dot-yellow { background: #eab308; }
@@ -1698,6 +1697,15 @@ function _antDotClass(last_seen) {
   } catch (_) { return 'ant-dot-red'; }
 }
 
+function _antDotColor(last_seen) {
+  try {
+    const mins = _minsAgo(last_seen);
+    if (mins < 2)  return '#22c55e';
+    if (mins < 10) return '#eab308';
+    return '#ef4444';
+  } catch (_) { return '#ef4444'; }
+}
+
 function renderActivity() {
   const el   = document.getElementById('activity-grid');
   const ants = (S.activity && S.activity.ants) || [];
@@ -1749,11 +1757,12 @@ function renderActivity() {
     const isExpanded = S.expandedAnt === shortType;
     const expandedCls = isExpanded ? ' expanded' : '';
     const expandHtml  = `<div class="ac-expand">${isExpanded ? _expandPanelHtml(shortType) : ''}</div>`;
-    const dotCls = _antDotClass(a.last_seen);
+    const dotCls   = _antDotClass(a.last_seen);
+    const dotColor = _antDotColor(a.last_seen);
 
     return `<div class="ac-card${expandedCls}" onclick="toggleAntExpand('${shortType}')">
       <div class="ac-hdr">
-        <div class="ac-dot ${dotCls}"></div>
+        <div class="ac-dot ${dotCls}" style="background:${dotColor}"></div>
         <span class="ac-name">${name}</span>
         ${statsHtml}
         ${ts}
