@@ -101,7 +101,7 @@ def _build_missions(node_id: str):
 
     _CRYPTO_SCOPE = MarketScope(
         biome="crypto",
-        symbols=["BTC-EUR", "ETH-EUR", "SOL-EUR"],
+        symbols=["BTC-EUR", "ETH-EUR", "SOL-EUR", "XRP-EUR", "ADA-EUR", "LINK-EUR", "DOT-EUR", "LTC-EUR"],
         timeframes=["1h", "4h", "1d"],
     )
 

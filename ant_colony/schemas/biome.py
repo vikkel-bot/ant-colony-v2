@@ -131,7 +131,7 @@ class BiomeConfig(BaseModel):
         return cls(
             biome_id="crypto",
             display_name="Crypto (Bitvavo)",
-            symbols=symbols or ["BTC-EUR", "ETH-EUR", "SOL-EUR"],
+            symbols=symbols or ["BTC-EUR", "ETH-EUR", "SOL-EUR", "XRP-EUR", "ADA-EUR", "LINK-EUR", "DOT-EUR", "LTC-EUR"],
             risk_profile=BiomeRiskProfile(
                 max_position_pct=0.20,
                 min_trade_size=10.0,

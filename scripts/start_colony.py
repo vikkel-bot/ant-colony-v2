@@ -466,7 +466,7 @@ def main() -> None:
         )
         _crypto_scope = MarketScope(
             biome="crypto",
-            symbols=["BTC-EUR", "ETH-EUR", "SOL-EUR"],
+            symbols=["BTC-EUR", "ETH-EUR", "SOL-EUR", "XRP-EUR", "ADA-EUR", "LINK-EUR", "DOT-EUR", "LTC-EUR"],
             timeframes=["1h", "4h", "1d"],
         )
 
@@ -526,7 +526,7 @@ def main() -> None:
                 allowed_actions=["open_position", "close_position"],
                 market_scope=MarketScope(
                     biome="crypto",
-                    symbols=["BTC-EUR", "ETH-EUR", "SOL-EUR"],
+                    symbols=["BTC-EUR", "ETH-EUR", "SOL-EUR", "XRP-EUR", "ADA-EUR", "LINK-EUR", "DOT-EUR", "LTC-EUR"],
                 ),
                 capital_limit=500.0,
                 risk_limits=RiskLimits(
@@ -954,7 +954,7 @@ def main() -> None:
             )
             _crypto_scope_c = MarketScope(
                 biome="crypto",
-                symbols=["BTC-EUR", "ETH-EUR", "SOL-EUR"],
+                symbols=["BTC-EUR", "ETH-EUR", "SOL-EUR", "XRP-EUR", "ADA-EUR", "LINK-EUR", "DOT-EUR", "LTC-EUR"],
                 timeframes=["1h", "4h", "1d"],
             )
             claude_ant_id  = f"ant-claude-{_ts_claude}"
@@ -1049,7 +1049,7 @@ def main() -> None:
         )
         _crypto_scope_op = MarketScope(
             biome="crypto",
-            symbols=["BTC-EUR", "ETH-EUR", "SOL-EUR"],
+            symbols=["BTC-EUR", "ETH-EUR", "SOL-EUR", "XRP-EUR", "ADA-EUR", "LINK-EUR", "DOT-EUR", "LTC-EUR"],
             timeframes=["1h"],
         )
         operator_ant_id  = f"ant-operator-{_ts_op}"
