@@ -366,6 +366,44 @@
     .queen-dec-act { font-weight: 600; margin-top: 1px; }
     .queen-dec-why { color: var(--muted); margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
+    .qd-toggle { cursor: pointer; user-select: none; }
+    .qd-toggle:hover { background: #f5f3f0; }
+    .qd-chevron {
+      font-size: 9px; color: var(--faint);
+      transition: transform .2s; flex-shrink: 0; margin-left: auto;
+    }
+    .qd-expanded .qd-chevron { transform: rotate(90deg); }
+    .qd-expand { overflow: hidden; max-height: 0; transition: max-height .25s ease-out; }
+    .qd-expanded .qd-expand { max-height: 400px; }
+
+    .qd-list {
+      padding-top: 5px; border-top: .5px solid var(--border-soft);
+      margin-top: 5px; max-height: 380px; overflow-y: auto;
+    }
+    .qd-item {
+      display: flex; align-items: flex-start; gap: 7px;
+      padding: 5px 0; border-bottom: .5px solid var(--border-soft); font-size: 10px;
+    }
+    .qd-item:last-child { border-bottom: none; }
+    .qd-ts { color: var(--faint); font-size: 9px; white-space: nowrap; min-width: 72px; padding-top: 1px; }
+    .qd-title { font-weight: 600; margin-top: 2px; }
+    .qd-summary { color: var(--muted); margin-top: 1px; font-size: 9px; }
+    .qd-line { display: flex; flex-direction: column; align-items: center; padding-top: 4px; }
+    .qd-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--border); flex-shrink: 0; }
+    .qd-vline { width: 1px; flex: 1; min-height: 8px; background: var(--border-soft); margin-top: 2px; }
+
+    .qdb { display: inline-flex; align-items: center; padding: 1px 5px; border-radius: 10px;
+           font-size: 8px; font-weight: 800; letter-spacing: .3px; text-transform: uppercase; white-space: nowrap; }
+    .qdb-capital_increase { background: #f0fdf4; color: #166534; }
+    .qdb-capital_decrease { background: #fff7ed; color: #c2410c; }
+    .qdb-mission_promote  { background: #f0fdf4; color: #166534; }
+    .qdb-mission_demote   { background: #fef2f2; color: #991b1b; }
+    .qdb-regime_change    { background: #eff6ff; color: #1d4ed8; }
+    .qdb-strategy_select  { background: #faf5ff; color: #7e22ce; }
+    .qdb-mission_pause    { background: #f3f4f6; color: #6b7280; }
+    .qdb-mission_resume   { background: #f0fdf4; color: #166534; }
+    .qdb-neutral          { background: #f3f4f6; color: #9ca3af; }
+
     /* ── BADGES ── */
 
     .badge {
@@ -952,6 +990,8 @@ const S = {
   equities:    null,
   antEvents:   {},
   expandedAnt:    null,
+  expandedQueen:  false,
+  queenDecisions: { decisions: [], count: 0, loaded_at: null },
   activeTab:      'colony',
   tickerIdx:      0,
   hbBase:         null,
@@ -1198,6 +1238,76 @@ function renderPnlChart() {
 
 // ── Queen ─────────────────────────────────────
 
+const _QDB = {
+  capital_increase: ['↑ KAPITAAL',  'qdb-capital_increase'],
+  capital_decrease: ['↓ KAPITAAL',  'qdb-capital_decrease'],
+  mission_promote:  ['↑ PROMOTED',  'qdb-mission_promote'],
+  mission_demote:   ['↓ DEMOTED',   'qdb-mission_demote'],
+  regime_change:    ['REGIME',      'qdb-regime_change'],
+  strategy_select:  ['STRATEGIE',   'qdb-strategy_select'],
+  mission_pause:    ['PAUSED',      'qdb-mission_pause'],
+  mission_resume:   ['RESUMED',     'qdb-mission_resume'],
+  neutral:          ['INFO',        'qdb-neutral'],
+};
+
+function _decisionBadgeHtml(type) {
+  const [label, cls] = _QDB[type] || ['INFO', 'qdb-neutral'];
+  return `<span class="qdb ${cls}">${label}</span>`;
+}
+
+function _fmtDecisionTs(isoStr) {
+  if (!isoStr) return '—';
+  const d = new Date(isoStr);
+  const now = new Date();
+  const today     = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const yesterday = new Date(+today - 86400000);
+  const dDay      = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const t = d.toLocaleTimeString('nl-NL', { hour: '2-digit', minute: '2-digit' });
+  if (dDay >= today)     return 'Vandaag ' + t;
+  if (dDay >= yesterday) return 'Gisteren ' + t;
+  return d.toLocaleDateString('nl-NL', { day: 'numeric', month: 'short' }) + ' ' + t;
+}
+
+function _renderQueenTimeline() {
+  const decs = (S.queenDecisions && S.queenDecisions.decisions) || [];
+  if (!decs.length) {
+    return '<div class="qd-list"><div style="color:var(--faint);font-size:10px;padding:6px 0">Geen beslissingen gevonden</div></div>';
+  }
+  const items = decs.map((dec, i) => {
+    const isLast = i === decs.length - 1;
+    return `<div class="qd-item">
+      <div class="qd-line">
+        <div class="qd-dot"></div>
+        ${!isLast ? '<div class="qd-vline"></div>' : ''}
+      </div>
+      <div style="flex:1;padding-bottom:3px">
+        <div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap">
+          <span class="qd-ts">${_fmtDecisionTs(dec.timestamp)}</span>
+          ${_decisionBadgeHtml(dec.decision_type)}
+        </div>
+        ${dec.title   ? `<div class="qd-title">${dec.title}</div>` : ''}
+        ${dec.summary ? `<div class="qd-summary">${dec.summary}</div>` : ''}
+      </div>
+    </div>`;
+  }).join('');
+  return `<div class="qd-list">${items}</div>`;
+}
+
+async function refreshQueenDecisions() {
+  const d = await fetch('/api/queen/decisions?limit=10').then(r => r.json()).catch(() => null);
+  if (d) S.queenDecisions = d;
+  renderQueen();
+}
+
+async function toggleQueenExpand() {
+  S.expandedQueen = !S.expandedQueen;
+  if (S.expandedQueen && S.queenDecisions.loaded_at === null) {
+    await refreshQueenDecisions();
+  } else {
+    renderQueen();
+  }
+}
+
 function renderQueen() {
   const el = document.getElementById('queen-content');
   const q  = S.queenStatus;
@@ -1231,19 +1341,32 @@ function renderQueen() {
     stratHtml = '<div style="font-size:10px;color:var(--faint);margin-bottom:7px">Nog geen gekwalificeerde strategieën</div>';
   }
 
+  const expandedCls = S.expandedQueen ? ' qd-expanded' : '';
   let decisionHtml = '';
   if (q.last_decision) {
     const d  = q.last_decision;
-    const ts = d.timestamp ? new Date(d.timestamp).toLocaleTimeString('nl-NL') : '—';
-    decisionHtml = `<div class="queen-decision">
-      <div class="queen-dec-ts">Laatste beslissing · ${ts}</div>
-      <div class="queen-dec-act">${d.action}</div>
-      ${d.reason ? `<div class="queen-dec-why">${d.reason}</div>` : ''}
+    const ts = d.timestamp ? _fmtDecisionTs(d.timestamp) : '—';
+    decisionHtml = `<div class="queen-decision qd-toggle${expandedCls}" onclick="toggleQueenExpand()">
+      <div style="display:flex;align-items:center">
+        <div style="flex:1">
+          <div class="queen-dec-ts">Laatste beslissing · ${ts}</div>
+          <div class="queen-dec-act">${d.action}</div>
+          ${d.reason ? `<div class="queen-dec-why">${d.reason}</div>` : ''}
+        </div>
+        <span class="qd-chevron">▸</span>
+      </div>
+      <div class="qd-expand">${S.expandedQueen ? _renderQueenTimeline() : ''}</div>
     </div>`;
   } else {
-    decisionHtml = `<div class="queen-decision">
-      <div class="queen-dec-ts">Laatste beslissing</div>
-      <div class="queen-dec-act" style="color:var(--faint)">Wacht op paper trade data</div>
+    decisionHtml = `<div class="queen-decision qd-toggle${expandedCls}" onclick="toggleQueenExpand()">
+      <div style="display:flex;align-items:center">
+        <div style="flex:1">
+          <div class="queen-dec-ts">Laatste beslissing</div>
+          <div class="queen-dec-act" style="color:var(--faint)">Wacht op paper trade data</div>
+        </div>
+        <span class="qd-chevron">▸</span>
+      </div>
+      <div class="qd-expand">${S.expandedQueen ? _renderQueenTimeline() : ''}</div>
     </div>`;
   }
 
@@ -1889,6 +2012,9 @@ setInterval(async () => {
 setInterval(async () => {
   if (S.expandedAnt) await refreshAntEvents(S.expandedAnt);
 }, 10000);
+setInterval(async () => {
+  if (S.expandedQueen) await refreshQueenDecisions();
+}, 30000);
 perSecond();
 
 </script>
