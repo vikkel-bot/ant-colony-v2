@@ -581,7 +581,8 @@ class TestScoutLogEdgeCases:
 
 class TestMaxOpenPositions:
     def test_cap_blocks_fourth_position(self, tmp_path: Path) -> None:
-        symbols = ["BTC-EUR", "ETH-EUR", "SOL-EUR", "ADA-EUR"]
+        _all = ["BTC-EUR", "ETH-EUR", "SOL-EUR", "ADA-EUR", "XRP-EUR", "DOT-EUR"]
+        symbols = _all[:_MAX_OPEN_POSITIONS + 1]
         mission = make_mission(capital=100_000.0, symbols=symbols)
         ant = make_ant(mission=mission, logs_root=tmp_path)
 
@@ -591,15 +592,17 @@ class TestMaxOpenPositions:
         ant._tick()
         assert len(ant._ledger.open_positions) == _MAX_OPEN_POSITIONS
 
-        # Fourth symbol signal — should be blocked by cap
-        write_scout_signal(tmp_path / "scouts", symbol=symbols[3],
+        # Extra symbol signal — should be blocked by cap
+        write_scout_signal(tmp_path / "scouts", symbol=symbols[_MAX_OPEN_POSITIONS],
                            price=1_000.0, filename="s_extra.jsonl")
         ant._tick()
         assert len(ant._ledger.open_positions) == _MAX_OPEN_POSITIONS
 
     def test_cap_allows_open_after_close(self, tmp_path: Path) -> None:
-        symbols = ["BTC-EUR", "ETH-EUR", "SOL-EUR"]
-        mission = make_mission(capital=100_000.0, symbols=symbols + ["ADA-EUR"])
+        _all = ["BTC-EUR", "ETH-EUR", "SOL-EUR", "ADA-EUR", "XRP-EUR", "DOT-EUR"]
+        symbols = _all[:_MAX_OPEN_POSITIONS]
+        extra   = _all[_MAX_OPEN_POSITIONS]
+        mission = make_mission(capital=100_000.0, symbols=symbols + [extra])
         ant = make_ant(mission=mission, logs_root=tmp_path)
 
         for sym in symbols:
@@ -621,8 +624,8 @@ class TestMaxOpenPositions:
         assert len(ant._ledger.open_positions) == _MAX_OPEN_POSITIONS - 1
 
         # Now a new symbol should open
-        write_scout_signal(tmp_path / "scouts", symbol="ADA-EUR",
-                           price=1_000.0, filename="s_ada.jsonl")
+        write_scout_signal(tmp_path / "scouts", symbol=extra,
+                           price=1_000.0, filename="s_extra.jsonl")
         ant._tick()
         assert len(ant._ledger.open_positions) == _MAX_OPEN_POSITIONS
 
