@@ -577,6 +577,51 @@
       min-height: 0;
     }
 
+    /* ── ACTIVITY FEED ── */
+    .af-list {
+      overflow-y: auto;
+      max-height: 500px;
+      border: .5px solid var(--border-soft);
+      border-radius: 5px;
+    }
+    .af-row {
+      display: flex; align-items: center; gap: 7px;
+      padding: 3px 7px;
+      min-height: 24px;
+      border-bottom: .5px solid var(--border-soft);
+      font-size: 10px;
+    }
+    .af-row:last-child { border-bottom: none; }
+    .af-row:hover { background: #f5f3f0; }
+    .af-icon { font-size: 9px; flex-shrink: 0; width: 10px; text-align: center; }
+    .af-time {
+      font-family: 'Courier New', monospace; font-size: 9px;
+      color: var(--faint); white-space: nowrap; flex-shrink: 0;
+    }
+    .af-badge {
+      display: inline-flex; align-items: center; justify-content: center;
+      padding: 1px 5px; border-radius: 10px;
+      font-size: 8px; font-weight: 700; white-space: nowrap; flex-shrink: 0;
+      color: #fff; min-width: 48px; text-align: center;
+    }
+    .af-action {
+      font-family: 'Courier New', monospace; font-size: 9px;
+      color: var(--muted); white-space: nowrap; flex-shrink: 0; min-width: 120px;
+    }
+    .af-summary {
+      flex: 1; color: var(--text); overflow: hidden;
+      white-space: nowrap; text-overflow: ellipsis;
+    }
+    .af-hdr {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 7px;
+    }
+    .af-filter-sel {
+      padding: 3px 6px; border: 1px solid var(--border);
+      border-radius: 4px; background: var(--card); font-size: 10px;
+      color: var(--text); cursor: pointer;
+    }
+
     /* ── UTILITY ── */
 
     .empty {
@@ -960,6 +1005,26 @@
 
     </div>
   </div>
+
+  <!-- Live activiteit feed (full-width) -->
+  <div class="card" style="margin-top:8px">
+    <div class="af-hdr">
+      <span class="card-title" style="margin-bottom:0">Live activiteit feed</span>
+      <select id="af-filter" class="af-filter-sel" onchange="onActivityFilterChange()">
+        <option value="all">▼ Alle</option>
+        <option value="scout">Scout</option>
+        <option value="research">Research</option>
+        <option value="paper">Paper</option>
+        <option value="audit">Audit</option>
+        <option value="queen">Queen</option>
+        <option value="errors">⚠ Errors</option>
+      </select>
+    </div>
+    <div id="activity-feed" class="af-list">
+      <div class="empty">Laden…</div>
+    </div>
+  </div>
+
   </div><!-- end panel-colony -->
 
   <!-- ══ EQUITIES PANEL ══ -->
@@ -992,6 +1057,7 @@ const S = {
   expandedAnt:    null,
   expandedQueen:  false,
   queenDecisions: { decisions: [], count: 0, loaded_at: null },
+  activityFeed:   { events: [], count: 0, filter: 'all', loaded_at: null },
   activeTab:      'colony',
   tickerIdx:      0,
   hbBase:         null,
@@ -1999,12 +2065,71 @@ function fPrice2(v) {
   return '$\u202f' + Number(v).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
 }
 
+// ── Activity feed ──────────────────────────────
+
+const AF_COLOR = {
+  scout:     '#1D9E75',
+  research:  '#378ADD',
+  paper:     '#7C3AED',
+  audit:     '#EF9F27',
+  ingestion: '#F97316',
+  strategy:  '#06B6D4',
+  execution: '#E24B4A',
+  operator:  '#64748B',
+  claude:    '#8B5CF6',
+  queen:     '#7C3AED',
+};
+
+function _afTime(isoStr) {
+  if (!isoStr) return '—';
+  const d = new Date(isoStr);
+  const pad = n => String(n).padStart(2, '0');
+  return pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+}
+
+function renderActivityFeed() {
+  const el     = document.getElementById('activity-feed');
+  const events = (S.activityFeed && S.activityFeed.events) || [];
+  if (!events.length) {
+    el.innerHTML = '<div class="empty">Geen recente activiteit</div>';
+    return;
+  }
+  el.innerHTML = events.map(ev => {
+    const color  = AF_COLOR[ev.ant_type] || '#9ca3af';
+    const icon   = ev.level === 'error'   ? '<span class="af-icon" style="color:#ef4444">✕</span>'
+                 : ev.level === 'warning' ? '<span class="af-icon" style="color:#f97316">!</span>'
+                 : '<span class="af-icon"></span>';
+    const badge  = `<span class="af-badge" style="background:${color}">${ev.ant_type}</span>`;
+    const action = `<span class="af-action">${ev.action}</span>`;
+    const summ   = `<span class="af-summary" title="${ev.summary}">${ev.summary}</span>`;
+    return `<div class="af-row">${icon}<span class="af-time">${_afTime(ev.timestamp)}</span>${badge}${action}${summ}</div>`;
+  }).join('');
+}
+
+async function refreshActivityFeed() {
+  const filter = S.activityFeed.filter || 'all';
+  const d = await fetch(`/api/activity?limit=50&filter=${filter}`).then(r => r.json()).catch(() => null);
+  if (d) {
+    S.activityFeed = { ...d, filter };
+    document.getElementById('af-filter').value = filter;
+  }
+  renderActivityFeed();
+}
+
+function onActivityFilterChange() {
+  const sel = document.getElementById('af-filter');
+  S.activityFeed.filter = sel ? sel.value : 'all';
+  refreshActivityFeed();
+}
+
 // ── Bootstrap ─────────────────────────────────
 
 fetchAll();
+refreshActivityFeed();
 setInterval(fetchAll,     5000);
 setInterval(perSecond,    1000);
 setInterval(rotateTicker, 4000);
+setInterval(refreshActivityFeed, 5000);
 setInterval(async () => {
   const d = await fetch('/api/ants/activity').then(r => r.json()).catch(() => null);
   if (d) { S.activity = d; renderActivity(); }
