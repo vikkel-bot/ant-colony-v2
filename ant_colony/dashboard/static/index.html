@@ -333,6 +333,26 @@
       overflow: visible;
     }
 
+    /* ── PNL SPLIT ── */
+    .pnl-split {
+      display: flex; gap: 16px; margin-top: 8px;
+    }
+    .pnl-split-col {
+      flex: 1; padding: 6px 8px; border-radius: 5px;
+      border: .5px solid var(--border-soft);
+      background: #faf9f5;
+    }
+    .pnl-split-lbl {
+      font-size: 8px; font-weight: 800; text-transform: uppercase;
+      letter-spacing: .5px; margin-bottom: 3px;
+    }
+    .pnl-split-val {
+      font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums;
+    }
+    .pnl-split-meta {
+      font-size: 9px; color: var(--muted); margin-top: 2px;
+    }
+
     /* ── QUEEN SECTION ── */
 
     .regime-pill {
@@ -965,6 +985,7 @@
             <text x="250" y="34" text-anchor="middle" fill="#9ca3af" font-size="11">Geen gesloten trades</text>
           </svg>
         </div>
+        <div id="pnl-split" class="pnl-split"></div>
       </div>
 
       <!-- Ant activity (scrollable, compact) -->
@@ -1176,6 +1197,7 @@ function render() {
   renderStatus();
   renderMetrics();
   renderPnlChart();
+  renderPnlSplit();
   renderActivity();
   renderOpenPositions();
   renderBrokers();
@@ -1353,6 +1375,48 @@ function renderPnlChart() {
     <polygon points="${fillPts}" fill="${fillColor}"/>
     <polyline points="${ptStr}" fill="none" stroke="${color}" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>
     <circle cx="${W}" cy="${lastY}" r="3" fill="${color}"/>
+  `;
+}
+
+// ── PnL Split ─────────────────────────────────
+
+function _isCrypto(symbol) {
+  return /-EUR$|-USD$|-USDT$/.test(symbol || '');
+}
+
+function renderPnlSplit() {
+  const el = document.getElementById('pnl-split');
+  if (!el) return;
+  const positions = (S.positions && S.positions.positions) || [];
+
+  let cPnl = 0, cInvested = 0, cCount = 0;
+  let ePnl = 0, eInvested = 0, eCount = 0;
+
+  positions.forEach(p => {
+    const isCrypto = (p.biome === 'crypto') || _isCrypto(p.symbol);
+    const invested = (p.entry_price || 0) * (p.quantity || 0);
+    const pnl = p.pnl_eur || 0;
+    if (isCrypto) { cPnl += pnl; cInvested += invested; cCount++; }
+    else          { ePnl += pnl; eInvested += invested; eCount++; }
+  });
+
+  const cPct = cInvested > 0 ? (cPnl / cInvested * 100) : 0;
+  const ePct = eInvested > 0 ? (ePnl / eInvested * 100) : 0;
+  const fEur = v => (v >= 0 ? '+' : '') + v.toFixed(2) + ' €';
+  const fPct = v => (v >= 0 ? '+' : '') + v.toFixed(2) + '%';
+  const col  = v => v >= 0 ? 'var(--green)' : 'var(--red)';
+
+  el.innerHTML = `
+    <div class="pnl-split-col">
+      <div class="pnl-split-lbl">CRYPTO</div>
+      <div class="pnl-split-val" style="color:${col(cPnl)}">${fEur(cPnl)} <span style="font-size:11px">${fPct(cPct)}</span></div>
+      <div class="pnl-split-meta">${cCount} open positie${cCount !== 1 ? 's' : ''}</div>
+    </div>
+    <div class="pnl-split-col">
+      <div class="pnl-split-lbl">EQUITIES</div>
+      <div class="pnl-split-val" style="color:${col(ePnl)}">${fEur(ePnl)} <span style="font-size:11px">${fPct(ePct)}</span></div>
+      <div class="pnl-split-meta">${eCount} open positie${eCount !== 1 ? 's' : ''}</div>
+    </div>
   `;
 }
 
