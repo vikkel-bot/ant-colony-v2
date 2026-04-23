@@ -401,11 +401,16 @@ class EquitiesStatusResponse(BaseModel):
     last_dividend_ts: str | None = None
 
 
+_CLAUDE_SESSION_LIMIT_EUR = 1.0   # max €1 per dashboard-activatie
+
+
 class ClaudeAntStatusResponse(BaseModel):
     enabled: bool
     budget_used: float
     budget_total: float
     budget_remaining: float
+    session_cost: float | None = None      # verbruikt in laatste sessie
+    session_status: str | None = None     # "session_limit_reached" | None
 
 
 class ClaudeAntActivateResponse(BaseModel):
@@ -496,7 +501,10 @@ def create_router(ctx: ColonyContext) -> APIRouter:
         Geconfigureerde APIRouter — te mounten in de FastAPI app.
     """
     router = APIRouter(prefix="/api")
-    _claude_state: dict = {"running": False, "thread": None, "ant": None}
+    _claude_state: dict = {
+        "running": False, "thread": None, "ant": None,
+        "cost_at_start": 0.0, "session_cost": 0.0, "session_status": None,
+    }
 
     # ------------------------------------------------------------------
     # GET /api/status
@@ -1465,6 +1473,8 @@ def create_router(ctx: ColonyContext) -> APIRouter:
             budget_used=round(budget_used, 4),
             budget_total=budget_total,
             budget_remaining=budget_remaining,
+            session_cost=_claude_state["session_cost"] or None,
+            session_status=_claude_state["session_status"],
         )
 
     # ------------------------------------------------------------------
@@ -1545,14 +1555,26 @@ def create_router(ctx: ColonyContext) -> APIRouter:
             scheduler=ctx.scheduler,
             logs_root=ctx.logs_root,
         )
+        # Hard cap: stop wanneer maandkosten budget_used + €1.00 bereiken
+        ant._budget_eur = budget_used + _CLAUDE_SESSION_LIMIT_EUR
 
-        _claude_state["running"] = True
-        _claude_state["ant"]     = ant
+        _claude_state["running"]       = True
+        _claude_state["ant"]           = ant
+        _claude_state["cost_at_start"] = budget_used
+        _claude_state["session_cost"]  = 0.0
+        _claude_state["session_status"] = None
 
         def _run() -> None:
             try:
                 ant.run()
             finally:
+                cost_now = _read_claude_budget(ctx.logs_root)
+                session_cost = round(max(0.0, cost_now - _claude_state["cost_at_start"]), 4)
+                _claude_state["session_cost"]   = session_cost
+                _claude_state["session_status"] = (
+                    "session_limit_reached"
+                    if session_cost >= _CLAUDE_SESSION_LIMIT_EUR else None
+                )
                 _claude_state["running"] = False
                 _claude_state["ant"]     = None
 
