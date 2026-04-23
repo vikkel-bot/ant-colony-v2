@@ -1235,16 +1235,31 @@ function render() {
   renderWarningsBanner();
 }
 
+// Ants die heartbeat-gemonitord worden in de warnings banner
+const _MONITORED_ANTS = new Set([
+  'scout_ant','research_ant','paper_ant','strategy_ant','audit_ant','operator_ant',
+]);
+// Ants die standaard verborgen zijn in Mieren Activiteit
+// (tenzij recent actief — events binnen 15 min)
+const _HIDDEN_ANTS = new Set(['ingestion_ant','claude_ant','execution_ant']);
+function _isHiddenAnt(ant_type) {
+  if (_HIDDEN_ANTS.has(ant_type)) return true;
+  const short = ant_type.replace(/_ant$/, '');
+  return short.includes('dividend') || short.includes('rebalance');
+}
+
 function renderWarningsBanner() {
   const banner = document.getElementById('warnings-banner');
   if (!banner) return;
 
   const warnings = [];
 
-  // Trigger 1: ant > 15 min geen events
+  // Trigger 1: gemonitorde ant > 15 min geen events
   const ants = (S.activity && S.activity.ants) || [];
   ants.forEach(a => {
+    if (!_MONITORED_ANTS.has(a.ant_type)) return;
     const mins = _minsAgo(a.last_seen);
+    if (!isFinite(mins) || isNaN(mins)) return;  // geen data → geen waarschuwing
     if (mins > 15) {
       warnings.push(`⚠ ${fType(a.ant_type)}: geen activiteit sinds ${Math.round(mins)} min`);
     }
@@ -1852,7 +1867,13 @@ function _antDotColor(last_seen) {
 
 function renderActivity() {
   const el   = document.getElementById('activity-grid');
-  const ants = (S.activity && S.activity.ants) || [];
+  const all  = (S.activity && S.activity.ants) || [];
+  // Verberg disabled ants tenzij ze recent actief zijn (< 15 min)
+  const ants = all.filter(a => {
+    if (!_isHiddenAnt(a.ant_type)) return true;
+    const mins = _minsAgo(a.last_seen);
+    return isFinite(mins) && mins <= 15;
+  });
   if (!ants.length) {
     el.innerHTML = '<div class="empty">Geen log data — mieren nog niet actief</div>';
     return;
