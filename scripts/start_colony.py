@@ -936,7 +936,8 @@ def main() -> None:
 
     # --- Stap 8c: ClaudeAnt (opt-in, eigen try-blok zodat andere fouten het niet blokkeren) ---
     try:
-        _claude_enabled = os.getenv("CLAUDE_ANT_ENABLED", "false").lower() == "true"
+        _CLAUDE_ANT_ENABLED = False  # uitgeschakeld: API-kosten, zet True + env-var om te activeren
+        _claude_enabled = _CLAUDE_ANT_ENABLED and os.getenv("CLAUDE_ANT_ENABLED", "false").lower() == "true"
         if _claude_enabled:
             from ant_colony.ants.claude_ant import ClaudeAnt
             from ant_colony.colony.scheduler.colony_scheduler import AgentRecord
@@ -1012,7 +1013,7 @@ def main() -> None:
                     claude_mission.ttl,
                 )
         else:
-            log.info("ClaudeAnt uitgeschakeld (opt-in vereist — zet CLAUDE_ANT_ENABLED=true).")
+            log.info("ClaudeAnt uitgeschakeld (_CLAUDE_ANT_ENABLED=False).")
     except Exception:
         log.exception("ClaudeAnt bootstrap mislukt — colony draait door zonder ClaudeAnt.")
 
