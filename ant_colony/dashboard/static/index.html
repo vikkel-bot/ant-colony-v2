@@ -2330,22 +2330,23 @@ function onActivityFilterChange() {
 
 async function fetchClaudeAntStatus() {
   const d = await fetch('/api/claude-ant/status').then(r => r.json()).catch(() => null);
-  if (d) { S.claudeAnt = d; renderClaudeAntBtn(); }
+  if (d) S.claudeAnt = d;
+  renderClaudeAntBtn();  // altijd renderen, ook als fetch mislukte
 }
 
 function renderClaudeAntBtn() {
   const btn = document.getElementById('btn-claude-ant');
   if (!btn) return;
   const ca = S.claudeAnt || {};
-  const remaining = ca.budget_remaining != null ? ca.budget_remaining : ca.budget_total;
+  const remaining = Number(ca.budget_remaining != null ? ca.budget_remaining : (ca.budget_total ?? 10));
   if (remaining <= 0) {
     btn.disabled = true;
-    btn.textContent = 'BUDGET OP';
     btn.classList.remove('active');
-  } else if (ca.enabled) {
+    btn.textContent = 'BUDGET OP';
+  } else if (ca.enabled === true) {
     btn.disabled = false;
     btn.classList.add('active');
-    btn.textContent = `🧠 ACTIEF €${Number(remaining).toFixed(2)}`;
+    btn.textContent = `🧠 ACTIEF €${remaining.toFixed(2)}`;
   } else {
     btn.disabled = false;
     btn.classList.remove('active');
@@ -2357,7 +2358,7 @@ async function activateClaudeAnt() {
   const btn = document.getElementById('btn-claude-ant');
   if (btn) { btn.disabled = true; btn.textContent = '⏳ ...'; }
 
-  const isActive = S.claudeAnt && S.claudeAnt.enabled;
+  const isActive = S.claudeAnt && S.claudeAnt.enabled === true;
   const url = isActive ? '/api/claude-ant/deactivate' : '/api/claude-ant/activate';
   const d = await fetch(url, { method: 'POST' })
     .then(r => r.json())
@@ -2372,7 +2373,7 @@ async function activateClaudeAnt() {
   } else if (d && isActive) {
     S.claudeAnt = { ...S.claudeAnt, enabled: false };
   }
-  await fetchClaudeAntStatus();
+  await fetchClaudeAntStatus();  // herrendert altijd via renderClaudeAntBtn
 }
 
 function onAfToggle() {
