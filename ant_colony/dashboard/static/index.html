@@ -1163,9 +1163,9 @@ function pnlCls(v) { return v > 0 ? 'pos' : v < 0 ? 'neg' : 'zero'; }
 // ── Fetch ──────────────────────────────────────
 
 async function fetchAll() {
-  const get = url => fetch(url)
+  const get = url => _fetchQ(() => fetch(url)
     .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
-    .catch(e => { console.error(`[dashboard] GET ${url} failed:`, e.message); return null; });
+    .catch(e => { console.error(`[dashboard] GET ${url} failed:`, e.message); return null; }));
   const [st, me, br, cap, pos, ti, act, qs, pc, eq] = await Promise.all([
     get('/api/status'), get('/api/metrics'),
     get('/api/brokers'), get('/api/capital'),
@@ -2300,39 +2300,61 @@ function onAfToggle() {
 
 // ── Bootstrap ─────────────────────────────────
 
+// Fetch queue: max 3 gelijktijdige calls
+const _fetchQ = (() => {
+  let active = 0;
+  const pending = [];
+  const run = () => {
+    while (active < 3 && pending.length) {
+      active++;
+      const { fn, resolve, reject } = pending.shift();
+      fn().then(resolve, reject).finally(() => { active--; run(); });
+    }
+  };
+  return fn => new Promise((resolve, reject) => { pending.push({ fn, resolve, reject }); run(); });
+})();
+
+window._intervals = [];
+
 async function initWithRetry() {
+  window._intervals.forEach(clearInterval);
+  window._intervals = [];
+
   const MAX = 5;
   for (let i = 1; i <= MAX; i++) {
     try {
       const r = await fetch('/api/capital');
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       await fetchAll();
-      return;
+      break;
     } catch (e) {
       console.error(`[dashboard] init poging ${i}/${MAX} mislukt:`, e.message);
       if (i < MAX) await new Promise(res => setTimeout(res, 2000));
+      else console.error('[dashboard] init: alle pogingen mislukt, dashboard blijft leeg');
     }
   }
-  console.error('[dashboard] init: alle pogingen mislukt, dashboard blijft leeg');
+
+  window._intervals.push(setInterval(fetchAll,     5000));
+  window._intervals.push(setInterval(perSecond,    1000));
+  window._intervals.push(setInterval(rotateTicker, 4000));
+  window._intervals.push(setInterval(refreshActivityFeed, 5000));
+  window._intervals.push(setInterval(async () => {
+    const d = await fetch('/api/ants/activity')
+      .then(r => r.json())
+      .catch(e => { console.error('[dashboard] GET /api/ants/activity failed:', e.message); return null; });
+    if (d) { S.activity = d; renderActivity(); }
+  }, 10000));
+  window._intervals.push(setInterval(async () => {
+    if (S.expandedAnt) await refreshAntEvents(S.expandedAnt);
+  }, 10000));
+  window._intervals.push(setInterval(async () => {
+    if (S.expandedQueen) await refreshQueenDecisions();
+  }, 30000));
 }
 
 document.addEventListener('DOMContentLoaded', () => {
   initWithRetry();
   refreshActivityFeed();
-  setInterval(fetchAll,     5000);
-  setInterval(perSecond,    1000);
-  setInterval(rotateTicker, 4000);
-  setInterval(refreshActivityFeed, 5000);
-  setInterval(async () => {
-    const d = await fetch('/api/ants/activity').then(r => r.json()).catch(e => { console.error('[dashboard] GET /api/ants/activity failed:', e.message); return null; });
-    if (d) { S.activity = d; renderActivity(); }
-  }, 10000);
-  setInterval(async () => {
-    if (S.expandedAnt) await refreshAntEvents(S.expandedAnt);
-  }, 10000);
-  setInterval(async () => {
-    if (S.expandedQueen) await refreshQueenDecisions();
-  }, 30000);
   perSecond();
 });
 
