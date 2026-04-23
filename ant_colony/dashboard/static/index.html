@@ -1677,21 +1677,25 @@ async function toggleAntExpand(antType) {
 
 function _minsAgo(timeStr) {
   if (!timeStr) return Infinity;
-  const parts = timeStr.split(':').map(Number);
-  if (parts.length !== 3 || parts.some(isNaN)) return Infinity;
-  const [h, m, s] = parts;
-  const now  = new Date();
-  const then = new Date();
-  then.setHours(h, m, s, 0);
-  if (then > now) then.setDate(then.getDate() - 1);
-  return (now - then) / 60000;
+  try {
+    const parts = timeStr.split(':').map(Number);
+    if (parts.length !== 3 || parts.some(v => Number.isNaN(v))) return Infinity;
+    const [h, m, s] = parts;
+    const now  = new Date();
+    const past = new Date(now);
+    past.setHours(h, m, s, 0);
+    if (past > now) past.setDate(past.getDate() - 1);
+    return (now - past) / 60000;
+  } catch (_) { return Infinity; }
 }
 
 function _antDotClass(last_seen) {
-  const mins = _minsAgo(last_seen);
-  if (mins < 2)  return 'ant-dot-green';
-  if (mins < 10) return 'ant-dot-yellow';
-  return 'ant-dot-red';
+  try {
+    const mins = _minsAgo(last_seen);
+    if (mins < 2)  return 'ant-dot-green';
+    if (mins < 10) return 'ant-dot-yellow';
+    return 'ant-dot-red';
+  } catch (_) { return 'ant-dot-red'; }
 }
 
 function renderActivity() {
@@ -1745,10 +1749,11 @@ function renderActivity() {
     const isExpanded = S.expandedAnt === shortType;
     const expandedCls = isExpanded ? ' expanded' : '';
     const expandHtml  = `<div class="ac-expand">${isExpanded ? _expandPanelHtml(shortType) : ''}</div>`;
+    const dotCls = _antDotClass(a.last_seen);
 
     return `<div class="ac-card${expandedCls}" onclick="toggleAntExpand('${shortType}')">
       <div class="ac-hdr">
-        <div class="ac-dot ${_antDotClass(a.last_seen)}"></div>
+        <div class="ac-dot ${dotCls}"></div>
         <span class="ac-name">${name}</span>
         ${statsHtml}
         ${ts}
