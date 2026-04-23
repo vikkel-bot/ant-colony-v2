@@ -471,6 +471,7 @@ def main() -> None:
         )
 
         _paper_mode_active = os.getenv("BITVAVO_PAPER_MODE", "true").lower() == "true"
+        _INGESTION_ANT_ENABLED = False  # uitgeschakeld: hoog CPU-gebruik, weinig waarde
 
         _bootstrap_missions = [
             Mission(
@@ -573,7 +574,7 @@ def main() -> None:
                     stale_market_data=False,
                 ),
             ),
-            Mission(
+            *([Mission(
                 mission_id=f"ingestion-crypto-{_ts}",
                 ant_type="ingestion_ant",
                 allowed_node=args.node_id,
@@ -595,7 +596,7 @@ def main() -> None:
                     ttl_expired=True,
                     stale_market_data=False,
                 ),
-            ),
+            )] if _INGESTION_ANT_ENABLED else []),
             Mission(
                 mission_id=f"strategy-crypto-{_ts}",
                 ant_type="strategy_ant",
@@ -840,7 +841,7 @@ def main() -> None:
                 ingestion_mission.ttl,
             )
         else:
-            log.warning("Ingestion-missie niet geaccepteerd — geen IngestionAnt thread gestart.")
+            log.info("IngestionAnt uitgeschakeld (_INGESTION_ANT_ENABLED=False).")
 
         if strategy_mission is None:
             log.warning("Strategy-missie niet geaccepteerd — geen StrategyAnt thread gestart.")
