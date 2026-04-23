@@ -413,6 +413,10 @@ class ClaudeAntActivateResponse(BaseModel):
     budget_remaining: float
 
 
+class ClaudeAntDeactivateResponse(BaseModel):
+    status: str          # "deactivated" | "not_running"
+
+
 _BITVAVO_TICKER = "https://api.bitvavo.com/v2/{market}/ticker/price"
 
 
@@ -492,7 +496,7 @@ def create_router(ctx: ColonyContext) -> APIRouter:
         Geconfigureerde APIRouter — te mounten in de FastAPI app.
     """
     router = APIRouter(prefix="/api")
-    _claude_state: dict = {"running": False, "thread": None}
+    _claude_state: dict = {"running": False, "thread": None, "ant": None}
 
     # ------------------------------------------------------------------
     # GET /api/status
@@ -1543,12 +1547,14 @@ def create_router(ctx: ColonyContext) -> APIRouter:
         )
 
         _claude_state["running"] = True
+        _claude_state["ant"]     = ant
 
         def _run() -> None:
             try:
                 ant.run()
             finally:
                 _claude_state["running"] = False
+                _claude_state["ant"]     = None
 
         t = threading.Thread(
             target=_run,
@@ -1561,6 +1567,23 @@ def create_router(ctx: ColonyContext) -> APIRouter:
         return ClaudeAntActivateResponse(
             status="activated", budget_remaining=budget_remaining
         )
+
+    # ------------------------------------------------------------------
+    # POST /api/claude-ant/deactivate
+    # ------------------------------------------------------------------
+
+    @router.post("/claude-ant/deactivate", response_model=ClaudeAntDeactivateResponse)
+    def deactivate_claude_ant() -> ClaudeAntDeactivateResponse:
+        """Stop een actieve Claude Ant run via het bestaande AntStatus mechanisme."""
+        from ant_colony.schemas.ant import AntStatus
+
+        ant = _claude_state.get("ant")
+        if ant is None or not _claude_state.get("running"):
+            return ClaudeAntDeactivateResponse(status="not_running")
+
+        ant._status = AntStatus.ABORTED   # run-loop exit op volgende tick (≤1s)
+        _claude_state["running"] = False
+        return ClaudeAntDeactivateResponse(status="deactivated")
 
     return router
 

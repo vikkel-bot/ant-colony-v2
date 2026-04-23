@@ -2335,15 +2335,21 @@ function renderClaudeAntBtn() {
 async function activateClaudeAnt() {
   const btn = document.getElementById('btn-claude-ant');
   if (btn) { btn.disabled = true; btn.textContent = '⏳ ...'; }
-  const d = await fetch('/api/claude-ant/activate', { method: 'POST' })
+
+  const isActive = S.claudeAnt && S.claudeAnt.enabled;
+  const url = isActive ? '/api/claude-ant/deactivate' : '/api/claude-ant/activate';
+  const d = await fetch(url, { method: 'POST' })
     .then(r => r.json())
-    .catch(e => { console.error('[dashboard] Claude Ant activate failed:', e.message); return null; });
-  if (d) {
+    .catch(e => { console.error('[dashboard] Claude Ant toggle failed:', e.message); return null; });
+
+  if (d && !isActive) {
     S.claudeAnt = {
       ...S.claudeAnt,
       enabled: d.status === 'activated' || d.status === 'already_running',
       budget_remaining: d.budget_remaining,
     };
+  } else if (d && isActive) {
+    S.claudeAnt = { ...S.claudeAnt, enabled: false };
   }
   await fetchClaudeAntStatus();
 }
