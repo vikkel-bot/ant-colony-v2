@@ -607,7 +607,7 @@
       flex-direction: column;
       flex: 1;
       overflow: hidden;
-      min-height: 600px;
+      min-height: 400px;
     }
 
     /* ── ACTIVITY FEED ── */
@@ -647,8 +647,14 @@
     }
     .af-hdr {
       display: flex; align-items: center; justify-content: space-between;
-      margin-bottom: 7px;
+      margin-bottom: 7px; cursor: pointer;
     }
+    .af-body {
+      overflow: hidden;
+      max-height: 0;
+      transition: max-height .25s ease;
+    }
+    .af-body.open { max-height: 350px; }
     .af-filter-sel {
       padding: 3px 6px; border: 1px solid var(--border);
       border-radius: 4px; background: var(--card); font-size: 10px;
@@ -1043,11 +1049,11 @@
     </div>
   </div>
 
-  <!-- Live activiteit feed (full-width) -->
+  <!-- Live activiteit feed (full-width, inklapbaar) -->
   <div class="card" style="margin-top:8px">
-    <div class="af-hdr">
-      <span class="card-title" style="margin-bottom:0">Live activiteit feed</span>
-      <select id="af-filter" class="af-filter-sel" onchange="onActivityFilterChange()">
+    <div class="af-hdr" onclick="onAfToggle()">
+      <span class="card-title" style="margin-bottom:0"><span id="af-toggle-arrow">▶</span> Live activiteit feed</span>
+      <select id="af-filter" class="af-filter-sel" onclick="event.stopPropagation()" onchange="onActivityFilterChange()" style="display:none">
         <option value="all">▼ Alle</option>
         <option value="scout">Scout</option>
         <option value="research">Research</option>
@@ -1057,8 +1063,10 @@
         <option value="errors">⚠ Errors</option>
       </select>
     </div>
-    <div id="activity-feed" class="af-list">
-      <div class="empty">Laden…</div>
+    <div id="af-body" class="af-body">
+      <div id="activity-feed" class="af-list">
+        <div class="empty">Laden…</div>
+      </div>
     </div>
   </div>
 
@@ -1095,6 +1103,7 @@ const S = {
   expandedQueen:  false,
   queenDecisions: { decisions: [], count: 0, loaded_at: null },
   activityFeed:   { events: [], count: 0, filter: 'all', loaded_at: null },
+  afOpen:         false,
   activeTab:      'colony',
   tickerIdx:      0,
   hbBase:         null,
@@ -2264,15 +2273,27 @@ async function refreshActivityFeed() {
   const d = await fetch(`/api/activity?limit=50&filter=${filter}`).then(r => r.json()).catch(() => null);
   if (d) {
     S.activityFeed = { ...d, filter };
-    document.getElementById('af-filter').value = filter;
+    const sel = document.getElementById('af-filter');
+    if (sel) sel.value = filter;
   }
-  renderActivityFeed();
+  if (S.afOpen) renderActivityFeed();
 }
 
 function onActivityFilterChange() {
   const sel = document.getElementById('af-filter');
   S.activityFeed.filter = sel ? sel.value : 'all';
   refreshActivityFeed();
+}
+
+function onAfToggle() {
+  S.afOpen = !S.afOpen;
+  const arrow  = document.getElementById('af-toggle-arrow');
+  const body   = document.getElementById('af-body');
+  const filter = document.getElementById('af-filter');
+  if (arrow)  arrow.textContent = S.afOpen ? '▼' : '▶';
+  if (body)   body.classList.toggle('open', S.afOpen);
+  if (filter) filter.style.display = S.afOpen ? '' : 'none';
+  if (S.afOpen) renderActivityFeed();
 }
 
 // ── Bootstrap ─────────────────────────────────
