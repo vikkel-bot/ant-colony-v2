@@ -196,6 +196,16 @@
       border-bottom: 1px solid rgba(255,255,255,.04);
     }
 
+    #warnings-banner {
+      display: none;
+      background: #ef4444;
+      color: #fff;
+      padding: 8px 16px;
+      font-size: 13px;
+      font-family: 'SF Mono','Cascadia Code','Consolas',monospace;
+      flex-shrink: 0;
+    }
+
     .tick-dot {
       width: 7px; height: 7px; border-radius: 50%;
       background: var(--tick-green);
@@ -577,7 +587,7 @@
       flex-direction: column;
       flex: 1;
       overflow: hidden;
-      min-height: 300px;
+      min-height: 400px;
     }
 
     /* ── ACTIVITY FEED ── */
@@ -898,6 +908,9 @@
   <span class="tick-badge">audit log</span>
 </div>
 
+<!-- ══ WARNINGS BANNER ══ -->
+<div id="warnings-banner"></div>
+
 <!-- ══ MAIN ══ -->
 <div id="main">
 
@@ -1168,6 +1181,44 @@ function render() {
   renderBrokers();
   renderQueen();
   renderEquities();
+  renderWarningsBanner();
+}
+
+function renderWarningsBanner() {
+  const banner = document.getElementById('warnings-banner');
+  if (!banner) return;
+
+  const warnings = [];
+
+  // Trigger 1: ant > 15 min geen events
+  const ants = (S.activity && S.activity.ants) || [];
+  ants.forEach(a => {
+    const mins = _minsAgo(a.last_seen);
+    if (mins > 15) {
+      warnings.push(`⚠ ${fType(a.ant_type)}: geen activiteit sinds ${Math.round(mins)} min`);
+    }
+  });
+
+  // Trigger 2: totaal open PnL < -3%
+  const pnlPct = S.positions && S.positions.total_pnl_pct;
+  if (pnlPct != null && pnlPct < -3) {
+    warnings.push(`⚠ Open PnL: ${pnlPct.toFixed(1)}% (onder -3% drempel)`);
+  }
+
+  // Trigger 3: colony tick > 60s (berekend vanuit live teller)
+  if (S.hbBase != null && S.hbAt != null) {
+    const tickSecs = Math.round(S.hbBase + (Date.now() - S.hbAt) / 1000);
+    if (tickSecs > 60) {
+      warnings.push(`⚠ Colony tick: ${tickSecs}s geleden`);
+    }
+  }
+
+  if (warnings.length === 0) {
+    banner.style.display = 'none';
+    return;
+  }
+  banner.style.display = 'block';
+  banner.textContent = warnings.join('  ·  ');
 }
 
 function renderStatus() {
@@ -1815,6 +1866,7 @@ function perSecond() {
     const total   = Math.round(S.hbBase + elapsed);
     document.getElementById('hb-ago').textContent = total + 's';
   }
+  renderWarningsBanner();
 }
 
 // ── Kill-switch ────────────────────────────────
