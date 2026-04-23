@@ -253,6 +253,20 @@ class OperatorInputResponse(BaseModel):
     accepted: bool
     filename: str | None = None
     message: str = ""
+    id: str | None = None
+
+
+class OperatorQueueItem(BaseModel):
+    id: str
+    type: str
+    received_at: str
+    status: str          # "pending" | "done" | "failed"
+    result: str | None = None
+    message: str | None = None
+
+
+class OperatorQueueResponse(BaseModel):
+    items: list[OperatorQueueItem]
 
 
 class KillSwitchRequest(BaseModel):
@@ -484,6 +498,57 @@ def _read_claude_budget(logs_root: Path | None) -> float:
     except OSError:
         pass
     return round(total, 4)
+
+
+def _read_operator_queue(logs_root: Path, limit: int = 10) -> list[OperatorQueueItem]:
+    """Lees de laatste N operator input bestanden en voeg resultaatstatus toe."""
+    input_dir = logs_root / "operator" / "input"
+    processed_dir = logs_root / "operator" / "processed"
+    if not input_dir.exists():
+        return []
+
+    files = sorted(input_dir.glob("*.json"), key=lambda p: p.name, reverse=True)[:limit]
+    items: list[OperatorQueueItem] = []
+    for f in files:
+        stem = f.stem  # e.g. "20260423T142232_url"
+        parts = stem.split("_", 1)
+        input_type = parts[1] if len(parts) == 2 else "unknown"
+
+        # Parse received_at from filename timestamp
+        try:
+            received_at = datetime.strptime(parts[0], "%Y%m%dT%H%M%S").replace(
+                tzinfo=timezone.utc
+            ).isoformat()
+        except ValueError:
+            received_at = stem
+
+        # Check for result file
+        result_path = processed_dir / f"{stem}_result.json"
+        status = "pending"
+        result_val: str | None = None
+        result_msg: str | None = None
+        if result_path.exists():
+            try:
+                with result_path.open(encoding="utf-8") as fh:
+                    res = json.load(fh)
+                result_val = res.get("result")
+                result_msg = res.get("message")
+                if result_val in ("accepted", "duplicate"):
+                    status = "done"
+                else:
+                    status = "failed"
+            except (OSError, ValueError):
+                status = "failed"
+
+        items.append(OperatorQueueItem(
+            id=stem,
+            type=input_type,
+            received_at=received_at,
+            status=status,
+            result=result_val,
+            message=result_msg,
+        ))
+    return items
 
 
 # ---------------------------------------------------------------------------
@@ -1176,11 +1241,24 @@ def create_router(ctx: ColonyContext) -> APIRouter:
             raise HTTPException(status_code=500, detail="failed to write input file")
 
         logger.info("Operator input geschreven | file=%s type=%s", filename, payload["type"])
+        stem = filename.replace(".json", "")
         return OperatorInputResponse(
             accepted=True,
             filename=filename,
             message=f"Input opgeslagen als {filename}",
+            id=stem,
         )
+
+    # ------------------------------------------------------------------
+    # GET /api/operator/queue
+    # ------------------------------------------------------------------
+
+    @router.get("/operator/queue", response_model=OperatorQueueResponse)
+    def get_operator_queue() -> OperatorQueueResponse:
+        """Laatste 10 operator inputs met verwerkingsstatus."""
+        if ctx.logs_root is None:
+            return OperatorQueueResponse(items=[])
+        return OperatorQueueResponse(items=_read_operator_queue(ctx.logs_root))
 
     # ------------------------------------------------------------------
     # GET /api/ants/activity

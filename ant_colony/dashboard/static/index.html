@@ -1061,6 +1061,8 @@
           </button>
         </div>
         <div id="op-msg" style="margin-top:4px;font-size:10px;color:var(--muted);min-height:14px"></div>
+        <div id="op-status" style="display:none;margin-top:6px;padding:5px 8px;border-radius:4px;font-size:10px;background:var(--bg);border:1px solid var(--border)"></div>
+        <div id="op-history" style="margin-top:8px"></div>
       </div>
 
     </div>
@@ -1122,6 +1124,8 @@ const S = {
   activityFeed:   { events: [], count: 0, filter: 'all', loaded_at: null },
   afOpen:         false,
   claudeAnt:      { enabled: false, budget_used: 0, budget_total: 10.0, budget_remaining: 10.0 },
+  opQueue:        [],
+  opLastId:       null,
   activeTab:      'colony',
   tickerIdx:      0,
   hbBase:         null,
@@ -1184,13 +1188,14 @@ async function fetchAll() {
   const get = url => _fetchQ(() => fetch(url)
     .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
     .catch(e => { console.error(`[dashboard] GET ${url} failed:`, e.message); return null; }));
-  const [st, me, br, cap, pos, ti, act, qs, pc, eq] = await Promise.all([
+  const [st, me, br, cap, pos, ti, act, qs, pc, eq, oq] = await Promise.all([
     get('/api/status'), get('/api/metrics'),
     get('/api/brokers'), get('/api/capital'),
     get('/api/positions'),
     get('/api/ticker'), get('/api/ants/activity'),
     get('/api/queen/status'), get('/api/performance/chart'),
     get('/api/equities/status'),
+    get('/api/operator/queue'),
   ]);
 
   if (st) {
@@ -1216,6 +1221,7 @@ async function fetchAll() {
   if (qs)  S.queenStatus = qs;
   if (pc)  S.perfChart   = pc;
   if (eq)  S.equities    = eq;
+  if (oq)  { S.opQueue = oq.items || []; renderOperatorHistory(); }
 
   render();
 }
@@ -2086,6 +2092,19 @@ async function sendOperatorInput() {
       msgEl.textContent = '✓ ' + d.message;
       document.getElementById('op-content').value = '';
       document.getElementById('op-image-file').value = '';
+
+      // Toon Claude Ant waarschuwing als die uitstaat
+      if (!S.claudeAnt || S.claudeAnt.enabled !== true) {
+        msgEl.textContent += ' — Claude Ant is inactief, activeer hem om te verwerken.';
+        msgEl.style.color = 'var(--warning, #f59e0b)';
+      }
+
+      // Start tracking van dit specifieke item
+      if (d.id) {
+        S.opLastId = d.id;
+        showOperatorItemStatus(d.id, 'pending');
+        pollOperatorItem(d.id);
+      }
     } else {
       msgEl.style.color = 'var(--danger)';
       msgEl.textContent = 'Fout: ' + (d.detail || JSON.stringify(d));
@@ -2095,8 +2114,61 @@ async function sendOperatorInput() {
     msgEl.textContent = 'Verbindingsfout: ' + e.message;
   } finally {
     btn.disabled = false;
-    setTimeout(() => { msgEl.textContent = ''; msgEl.style.color = 'var(--muted)'; }, 5000);
+    setTimeout(() => { msgEl.textContent = ''; msgEl.style.color = 'var(--muted)'; }, 8000);
   }
+}
+
+function showOperatorItemStatus(id, status, message) {
+  const el = document.getElementById('op-status');
+  if (!el) return;
+  el.style.display = 'block';
+  const icons = { pending: '⏳', done: '✓', failed: '✗' };
+  const colors = { pending: 'var(--muted)', done: 'var(--pnl-pos)', failed: 'var(--danger)' };
+  el.style.color = colors[status] || 'var(--muted)';
+  let txt = `${icons[status] || '?'} ${id}`;
+  if (status === 'pending') txt += ' — wacht op Claude Ant...';
+  else if (status === 'done')   txt += ' — verwerkt' + (message ? ': ' + message : '');
+  else if (status === 'failed') txt += ' — fout' + (message ? ': ' + message : '');
+  el.textContent = txt;
+}
+
+async function pollOperatorItem(id, attempt) {
+  attempt = attempt || 0;
+  if (attempt > 36) { // max ~3 min polling
+    showOperatorItemStatus(id, 'failed', 'timeout — geen response van Operator Ant');
+    return;
+  }
+  await new Promise(res => setTimeout(res, 5000));
+  try {
+    const r = await fetch('/api/operator/queue');
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const d = await r.json();
+    S.opQueue = d.items || [];
+    renderOperatorHistory();
+    const item = S.opQueue.find(x => x.id === id);
+    if (!item || item.status === 'pending') {
+      pollOperatorItem(id, attempt + 1);
+    } else {
+      showOperatorItemStatus(id, item.status, item.message);
+    }
+  } catch (e) {
+    pollOperatorItem(id, attempt + 1);
+  }
+}
+
+function renderOperatorHistory() {
+  const el = document.getElementById('op-history');
+  if (!el) return;
+  const items = (S.opQueue || []).slice(0, 5);
+  if (!items.length) { el.innerHTML = ''; return; }
+  const rows = items.map(item => {
+    const icons = { pending: '⏳', done: '<span style="color:var(--pnl-pos)">✓</span>', failed: '<span style="color:var(--danger)">✗</span>' };
+    const icon = icons[item.status] || '?';
+    const ts = item.received_at ? item.received_at.replace('T', ' ').replace('+00:00','').slice(0,16) : '?';
+    const msg = item.message ? ` — ${item.message.slice(0, 60)}` : '';
+    return `<div style="padding:2px 0;font-size:10px;color:var(--muted);border-top:1px solid var(--border)">${icon} <b>${item.type}</b> ${ts}${msg}</div>`;
+  }).join('');
+  el.innerHTML = `<div style="font-size:10px;color:var(--muted);font-weight:600;margin-bottom:2px">Recente items</div>${rows}`;
 }
 
 // ── Tab switching ──────────────────────────────
