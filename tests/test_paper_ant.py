@@ -581,7 +581,8 @@ class TestScoutLogEdgeCases:
 
 class TestMaxOpenPositions:
     def test_cap_blocks_fourth_position(self, tmp_path: Path) -> None:
-        _all = ["BTC-EUR", "ETH-EUR", "SOL-EUR", "ADA-EUR", "XRP-EUR", "DOT-EUR"]
+        _all = ["BTC-EUR", "ETH-EUR", "SOL-EUR", "ADA-EUR", "XRP-EUR",
+                "DOT-EUR", "LTC-EUR", "LINK-EUR", "AVAX-EUR", "MATIC-EUR", "UNI-EUR"]
         symbols = _all[:_MAX_OPEN_POSITIONS + 1]
         mission = make_mission(capital=100_000.0, symbols=symbols)
         ant = make_ant(mission=mission, logs_root=tmp_path)
@@ -599,7 +600,8 @@ class TestMaxOpenPositions:
         assert len(ant._ledger.open_positions) == _MAX_OPEN_POSITIONS
 
     def test_cap_allows_open_after_close(self, tmp_path: Path) -> None:
-        _all = ["BTC-EUR", "ETH-EUR", "SOL-EUR", "ADA-EUR", "XRP-EUR", "DOT-EUR"]
+        _all = ["BTC-EUR", "ETH-EUR", "SOL-EUR", "ADA-EUR", "XRP-EUR",
+                "DOT-EUR", "LTC-EUR", "LINK-EUR", "AVAX-EUR", "MATIC-EUR", "UNI-EUR"]
         symbols = _all[:_MAX_OPEN_POSITIONS]
         extra   = _all[_MAX_OPEN_POSITIONS]
         mission = make_mission(capital=100_000.0, symbols=symbols + [extra])

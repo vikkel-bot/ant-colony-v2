@@ -58,7 +58,7 @@ _TRADE_CAPITAL_FRACTION = 0.10   # 10% van beschikbaar kapitaal per trade
 _SL_PCT  = 0.02                  # 2% stop-loss onder entry
 _TP_PCT  = 0.03                  # 3% take-profit boven entry
 _SIGNAL_VALIDITY_TICKS = 2       # signal geldig voor heartbeat_interval × 2 seconden
-_MAX_OPEN_POSITIONS    = 5       # maximaal 5 open posities tegelijk (1 per symbool)
+_MAX_OPEN_POSITIONS    = 10      # maximaal 10 open posities tegelijk (1 per symbool)
 _STALE_SIGNAL_MINUTES  = 5       # signalen ouder dan dit worden genegeerd
 _ZOMBIE_POSITION_HOURS = 24      # posities zonder close ouder dan dit → zombie
 
