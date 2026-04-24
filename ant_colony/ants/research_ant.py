@@ -102,7 +102,7 @@ class ResearchAnt:
         # Deduplicatie: sla de laatste geëmitteerde candidate_id op per (symbol, signal_type).
         # Voorkomt dat dezelfde kandidaat meerdere ticks achtereen gelogd wordt.
         self._last_emitted: dict[tuple[str, str], str] = {}
-        self._seen_ingestion_ids: set[str] = set()
+        self._seen_ingestion_ids: set[str] = self._preload_seen_ingestion_ids(logs_root)
 
         self._backtester = Backtester()
         self._log = logging.getLogger(f"ant.research.{ant_id[:8]}")
@@ -269,15 +269,15 @@ class ResearchAnt:
     def _check_rsi(
         self, symbol: str, candles: list[MarketData], closes: list[float]
     ) -> None:
-        """RSI < 30 → long (oversold), RSI > 70 → short (overbought)."""
+        """RSI < 40 → long (oversold), RSI > 60 → short (overbought) — ruimer voor SIDEWAYS regime."""
         rsi_val = _rsi(closes, period=14)
         if rsi_val is None:
             return
 
-        if rsi_val < 30:
+        if rsi_val < 40:
             direction   = "long"
             signal_type = "rsi_oversold"
-        elif rsi_val > 70:
+        elif rsi_val > 60:
             direction   = "short"
             signal_type = "rsi_overbought"
         else:
@@ -291,7 +291,7 @@ class ResearchAnt:
             parameters={"rsi_period": 14, "rsi_value": round(rsi_val, 2)},
             entry_conditions={
                 "rsi": round(rsi_val, 2),
-                "threshold": 30 if direction == "long" else 70,
+                "threshold": 40 if direction == "long" else 60,
             },
             logic_summary=f"RSI={rsi_val:.1f} {signal_type} op {symbol}",
         )
@@ -299,20 +299,27 @@ class ResearchAnt:
     def _check_bollinger(
         self, symbol: str, candles: list[MarketData], closes: list[float]
     ) -> None:
-        """Prijs raakt de bovenband → short, onderband → long."""
+        """Prijs raakt of nadert de bands (binnen 10% van bandbreedte) → long/short."""
         bb = _bollinger(closes, period=20, std_dev=2.0)
         if bb is None:
             return
 
         upper, middle, lower = bb
         last_close = closes[-1]
+        proximity = 0.10 * (upper - lower)
 
         if last_close >= upper:
             direction   = "short"
             signal_type = "bb_upper_touch"
+        elif last_close >= upper - proximity:
+            direction   = "short"
+            signal_type = "bb_upper_approach"
         elif last_close <= lower:
             direction   = "long"
             signal_type = "bb_lower_touch"
+        elif last_close <= lower + proximity:
+            direction   = "long"
+            signal_type = "bb_lower_approach"
         else:
             return
 
@@ -326,13 +333,15 @@ class ResearchAnt:
                 "bb_std": 2.0,
                 "upper": round(upper, 4),
                 "lower": round(lower, 4),
+                "proximity_pct": 10,
             },
             entry_conditions={
                 "price": round(last_close, 4),
                 "band": "upper" if direction == "short" else "lower",
             },
             logic_summary=(
-                f"Prijs raakt {'bovenste' if direction == 'short' else 'onderste'} "
+                f"Prijs {'op' if 'touch' in signal_type else 'nabij'} "
+                f"{'bovenste' if direction == 'short' else 'onderste'} "
                 f"Bollinger band op {symbol}"
             ),
         )
@@ -340,6 +349,38 @@ class ResearchAnt:
     # ------------------------------------------------------------------
     # Ingestion-gekoppelde kandidaten
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _preload_seen_ingestion_ids(logs_root: Path | None) -> set[str]:
+        """
+        Scan ANT_LOGS/ingestion/*.jsonl bij startup en retourneer alle candidate_ids.
+
+        Voorkomt dat historische ingested kandidaten na herstart opnieuw gebacktest
+        en geëmitteerd worden.
+        """
+        seen: set[str] = set()
+        if logs_root is None:
+            return seen
+        ingestion_dir = logs_root / "ingestion"
+        if not ingestion_dir.exists():
+            return seen
+        for path in sorted(ingestion_dir.glob("*.jsonl")):
+            try:
+                for line in path.read_text(encoding="utf-8").splitlines():
+                    if not line.strip():
+                        continue
+                    try:
+                        payload = json.loads(line).get("payload") or {}
+                    except json.JSONDecodeError:
+                        continue
+                    if payload.get("action") != "candidate_ingested":
+                        continue
+                    cid = str(payload.get("candidate_id") or "")
+                    if cid:
+                        seen.add(cid)
+            except OSError:
+                pass
+        return seen
 
     def _process_ingestion_candidates(self) -> None:
         """Lees ANT_LOGS/ingestion/*.jsonl en backtest nieuwe ingested candidates."""
@@ -515,6 +556,9 @@ class ResearchAnt:
         Deduplicatie: dezelfde (symbol, signal_type) combinatie wordt niet opnieuw
         gelogd zolang er geen nieuw kandidaat-ID aangemaakt wordt.
         """
+        if (symbol, signal_type) in self._last_emitted:
+            return
+
         bars = [
             OHLCVBar(
                 timestamp=c.timestamp,
