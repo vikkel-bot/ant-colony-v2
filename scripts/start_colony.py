@@ -934,6 +934,89 @@ def main() -> None:
     except Exception:
         log.exception("StrategyAnt bootstrap mislukt — colony draait door zonder StrategyAnt.")
 
+    # --- Stap 8b-extra2: KillZoneAnt (opt-in via KILLZONE_ANT_ENABLED=True) ---
+    try:
+        _KILLZONE_ANT_ENABLED = False  # uitgeschakeld: zet True om te activeren
+        if _KILLZONE_ANT_ENABLED:
+            from ant_colony.ants.killzone_ant import KillZoneAnt
+            from ant_colony.colony.scheduler.colony_scheduler import AgentRecord
+            from ant_colony.schemas.mission import (
+                AbortConditions, MarketScope, Mission, RiskLimits, SuccessConditions,
+            )
+
+            _ts_kz      = datetime.now(tz=timezone.utc).strftime("%Y%m%d-%H%M%S")
+            _obs_risk_kz = RiskLimits(
+                max_drawdown_pct=0.01, max_position_size=1.0,
+                daily_loss_limit=1.0, stop_loss_required=False,
+            )
+            _crypto_scope_kz = MarketScope(
+                biome="crypto",
+                symbols=["BTC-EUR", "ETH-EUR", "SOL-EUR", "XRP-EUR",
+                         "ADA-EUR", "LINK-EUR", "DOT-EUR", "LTC-EUR"],
+                timeframes=["1h"],
+            )
+            kz_ant_id  = f"killzone-{uuid.uuid4().hex[:12]}"
+            kz_mission = Mission(
+                mission_id=f"killzone-crypto-{_ts_kz}",
+                ant_type="killzone_ant",
+                allowed_node=args.node_id,
+                allowed_actions=["read_data", "propose_candidate"],
+                market_scope=_crypto_scope_kz,
+                capital_limit=0.0,
+                risk_limits=_obs_risk_kz,
+                ttl=86400,
+                heartbeat_interval=120,
+                success_conditions=SuccessConditions(
+                    description="Genereer hoge-confidence LONG kandidaten tijdens ICT kill zones "
+                                "op basis van RSI, volume en prijs richting.",
+                    criteria={"min_candidates_emitted": 1},
+                ),
+                abort_conditions=AbortConditions(
+                    stale_heartbeat=True,
+                    capital_limit_breach=False,
+                    risk_limit_breach=False,
+                    ttl_expired=True,
+                    stale_market_data=False,
+                ),
+            )
+            kz_result = queen.issue_mission(kz_mission)
+            if not kz_result.accepted:
+                log.warning(
+                    "KillZoneAnt missie geweigerd: %s — %s",
+                    kz_result.rejection_reason, kz_result.rejection_detail,
+                )
+            else:
+                kz_ant = KillZoneAnt(
+                    ant_id=kz_ant_id,
+                    mission=kz_mission,
+                    scheduler=scheduler,
+                    biome_registry=biome_registry,
+                    logs_root=logs_root,
+                )
+                threading.Thread(
+                    target=kz_ant.run,
+                    name=f"killzone-{kz_ant_id[:16]}",
+                    daemon=True,
+                ).start()
+                scheduler.register_agent(AgentRecord(
+                    ant_id=kz_ant_id,
+                    mission_id=kz_mission.mission_id,
+                    node_id=args.node_id,
+                    ant_type="killzone_ant",
+                    ttl=kz_mission.ttl,
+                    heartbeat_interval=kz_mission.heartbeat_interval,
+                ))
+                log.info(
+                    "KillZoneAnt gestart | ant_id=%s  ttl=%ds  symbols=%s",
+                    kz_ant_id,
+                    kz_mission.ttl,
+                    kz_mission.market_scope.symbols,
+                )
+        else:
+            log.info("KillZoneAnt uitgeschakeld (_KILLZONE_ANT_ENABLED=False).")
+    except Exception:
+        log.exception("KillZoneAnt bootstrap mislukt — colony draait door zonder KillZoneAnt.")
+
     # --- Stap 8c: ClaudeAnt (opt-in, eigen try-blok zodat andere fouten het niet blokkeren) ---
     try:
         _CLAUDE_ANT_ENABLED = False  # uitgeschakeld: API-kosten, zet True + env-var om te activeren
