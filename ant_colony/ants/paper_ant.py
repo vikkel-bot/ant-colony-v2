@@ -254,7 +254,16 @@ class PaperAnt:
     # ------------------------------------------------------------------
 
     def _is_trading_allowed(self) -> bool:
-        """True als de TimeFilterAnt trading toestaat (of niet actief is)."""
+        """True als trading is toegestaan op basis van biome en kill zone status.
+
+        Crypto-symbolen (eindigen op -EUR of -USD) handelen 24/7 en zijn
+        vrijgesteld van de ICT Kill Zone filter. De kill zone check wordt
+        alleen toegepast als de missie equities-symbolen bevat.
+        """
+        symbols = list(self.mission.market_scope.symbols or [])
+        if symbols and all(s.endswith(("-EUR", "-USD")) for s in symbols):
+            return True  # crypto handelt 24/7 — geen kill zone beperking
+
         if self.logs_root is None:
             return True
         sig = read_latest_time_signal(self.logs_root)
