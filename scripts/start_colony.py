@@ -1534,6 +1534,67 @@ def main() -> None:
         _eq_paper_ant = None
         log.exception("Equities bootstrap mislukt — colony draait door zonder equities ants.")
 
+    # --- Stap 8g: NewsAnt (opt-in via NEWS_ANT_ENABLED=true) ---
+    _news_api_key    = os.getenv("NEWS_API_KEY", "")
+    _news_ant_enabled = os.getenv("NEWS_ANT_ENABLED", "false").lower() == "true"
+    try:
+        if _news_ant_enabled and _news_api_key:
+            from ant_colony.ants.news_ant import NewsAnt
+            from ant_colony.schemas.mission import (
+                MarketScope as _NMarketScope,
+                Mission as _NMission,
+                RiskLimits as _NRiskLimits,
+                SuccessConditions as _NSuccessConditions,
+            )
+            _ts_news = datetime.now(tz=timezone.utc).strftime("%Y%m%d-%H%M%S")
+            _news_mission = _NMission(
+                mission_id=f"news-{_ts_news}",
+                ant_type="news_ant",
+                allowed_node=args.node_id,
+                allowed_actions=["read_data", "report"],
+                market_scope=_NMarketScope(biome="crypto", symbols=["GLOBAL"]),
+                capital_limit=0.0,
+                risk_limits=_NRiskLimits(
+                    max_drawdown_pct=1.0,
+                    max_position_size=1.0,
+                    daily_loss_limit=1.0,
+                    stop_loss_required=False,
+                ),
+                ttl=86400 * 365,
+                heartbeat_interval=1800,
+                success_conditions=_NSuccessConditions(
+                    description="Monitort nieuwssentiment via NewsAPI (100 calls/dag).",
+                ),
+            )
+            _news_result = queen.issue_mission(_news_mission)
+            if _news_result.accepted:
+                _news_ant_id = f"news-{uuid.uuid4().hex[:12]}"
+                _news_ant = NewsAnt(
+                    ant_id=_news_ant_id,
+                    mission=_news_mission,
+                    scheduler=scheduler,
+                    logs_root=logs_root,
+                    api_key=_news_api_key,
+                )
+                threading.Thread(
+                    target=_news_ant.run,
+                    name=f"news-{_news_ant_id[:16]}",
+                    daemon=True,
+                ).start()
+                log.info("NewsAnt gestart | ant_id=%s", _news_ant_id)
+            else:
+                log.warning(
+                    "NewsAnt-missie geweigerd — %s", _news_result.rejection_reason
+                )
+        elif _news_ant_enabled and not _news_api_key:
+            log.warning(
+                "NEWS_ANT_ENABLED=true maar NEWS_API_KEY ontbreekt — NewsAnt niet gestart."
+            )
+        else:
+            log.info("NewsAnt uitgeschakeld (zet NEWS_ANT_ENABLED=true om te activeren).")
+    except Exception:
+        log.exception("NewsAnt bootstrap mislukt — colony draait door zonder NewsAnt.")
+
     # --- Stap 9: bouw ColonyContext en start dashboard in watchdog thread ---
     context = ColonyContext(
         queen=queen,

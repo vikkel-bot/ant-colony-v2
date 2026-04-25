@@ -19,6 +19,7 @@ class AntType(str, Enum):
     CLAUDE       = "claude_ant"
     TIME_FILTER  = "time_filter_ant"
     KILLZONE     = "killzone_ant"
+    NEWS         = "news_ant"
     # Equities biome
     SECTOR_SCOUT   = "sector_scout_ant"
     FUNDAMENTAL    = "fundamental_ant"
