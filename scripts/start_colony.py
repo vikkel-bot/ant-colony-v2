@@ -1410,43 +1410,49 @@ def main() -> None:
             }
 
             for eq_mission in _eq_missions:
-                eq_result = queen.issue_mission(eq_mission)
-                if not eq_result.accepted:
-                    log.warning(
-                        "Equities-missie geweigerd: %s — %s",
-                        eq_mission.mission_id,
-                        eq_result.rejection_reason,
-                    )
-                    continue
+                try:
+                    eq_result = queen.issue_mission(eq_mission)
+                    if not eq_result.accepted:
+                        log.warning(
+                            "Equities-missie geweigerd: %s — %s",
+                            eq_mission.mission_id,
+                            eq_result.rejection_reason,
+                        )
+                        continue
 
-                ant_class, extra_kwargs = _eq_ant_classes[eq_mission.ant_type]
-                eq_ant_id = f"{eq_mission.ant_type[:8]}-{uuid.uuid4().hex[:12]}"
-                eq_ant = ant_class(
-                    ant_id=eq_ant_id,
-                    mission=eq_mission,
-                    scheduler=scheduler,
-                    logs_root=logs_root,
-                    **extra_kwargs,
-                )
-                threading.Thread(
-                    target=eq_ant.run,
-                    name=f"eq-{eq_ant_id[:20]}",
-                    daemon=True,
-                ).start()
-                scheduler.register_agent(AgentRecord(
-                    ant_id=eq_ant_id,
-                    mission_id=eq_mission.mission_id,
-                    node_id=args.node_id,
-                    ant_type=eq_mission.ant_type,
-                    ttl=eq_mission.ttl,
-                    heartbeat_interval=eq_mission.heartbeat_interval,
-                ))
-                log.info(
-                    "Equities ant gestart | type=%s  ant_id=%s  ttl=%ds",
-                    eq_mission.ant_type,
-                    eq_ant_id,
-                    eq_mission.ttl,
-                )
+                    ant_class, extra_kwargs = _eq_ant_classes[eq_mission.ant_type]
+                    eq_ant_id = f"{eq_mission.ant_type[:8]}-{uuid.uuid4().hex[:12]}"
+                    eq_ant = ant_class(
+                        ant_id=eq_ant_id,
+                        mission=eq_mission,
+                        scheduler=scheduler,
+                        logs_root=logs_root,
+                        **extra_kwargs,
+                    )
+                    threading.Thread(
+                        target=eq_ant.run,
+                        name=f"eq-{eq_ant_id[:20]}",
+                        daemon=True,
+                    ).start()
+                    scheduler.register_agent(AgentRecord(
+                        ant_id=eq_ant_id,
+                        mission_id=eq_mission.mission_id,
+                        node_id=args.node_id,
+                        ant_type=eq_mission.ant_type,
+                        ttl=eq_mission.ttl,
+                        heartbeat_interval=eq_mission.heartbeat_interval,
+                    ))
+                    log.info(
+                        "Equities ant gestart | type=%s  ant_id=%s  ttl=%ds",
+                        eq_mission.ant_type,
+                        eq_ant_id,
+                        eq_mission.ttl,
+                    )
+                except Exception:
+                    log.exception(
+                        "Equities ant kon niet worden gestart: %s — gaat door met volgende ant",
+                        eq_mission.mission_id,
+                    )
 
             # --- EquitiesPaperAnt ---
             _eq_paper_symbols = [
