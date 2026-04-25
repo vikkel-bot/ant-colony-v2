@@ -821,3 +821,254 @@ class TestAdviseWritesRegime:
         advisor.advise()
         rec = _read_regime_signal(tmp_path)
         assert rec["payload"]["regime"] == "VOLATILE"
+
+
+# ---------------------------------------------------------------------------
+# Weekend / markturen protocol
+# ---------------------------------------------------------------------------
+
+from datetime import date as _date
+
+
+def _ams_dt(weekday: int, hour: int, minute: int) -> datetime:
+    """
+    Maak een Amsterdam-timezone datetime voor de gegeven dag/tijd.
+    weekday: 0=ma … 6=zo (relatief aan een vaste maandag 2026-04-27)
+    """
+    from zoneinfo import ZoneInfo
+    base_monday = datetime(2026, 4, 27, tzinfo=ZoneInfo("Europe/Amsterdam"))
+    from datetime import timedelta as _td
+    return base_monday.replace(hour=hour, minute=minute, second=0, microsecond=0) + _td(days=weekday)
+
+
+class TestIsMarketOpen:
+    def _advisor_at(self, tmp_path, weekday: int, hour: int, minute: int) -> "QueenAdvisor":
+        advisor = make_advisor(tmp_path)
+        fixed = _ams_dt(weekday, hour, minute)
+        advisor._now_amsterdam = lambda: fixed
+        return advisor
+
+    def test_open_weekday_during_hours(self, tmp_path):
+        """Ma 16:00 Amsterdam → markt open."""
+        advisor = self._advisor_at(tmp_path, 0, 16, 0)
+        is_open, opens_in = advisor._is_market_open()
+        assert is_open is True
+        assert opens_in == 0
+
+    def test_open_at_exactly_1530(self, tmp_path):
+        """Ma 15:30 → markt net open."""
+        advisor = self._advisor_at(tmp_path, 0, 15, 30)
+        is_open, _ = advisor._is_market_open()
+        assert is_open is True
+
+    def test_closed_before_open(self, tmp_path):
+        """Ma 10:00 → markt dicht, geeft minuten tot 15:30."""
+        advisor = self._advisor_at(tmp_path, 0, 10, 0)
+        is_open, opens_in = advisor._is_market_open()
+        assert is_open is False
+        assert opens_in == 5 * 60 + 30   # 5.5 uur = 330 min
+
+    def test_closed_at_exactly_2200(self, tmp_path):
+        """Ma 22:00 → markt dicht (gesloten grens is exclusief)."""
+        advisor = self._advisor_at(tmp_path, 0, 22, 0)
+        is_open, _ = advisor._is_market_open()
+        assert is_open is False
+
+    def test_closed_saturday(self, tmp_path):
+        """Za 12:00 → markt dicht."""
+        advisor = self._advisor_at(tmp_path, 5, 12, 0)
+        is_open, opens_in = advisor._is_market_open()
+        assert is_open is False
+        assert opens_in > 0   # minuten tot maandag 15:30
+
+    def test_closed_sunday(self, tmp_path):
+        """Zo 10:00 → markt dicht."""
+        advisor = self._advisor_at(tmp_path, 6, 10, 0)
+        is_open, _ = advisor._is_market_open()
+        assert is_open is False
+
+    def test_friday_after_close_opens_monday(self, tmp_path):
+        """Vr 23:00 → volgende open = maandag (~64.5 uur = 3870 min)."""
+        advisor = self._advisor_at(tmp_path, 4, 23, 0)
+        is_open, opens_in = advisor._is_market_open()
+        assert is_open is False
+        # 3 dagen × 24 uur - 7.5 uur = 64.5 uur = 3870 min
+        assert opens_in == pytest.approx(3870, abs=2)
+
+
+class TestIsInBriefingWindow:
+    def _advisor_at(self, tmp_path, weekday: int, hour: int, minute: int) -> "QueenAdvisor":
+        advisor = make_advisor(tmp_path)
+        fixed = _ams_dt(weekday, hour, minute)
+        advisor._now_amsterdam = lambda: fixed
+        return advisor
+
+    def test_true_at_1515(self, tmp_path):
+        advisor = self._advisor_at(tmp_path, 0, 15, 15)   # ma 15:15
+        assert advisor._is_in_briefing_window() is True
+
+    def test_true_at_1529(self, tmp_path):
+        advisor = self._advisor_at(tmp_path, 0, 15, 29)
+        assert advisor._is_in_briefing_window() is True
+
+    def test_false_at_1530(self, tmp_path):
+        """15:30 = market open → buiten briefing-venster."""
+        advisor = self._advisor_at(tmp_path, 0, 15, 30)
+        assert advisor._is_in_briefing_window() is False
+
+    def test_false_before_briefing(self, tmp_path):
+        advisor = self._advisor_at(tmp_path, 0, 10, 0)
+        assert advisor._is_in_briefing_window() is False
+
+    def test_false_on_weekend(self, tmp_path):
+        advisor = self._advisor_at(tmp_path, 6, 15, 15)   # zo 15:15
+        assert advisor._is_in_briefing_window() is False
+
+
+class TestBriefing:
+    def _write_news_snapshot(self, tmp_path: Path, sentiment: str = "bullish",
+                              headlines: list | None = None) -> None:
+        news_dir = tmp_path / "news"
+        news_dir.mkdir(parents=True, exist_ok=True)
+        snap = {
+            "timestamp":        "2026-04-28T15:00:00",
+            "market_sentiment": sentiment,
+            "sentiment_score":  0.2,
+            "crypto_sentiment": "neutral",
+            "equities_sentiment": sentiment,
+            "top_headlines":    headlines or ["Headline A", "Headline B", "Headline C"],
+        }
+        (news_dir / "20260428-150000.json").write_text(json.dumps(snap), encoding="utf-8")
+
+    def _write_sector_signal(self, tmp_path: Path, symbol: str, rank: int) -> None:
+        scouts_dir = tmp_path / "scouts"
+        scouts_dir.mkdir(parents=True, exist_ok=True)
+        rec = {
+            "payload": {
+                "action":         "opportunity_detected",
+                "signal_type":    "sector_rotation",
+                "symbol":         symbol,
+                "momentum_rank":  rank,
+                "confidence":     0.8,
+            }
+        }
+        with (scouts_dir / "sector-scout.jsonl").open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec) + "\n")
+
+    def _read_briefing(self, tmp_path: Path) -> dict | None:
+        path = tmp_path / "queen" / "briefing.jsonl"
+        if not path.exists():
+            return None
+        lines = [l for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
+        return json.loads(lines[-1]) if lines else None
+
+    def test_briefing_written_in_window(self, tmp_path):
+        """Briefing wordt geschreven als advise() wordt aangeroepen tijdens het briefing-venster."""
+        self._write_news_snapshot(tmp_path, sentiment="bullish")
+        self._write_sector_signal(tmp_path, "XLE", rank=1)
+        self._write_sector_signal(tmp_path, "XLK", rank=2)
+
+        advisor = make_advisor(tmp_path)
+        fixed = _ams_dt(0, 15, 20)   # ma 15:20 → in briefing-venster
+        advisor._now_amsterdam = lambda: fixed
+
+        advisor.advise()
+
+        rec = self._read_briefing(tmp_path)
+        assert rec is not None
+        assert rec["action"] == "market_opening_briefing"
+        assert rec["market_sentiment"] == "bullish"
+        assert "XLE" in rec["top_sectors"]
+
+    def test_briefing_not_written_twice_same_day(self, tmp_path):
+        """Tweede advise() in hetzelfde venster schrijft geen tweede briefing."""
+        self._write_news_snapshot(tmp_path)
+        advisor = make_advisor(tmp_path)
+        fixed = _ams_dt(0, 15, 20)
+        advisor._now_amsterdam = lambda: fixed
+
+        advisor.advise()
+        advisor.advise()   # tweede cyclus
+
+        lines = (tmp_path / "queen" / "briefing.jsonl").read_text(encoding="utf-8").splitlines()
+        records = [l for l in lines if l.strip()]
+        assert len(records) == 1
+
+    def test_briefing_recommendation_contains_sentiment(self, tmp_path):
+        """Recommendation-string bevat het sentiment."""
+        self._write_news_snapshot(tmp_path, sentiment="bearish")
+        advisor = make_advisor(tmp_path)
+        fixed = _ams_dt(0, 15, 20)
+        advisor._now_amsterdam = lambda: fixed
+
+        advisor.advise()
+
+        rec = self._read_briefing(tmp_path)
+        assert "bearish" in rec["recommendation"]
+
+    def test_briefing_no_news_neutral_fallback(self, tmp_path):
+        """Geen nieuws-snapshot → market_sentiment='neutral'."""
+        advisor = make_advisor(tmp_path)
+        fixed = _ams_dt(0, 15, 20)
+        advisor._now_amsterdam = lambda: fixed
+
+        advisor.advise()
+
+        rec = self._read_briefing(tmp_path)
+        assert rec["market_sentiment"] == "neutral"
+
+    def test_briefing_not_written_outside_window(self, tmp_path):
+        """Buiten het briefing-venster wordt geen briefing geschreven."""
+        self._write_news_snapshot(tmp_path)
+        advisor = make_advisor(tmp_path)
+        fixed = _ams_dt(0, 10, 0)   # ma 10:00 → buiten venster
+        advisor._now_amsterdam = lambda: fixed
+
+        advisor.advise()
+
+        assert not (tmp_path / "queen" / "briefing.jsonl").exists()
+
+    def test_top_sectors_sorted_by_rank(self, tmp_path):
+        """Sector-signalen worden gesorteerd op momentum_rank (laagste eerst)."""
+        self._write_news_snapshot(tmp_path)
+        self._write_sector_signal(tmp_path, "XLU", rank=5)
+        self._write_sector_signal(tmp_path, "XLE", rank=1)
+        self._write_sector_signal(tmp_path, "XLK", rank=3)
+
+        advisor = make_advisor(tmp_path)
+        result = advisor._read_top_sector_signals(n=2)
+        assert result[0] == "XLE"   # rank 1 = beste
+        assert result[1] == "XLK"   # rank 3
+
+
+class TestWeekendLogging:
+    def test_advise_runs_on_weekend_without_crash(self, tmp_path):
+        """advise() gooit geen exception op zaterdag."""
+        advisor = make_advisor(tmp_path)
+        fixed = _ams_dt(5, 12, 0)   # zaterdag
+        advisor._now_amsterdam = lambda: fixed
+        decision = advisor.advise()
+        assert isinstance(decision, QueenDecision)
+
+    def test_crypto_decisions_continue_on_weekend(self, tmp_path):
+        """Op weekend worden crypto paper-stats nog steeds verwerkt."""
+        queen = make_queen(tmp_path)
+        mission_mock = MagicMock()
+        mission_mock.ant_type = "paper_ant"
+        mission_mock.market_scope.symbols = ["BTC-EUR"]
+        queen.active_missions = {"paper-btc": mission_mock}
+        advisor = QueenAdvisor(queen=queen, logs_root=tmp_path)
+
+        # Zaterdag
+        fixed = _ams_dt(5, 12, 0)
+        advisor._now_amsterdam = lambda: fixed
+
+        cid = str(uuid.uuid4())
+        write_research_record(tmp_path, cid, symbol="BTC-EUR")
+        for _ in range(16):
+            write_trade(tmp_path, "BTC-EUR", pnl=5.0)
+        for _ in range(4):
+            write_trade(tmp_path, "BTC-EUR", pnl=-2.0)
+
+        decision = advisor.advise()
+        assert "paper-btc" in decision.kapitaal_verhogen

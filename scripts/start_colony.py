@@ -1460,8 +1460,8 @@ def main() -> None:
                 "XLK", "XLE", "XLV", "XLF", "XLI", "XLB",
                 "XLP", "XLY", "XLU", "XLRE", "XLC",
                 # Dividend Aristocrats (DividendScoutAnt doelwitten)
-                "JNJ", "KO", "PG", "MMM", "ABT", "PEP", "MCD",
-                "WMT", "XOM", "CVX", "IBM", "CL", "GD", "EMR",
+                "KO", "PG", "ABT", "PEP", "MCD",
+                "WMT", "XOM", "CVX", "CL", "GD", "EMR",
                 # Breakout kandidaten (BreakoutAnt doelwitten)
                 "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA",
                 "JPM", "V", "UNH", "HD",
