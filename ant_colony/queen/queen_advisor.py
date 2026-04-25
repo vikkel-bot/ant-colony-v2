@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -43,6 +44,13 @@ _log = logging.getLogger(__name__)
 _WIN_HIGH         = 0.60   # win_rate boven dit → verhoog kapitaal
 _WIN_LOW          = 0.30   # win_rate onder dit → verlaag kapitaal
 _MIN_TRADES_HIGH  = 20     # minimale trades voor verhogen
+
+# Mapping van backtester best_regime naar PaperAnt-regime
+_REGIME_MAP: dict[str, str] = {
+    "bull":     "TRENDING",
+    "sideways": "SIDEWAYS",
+    "bear":     "VOLATILE",
+}
 _MIN_TRADES_LOW   = 10     # minimale trades voor verlagen
 _CLAUDE_MIN_CONF  = 6      # minimale confidence voor Claude advies
 
@@ -207,9 +215,14 @@ class QueenAdvisor:
             self._apply_paper_logic(decision, candidates, paper_stats)
             self._apply_claude_logic(decision, candidates, paper_stats, claude_advices)
 
+            regime = self._determine_regime(candidates)
+            if regime:
+                self._write_regime_signal(regime)
+
             self._log.info(
-                "Advies-cyclus klaar | prioriteit=%d deprioriteer=%d verhogen=%d verlagen=%d "
-                "gevolgd=%d genegeerd=%d",
+                "Advies-cyclus klaar | regime=%s prioriteit=%d deprioriteer=%d "
+                "verhogen=%d verlagen=%d gevolgd=%d genegeerd=%d",
+                regime or "—",
                 len(decision.prioriteit_kandidaten),
                 len(decision.deprioriteer_kandidaten),
                 len(decision.kapitaal_verhogen),
@@ -369,6 +382,43 @@ class QueenAdvisor:
             valid.append(advice)
 
         return valid
+
+    def _determine_regime(self, candidates: list[dict]) -> str | None:
+        """
+        Bepaal het dominante marktregime op basis van best_regime in candidates.
+
+        Mapping (backtester → PaperAnt):
+          bull     → TRENDING
+          sideways → SIDEWAYS
+          bear     → VOLATILE
+
+        Retourneert None als geen candidates of geen bekende waarden.
+        """
+        best_regimes = [c.get("best_regime") for c in candidates if c.get("best_regime")]
+        if not best_regimes:
+            return None
+        dominant = Counter(best_regimes).most_common(1)[0][0]
+        return _REGIME_MAP.get(dominant)
+
+    def _write_regime_signal(self, regime: str) -> None:
+        """Schrijf regime-signaal append-only naar ANT_LOGS/queen/regime.jsonl."""
+        if self._logs_root is None:
+            return
+        queen_dir = self._logs_root / "queen"
+        try:
+            queen_dir.mkdir(parents=True, exist_ok=True)
+            record = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "payload": {
+                    "action": "regime_signal",
+                    "regime": regime,
+                },
+            }
+            with (queen_dir / "regime.jsonl").open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record) + "\n")
+            self._log.debug("Regime-signaal geschreven: %s", regime)
+        except OSError:
+            self._log.exception("Kan regime-signaal niet schrijven naar %s", queen_dir)
 
     # ------------------------------------------------------------------
     # Beslissingslogica

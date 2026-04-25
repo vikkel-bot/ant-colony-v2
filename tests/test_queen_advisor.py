@@ -658,3 +658,166 @@ def test_apply_decision_logs_all_fields(tmp_path: Path) -> None:
     assert r["kapitaal_verlagen"]       == ["mid-y"]
     assert r["adviezen_gevolgd"]        == ["advies 1"]
     assert r["adviezen_genegeerd"]      == ["advies 2: reden"]
+
+
+# ---------------------------------------------------------------------------
+# Regime bepaling en schrijven naar ANT_LOGS/queen/regime.jsonl
+# ---------------------------------------------------------------------------
+
+def _write_research_with_regime(tmp_path: Path, candidate_id: str, best_regime: str) -> None:
+    """Schrijf een research record met best_regime veld."""
+    research_dir = tmp_path / "research"
+    research_dir.mkdir(parents=True, exist_ok=True)
+    record = {
+        "payload": {
+            "action":       "candidate_accepted",
+            "candidate_id": candidate_id,
+            "symbol":       "BTC-EUR",
+            "sharpe":       0.5,
+            "best_regime":  best_regime,
+        }
+    }
+    with (research_dir / "ant-research-001.jsonl").open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record) + "\n")
+
+
+def _read_regime_signal(tmp_path: Path) -> dict | None:
+    """Lees de laatste regel uit ANT_LOGS/queen/regime.jsonl."""
+    path = tmp_path / "queen" / "regime.jsonl"
+    if not path.exists():
+        return None
+    last = None
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            last = line
+    return json.loads(last) if last else None
+
+
+class TestDetermineRegime:
+    def test_bull_maps_to_trending(self, tmp_path):
+        advisor = make_advisor(tmp_path)
+        candidates = [{"best_regime": "bull"}, {"best_regime": "bull"}]
+        assert advisor._determine_regime(candidates) == "TRENDING"
+
+    def test_sideways_maps_to_sideways(self, tmp_path):
+        advisor = make_advisor(tmp_path)
+        candidates = [{"best_regime": "sideways"}]
+        assert advisor._determine_regime(candidates) == "SIDEWAYS"
+
+    def test_bear_maps_to_volatile(self, tmp_path):
+        advisor = make_advisor(tmp_path)
+        candidates = [{"best_regime": "bear"}, {"best_regime": "bear"}]
+        assert advisor._determine_regime(candidates) == "VOLATILE"
+
+    def test_dominant_wins_when_mixed(self, tmp_path):
+        advisor = make_advisor(tmp_path)
+        # 3 bull, 2 sideways → TRENDING
+        candidates = [
+            {"best_regime": "bull"},
+            {"best_regime": "bull"},
+            {"best_regime": "bull"},
+            {"best_regime": "sideways"},
+            {"best_regime": "sideways"},
+        ]
+        assert advisor._determine_regime(candidates) == "TRENDING"
+
+    def test_empty_candidates_returns_none(self, tmp_path):
+        advisor = make_advisor(tmp_path)
+        assert advisor._determine_regime([]) is None
+
+    def test_candidates_without_best_regime_returns_none(self, tmp_path):
+        advisor = make_advisor(tmp_path)
+        candidates = [{"sharpe": 0.5}, {"symbol": "BTC-EUR"}]
+        assert advisor._determine_regime(candidates) is None
+
+    def test_unknown_regime_value_returns_none(self, tmp_path):
+        advisor = make_advisor(tmp_path)
+        candidates = [{"best_regime": "bullish"}]  # niet in _REGIME_MAP
+        assert advisor._determine_regime(candidates) is None
+
+
+class TestWriteRegimeSignal:
+    def test_writes_file_on_first_call(self, tmp_path):
+        advisor = make_advisor(tmp_path)
+        advisor._write_regime_signal("TRENDING")
+
+        rec = _read_regime_signal(tmp_path)
+        assert rec is not None
+        assert rec["payload"]["action"] == "regime_signal"
+        assert rec["payload"]["regime"] == "TRENDING"
+
+    def test_appends_on_subsequent_calls(self, tmp_path):
+        advisor = make_advisor(tmp_path)
+        advisor._write_regime_signal("SIDEWAYS")
+        advisor._write_regime_signal("VOLATILE")
+
+        lines = (tmp_path / "queen" / "regime.jsonl").read_text(encoding="utf-8").splitlines()
+        records = [json.loads(l) for l in lines if l.strip()]
+        assert len(records) == 2
+        assert records[0]["payload"]["regime"] == "SIDEWAYS"
+        assert records[1]["payload"]["regime"] == "VOLATILE"
+
+    def test_creates_queen_dir_if_missing(self, tmp_path):
+        advisor = make_advisor(tmp_path)
+        assert not (tmp_path / "queen").exists()
+        advisor._write_regime_signal("TRENDING")
+        assert (tmp_path / "queen" / "regime.jsonl").exists()
+
+    def test_no_write_when_logs_root_is_none(self):
+        queen = MagicMock()
+        queen.active_missions = {}
+        advisor = QueenAdvisor(queen=queen, logs_root=None)
+        advisor._write_regime_signal("TRENDING")   # mag niet crashen
+
+    def test_timestamp_is_present(self, tmp_path):
+        advisor = make_advisor(tmp_path)
+        advisor._write_regime_signal("SIDEWAYS")
+        rec = _read_regime_signal(tmp_path)
+        assert "timestamp" in rec
+        assert rec["timestamp"]  # niet leeg
+
+
+class TestAdviseWritesRegime:
+    def test_advise_writes_regime_when_candidates_present(self, tmp_path):
+        advisor = make_advisor(tmp_path)
+        _write_research_with_regime(tmp_path, str(uuid.uuid4()), "bull")
+
+        advisor.advise()
+
+        rec = _read_regime_signal(tmp_path)
+        assert rec is not None
+        assert rec["payload"]["regime"] == "TRENDING"
+
+    def test_advise_does_not_write_when_no_candidates(self, tmp_path):
+        advisor = make_advisor(tmp_path)
+        advisor.advise()
+        assert not (tmp_path / "queen" / "regime.jsonl").exists()
+
+    def test_advise_writes_at_every_cycle(self, tmp_path):
+        advisor = make_advisor(tmp_path)
+        _write_research_with_regime(tmp_path, str(uuid.uuid4()), "sideways")
+
+        advisor.advise()
+        advisor.advise()
+        advisor.advise()
+
+        lines = (tmp_path / "queen" / "regime.jsonl").read_text(encoding="utf-8").splitlines()
+        records = [l for l in lines if l.strip()]
+        assert len(records) == 3
+
+    def test_advise_sideways_regime(self, tmp_path):
+        advisor = make_advisor(tmp_path)
+        _write_research_with_regime(tmp_path, str(uuid.uuid4()), "sideways")
+        _write_research_with_regime(tmp_path, str(uuid.uuid4()), "sideways")
+
+        advisor.advise()
+        rec = _read_regime_signal(tmp_path)
+        assert rec["payload"]["regime"] == "SIDEWAYS"
+
+    def test_advise_volatile_regime_from_bear(self, tmp_path):
+        advisor = make_advisor(tmp_path)
+        _write_research_with_regime(tmp_path, str(uuid.uuid4()), "bear")
+
+        advisor.advise()
+        rec = _read_regime_signal(tmp_path)
+        assert rec["payload"]["regime"] == "VOLATILE"
