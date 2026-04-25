@@ -10,6 +10,7 @@ class AntType(str, Enum):
     SCOUT = "scout_ant"
     RESEARCH = "research_ant"
     PAPER = "paper_ant"
+    PAPER_EQUITIES = "paper_ant_equities"
     EXECUTION = "execution_ant"
     AUDIT = "audit_ant"
     INGESTION = "ingestion_ant"
