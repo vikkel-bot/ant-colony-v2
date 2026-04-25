@@ -898,6 +898,16 @@
     .sltp-lbl-tp  { color: #22c55e; }
     .sltp-lbl-mid { color: var(--faint); text-align: center; }
 
+    .sltp-trailing-marker {
+      position: absolute;
+      top: -2px; bottom: -2px;
+      width: 2px;
+      background: #a855f7;
+      border-radius: 1px;
+      pointer-events: none;
+    }
+    .sltp-lbl-trail { color: #a855f7; font-size: 8px; }
+
   </style>
 </head>
 <body>
@@ -1712,14 +1722,32 @@ function renderSltpBar(pos) {
   const pct  = Math.max(0, Math.min(100, progress * 100)).toFixed(1);
   // Pointer kleur: groen als > 0.55, rood als < 0.35, anders donker
   const dotColor = progress > 0.55 ? '#16a34a' : progress < 0.35 ? '#dc2626' : '#1e293b';
+
+  // Trailing stop marker (paarse lijn) — alleen voor equities posities
+  let trailMarker = '';
+  let trailLabel  = '';
+  if (pos.trailing_stop_price != null && pos.stop_loss_price > 0 && pos.take_profit_price > 0) {
+    const sl = pos.stop_loss_price;
+    const tp = pos.take_profit_price;
+    const trailProgress = Math.max(0, Math.min(1, (pos.trailing_stop_price - sl) / (tp - sl)));
+    const trailPct = (trailProgress * 100).toFixed(1);
+    trailMarker = `<div class="sltp-trailing-marker" style="left:${trailPct}%"></div>`;
+    trailLabel  = `<span class="sltp-lbl-trail">Trail ${fPosPrice(pos.trailing_stop_price)}</span>`;
+  }
+
+  const tpLabel = pos.trailing_stop_price != null
+    ? `<span class="sltp-lbl-tp">Dummy TP</span>`
+    : `<span class="sltp-lbl-tp">TP ${fPosPrice(pos.take_profit_price)}</span>`;
+
   return `<div class="sltp-wrap">
     <div class="sltp-bar">
+      ${trailMarker}
       <div class="sltp-pointer" style="left:${pct}%;background:${dotColor}"></div>
     </div>
     <div class="sltp-labels">
       <span class="sltp-lbl-sl">SL ${fPosPrice(pos.stop_loss_price)}</span>
-      <span class="sltp-lbl-mid">Entry ${fPosPrice(pos.entry_price)}</span>
-      <span class="sltp-lbl-tp">TP ${fPosPrice(pos.take_profit_price)}</span>
+      <span class="sltp-lbl-mid">${trailLabel || ('Entry ' + fPosPrice(pos.entry_price))}</span>
+      ${tpLabel}
     </div>
   </div>`;
 }

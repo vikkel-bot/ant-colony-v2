@@ -199,6 +199,7 @@ class OpenPositionEntry(BaseModel):
     age_seconds: float
     strategy_type: str | None = None
     sl_tp_progress: float | None = None    # 0.0=bij SL, 1.0=bij TP; None als geen prijs
+    trailing_stop_price: float | None = None   # paarse lijn in dashboard (equities only)
 
 
 class OpenPositionsResponse(BaseModel):
@@ -999,20 +1000,27 @@ def create_router(ctx: ColonyContext) -> APIRouter:
         # --- Verzamel ruwe positiedata ---
         raw: list[dict] = []
 
+        _EQ_TRAILING_STOP_PCT = 0.05   # moet overeenkomen met EquitiesPaperAnt constant
+
         if ctx.paper_ledgers:
             for ledger in ctx.paper_ledgers:
                 for pos in ledger.open_positions:
+                    # Voor equities: bereken trailing_stop_price vanuit peak_price
+                    trailing_stop_price: float | None = None
+                    if pos.biome == "equities":
+                        trailing_stop_price = round(pos.peak_price * (1.0 - _EQ_TRAILING_STOP_PCT), 6)
                     raw.append({
-                        "position_id":      pos.position_id,
-                        "symbol":           pos.symbol,
-                        "biome":            pos.biome,
-                        "side":             pos.side.value,
-                        "entry_price":      pos.entry_price,
-                        "quantity":         pos.quantity,
-                        "stop_loss_price":  pos.stop_loss_price,
-                        "take_profit_price": pos.take_profit_price,
-                        "opened_at":        pos.opened_at.isoformat(),
-                        "strategy_type":    None,  # niet beschikbaar via ledger
+                        "position_id":        pos.position_id,
+                        "symbol":             pos.symbol,
+                        "biome":              pos.biome,
+                        "side":               pos.side.value,
+                        "entry_price":        pos.entry_price,
+                        "quantity":           pos.quantity,
+                        "stop_loss_price":    pos.stop_loss_price,
+                        "take_profit_price":  pos.take_profit_price,
+                        "opened_at":          pos.opened_at.isoformat(),
+                        "strategy_type":      None,  # niet beschikbaar via ledger
+                        "trailing_stop_price": trailing_stop_price,
                     })
         elif ctx.logs_root is not None:
             raw = _read_open_positions_from_logs(ctx.logs_root)
@@ -1052,6 +1060,15 @@ def create_router(ctx: ColonyContext) -> APIRouter:
             # SL/TP progress
             progress = _compute_sl_tp_progress(side, current, sl_price, tp_price)
 
+            # trailing_stop_price: uit log (equities) of berekend via ledger-positie
+            trailing_stop_raw = r.get("trailing_stop_price")
+            trailing_stop: float | None = None
+            if trailing_stop_raw is not None:
+                try:
+                    trailing_stop = float(trailing_stop_raw)
+                except (TypeError, ValueError):
+                    pass
+
             entries.append(OpenPositionEntry(
                 position_id=str(r.get("position_id") or ""),
                 symbol=str(r.get("symbol") or ""),
@@ -1068,6 +1085,7 @@ def create_router(ctx: ColonyContext) -> APIRouter:
                 age_seconds=round(age_sec, 0),
                 strategy_type=r.get("strategy_type"),
                 sl_tp_progress=progress,
+                trailing_stop_price=trailing_stop,
             ))
 
         # Totaal PnL als percentage van ingezette waarde
@@ -1692,7 +1710,8 @@ def create_router(ctx: ColonyContext) -> APIRouter:
 # Intern — open posities helpers
 # ---------------------------------------------------------------------------
 
-_POSITION_ZOMBIE_SECONDS: int = 24 * 3600   # posities ouder dan 24u = zombie
+_POSITION_ZOMBIE_SECONDS_CRYPTO:   int = 24 * 3600         # crypto: 24u zombie-drempel
+_POSITION_ZOMBIE_SECONDS_EQUITIES: int = 14 * 24 * 3600    # equities: 14 dagen (TTL is 10 handelsdagen)
 
 
 def _read_open_positions_from_logs(logs_root: Path) -> list[dict]:
@@ -1700,50 +1719,57 @@ def _read_open_positions_from_logs(logs_root: Path) -> list[dict]:
     Lees openstaande paper posities uit ANT_LOGS/paper/*.jsonl.
 
     Strategie:
-      - Verzamel alle trade_opened en trade_closed events uit de meest recente
-        ant-sessie (latest source UUID — voorkomt zombie-posities van vorige runs).
-      - Retourneer posities met trade_opened maar zonder matching trade_closed.
-      - Posities ouder dan 24u worden als zombie beschouwd en overgeslagen.
+      - Crypto: gebruik alleen de meest recente ant-sessie (voorkomt zombie-posities
+        van vorige runs). Zombie-drempel: 24u.
+      - Equities: scan alle sessies (positie kan dagen open staan over meerdere
+        herstarts). Zombie-drempel: 14 dagen.
+      - Scan ook position_update events voor trailing_stop_price (equities).
 
-    Retourneert een lijst van payload-dicts (keys: position_id, symbol, biome,
-    side, entry_price, quantity, stop_loss, take_profit, strategy_type, opened_at).
+    Retourneert een lijst van payload-dicts.
     """
     paper_dir = logs_root / "paper"
     if not paper_dir.exists():
         return []
 
-    records: list[dict] = []
+    crypto_records:   list[dict] = []
+    equities_records: list[dict] = []
+
     for path in paper_dir.glob("*.jsonl"):
         if "_trades" in path.name:
             continue
         try:
             for line in path.read_text(encoding="utf-8").splitlines():
                 line = line.strip()
-                if line:
-                    try:
-                        records.append(json.loads(line))
-                    except json.JSONDecodeError:
-                        pass
+                if not line:
+                    continue
+                try:
+                    r = json.loads(line)
+                    biome = str((r.get("payload") or {}).get("biome") or "")
+                    if biome == "equities":
+                        equities_records.append(r)
+                    else:
+                        crypto_records.append(r)
+                except json.JSONDecodeError:
+                    pass
         except OSError:
             pass
 
-    session_recs = _latest_session_records(records)
-    now          = time.time()
+    now = time.time()
 
-    opened:     dict[str, dict]  = {}   # position_id → payload
-    opened_age: dict[str, float] = {}   # position_id → unix timestamp (from event ts)
-    closed_ids: set[str]         = set()
-
-    for r in session_recs:
+    # --- Crypto: meest recente sessie alleen ---
+    crypto_session = _latest_session_records(crypto_records)
+    c_opened:     dict[str, dict]  = {}
+    c_opened_age: dict[str, float] = {}
+    c_closed:     set[str]         = set()
+    for r in crypto_session:
         payload = r.get("payload") or {}
         action  = payload.get("action")
         pos_id  = str(payload.get("position_id") or "")
         if not pos_id:
             continue
-
         if action == "trade_opened":
             rec_ts = _parse_ts(r.get("timestamp"))
-            opened[pos_id] = {
+            c_opened[pos_id] = {
                 "position_id":       pos_id,
                 "symbol":            str(payload.get("symbol") or ""),
                 "biome":             str(payload.get("biome") or "crypto"),
@@ -1754,19 +1780,70 @@ def _read_open_positions_from_logs(logs_root: Path) -> list[dict]:
                 "take_profit_price": float(payload.get("take_profit") or 0),
                 "strategy_type":     payload.get("strategy_type"),
                 "opened_at":         r.get("timestamp") or "",
+                "trailing_stop_price": None,
             }
             if rec_ts is not None:
-                opened_age[pos_id] = rec_ts.timestamp()
-
+                c_opened_age[pos_id] = rec_ts.timestamp()
         elif action == "trade_closed":
-            closed_ids.add(pos_id)
+            c_closed.add(pos_id)
+
+    # --- Equities: alle sessies (meerdere herstarts) ---
+    eq_opened:            dict[str, dict]  = {}
+    eq_opened_age:        dict[str, float] = {}
+    eq_closed:            set[str]         = set()
+    eq_trailing:          dict[str, float] = {}   # pos_id → laatste trailing_stop_price
+    for r in equities_records:
+        payload = r.get("payload") or {}
+        action  = payload.get("action")
+        pos_id  = str(payload.get("position_id") or "")
+        if not pos_id:
+            continue
+        if action == "trade_opened":
+            rec_ts = _parse_ts(r.get("timestamp"))
+            eq_opened[pos_id] = {
+                "position_id":       pos_id,
+                "symbol":            str(payload.get("symbol") or ""),
+                "biome":             "equities",
+                "side":              str(payload.get("side") or "long"),
+                "entry_price":       float(payload.get("entry_price") or 0),
+                "quantity":          float(payload.get("quantity") or 0),
+                "stop_loss_price":   float(payload.get("stop_loss") or 0),
+                "take_profit_price": float(payload.get("take_profit") or 0),
+                "strategy_type":     payload.get("strategy_type"),
+                "opened_at":         r.get("timestamp") or "",
+                "trailing_stop_price": payload.get("trailing_stop_price"),
+            }
+            if rec_ts is not None:
+                eq_opened_age[pos_id] = rec_ts.timestamp()
+        elif action == "trade_closed":
+            eq_closed.add(pos_id)
+        elif action == "position_update":
+            tsp = payload.get("trailing_stop_price")
+            if tsp is not None:
+                try:
+                    eq_trailing[pos_id] = float(tsp)
+                except (TypeError, ValueError):
+                    pass
+
+    # Verrijk equities met meest recente trailing_stop_price
+    for pos_id, tsp in eq_trailing.items():
+        if pos_id in eq_opened:
+            eq_opened[pos_id]["trailing_stop_price"] = tsp
 
     result: list[dict] = []
-    for pos_id, pos in opened.items():
-        if pos_id in closed_ids:
+    for pos_id, pos in c_opened.items():
+        if pos_id in c_closed:
             continue
-        age_sec = now - opened_age.get(pos_id, now)
-        if age_sec > _POSITION_ZOMBIE_SECONDS:
+        age_sec = now - c_opened_age.get(pos_id, now)
+        if age_sec > _POSITION_ZOMBIE_SECONDS_CRYPTO:
+            continue
+        result.append(pos)
+
+    for pos_id, pos in eq_opened.items():
+        if pos_id in eq_closed:
+            continue
+        age_sec = now - eq_opened_age.get(pos_id, now)
+        if age_sec > _POSITION_ZOMBIE_SECONDS_EQUITIES:
             continue
         result.append(pos)
 

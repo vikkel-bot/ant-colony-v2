@@ -751,6 +751,8 @@ def main() -> None:
         else:
             log.warning("Research-missie niet geaccepteerd — geen ResearchAnt thread gestart.")
 
+        _paper_ledgers: list = []   # in-memory ledgers geïnjecteerd in ColonyContext
+
         if paper_mission is not None:
             paper_ant_id = f"paper-{uuid.uuid4().hex[:12]}"
             paper = PaperAnt(
@@ -773,6 +775,7 @@ def main() -> None:
                 ttl=paper_mission.ttl,
                 heartbeat_interval=paper_mission.heartbeat_interval,
             ))
+            _paper_ledgers.append(paper._ledger)
             log.info(
                 "PaperAnt gestart | ant_id=%s  capital=€%.2f  ttl=%ds  symbols=%s",
                 paper_ant_id,
@@ -1266,6 +1269,7 @@ def main() -> None:
             from ant_colony.ants.equities.piotroski_ant import PiotroskiAnt
             from ant_colony.ants.equities.breakout_ant import BreakoutAnt
             from ant_colony.ants.equities.rs_regime_ant import RSRegimeAnt
+            from ant_colony.ants.paper_ant_equities import EquitiesPaperAnt
             from ant_colony.biome.adapters.ibkr_adapter import IBKRAdapter
             from ant_colony.biome.adapters.yahoo_finance_adapter import YahooFinanceAdapter
             from ant_colony.biome.biome_registry import BiomeRegistry
@@ -1443,11 +1447,85 @@ def main() -> None:
                     eq_ant_id,
                     eq_mission.ttl,
                 )
+
+            # --- EquitiesPaperAnt ---
+            _eq_paper_symbols = [
+                # Sector ETF's (SectorScoutAnt doelwitten)
+                "XLK", "XLE", "XLV", "XLF", "XLI", "XLB",
+                "XLP", "XLY", "XLU", "XLRE", "XLC",
+                # Dividend Aristocrats (DividendScoutAnt doelwitten)
+                "JNJ", "KO", "PG", "MMM", "ABT", "PEP", "MCD",
+                "WMT", "XOM", "CVX", "IBM", "CL", "GD", "EMR",
+                # Breakout kandidaten (BreakoutAnt doelwitten)
+                "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA",
+                "JPM", "V", "UNH", "HD",
+            ]
+            _eq_paper_mission = Mission(
+                mission_id=f"eq-paper-{_ts_eq}",
+                ant_type="paper_ant_equities",
+                allowed_node=args.node_id,
+                allowed_actions=["read_data", "paper_trade"],
+                market_scope=MarketScope(
+                    biome="equities",
+                    symbols=_eq_paper_symbols,
+                ),
+                capital_limit=500.0,
+                risk_limits=RiskLimits(
+                    max_drawdown_pct=0.25,
+                    max_position_size=500.0,
+                    daily_loss_limit=50.0,
+                    stop_loss_required=False,
+                ),
+                ttl=86400 * 90,        # 90 dagen missie-TTL (10-dagse handels-TTL per positie)
+                heartbeat_interval=60,
+                success_conditions=SuccessConditions(
+                    description="Equities paper trading — 30 handelsdagen, Sharpe > 0.5, max drawdown < 25%.",
+                ),
+            )
+            _eq_paper_result = queen.issue_mission(_eq_paper_mission)
+            if _eq_paper_result.accepted:
+                _eq_paper_ant_id = f"eq-paper-{uuid.uuid4().hex[:12]}"
+                _eq_paper_ant = EquitiesPaperAnt(
+                    ant_id=_eq_paper_ant_id,
+                    mission=_eq_paper_mission,
+                    scheduler=scheduler,
+                    biome_registry=_eq_registry,
+                    logs_root=logs_root,
+                )
+                threading.Thread(
+                    target=_eq_paper_ant.run,
+                    name=f"eq-paper-{_eq_paper_ant_id[:16]}",
+                    daemon=True,
+                ).start()
+                scheduler.register_agent(AgentRecord(
+                    ant_id=_eq_paper_ant_id,
+                    mission_id=_eq_paper_mission.mission_id,
+                    node_id=args.node_id,
+                    ant_type="paper_ant_equities",
+                    ttl=_eq_paper_mission.ttl,
+                    heartbeat_interval=_eq_paper_mission.heartbeat_interval,
+                ))
+                _paper_ledgers.append(_eq_paper_ant._ledger)
+                log.info(
+                    "EquitiesPaperAnt gestart | ant_id=%s  capital=€%.2f  symbols=%d",
+                    _eq_paper_ant_id,
+                    _eq_paper_mission.capital_limit,
+                    len(_eq_paper_symbols),
+                )
+            else:
+                log.warning(
+                    "EquitiesPaperAnt-missie geweigerd — %s",
+                    _eq_paper_result.rejection_reason,
+                )
+                _eq_paper_ant = None
+
         else:
+            _eq_paper_ant = None
             log.info(
                 "Equities ants uitgeschakeld (opt-in vereist — zet EQUITIES_ENABLED=true)."
             )
     except Exception:
+        _eq_paper_ant = None
         log.exception("Equities bootstrap mislukt — colony draait door zonder equities ants.")
 
     # --- Stap 9: bouw ColonyContext en start dashboard in watchdog thread ---
@@ -1457,6 +1535,7 @@ def main() -> None:
         logs_root=logs_root,
         broker_names={"crypto": "Bitvavo"},
         biome_registry=biome_registry,
+        paper_ledgers=_paper_ledgers,
     )
 
     log.info(
