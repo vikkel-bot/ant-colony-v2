@@ -47,6 +47,7 @@ from ant_colony.exit_chain.exit_conditions import (
     TTLCondition,
 )
 from ant_colony.exit_chain.exit_evaluator import ExitEvaluator
+from ant_colony.exit_chain.position import PaperPosition, PositionSide
 from ant_colony.paper.paper_broker import PaperBroker
 from ant_colony.paper.paper_ledger import BROKER_FEE_PCT, PaperLedger
 from ant_colony.schemas.ant import AntStatus
@@ -60,7 +61,7 @@ _TP_PCT  = 0.03                  # 3% take-profit boven entry
 _SIGNAL_VALIDITY_TICKS = 2       # signal geldig voor heartbeat_interval × 2 seconden
 _MAX_OPEN_POSITIONS    = 10      # maximaal 10 open posities tegelijk (1 per symbool)
 _STALE_SIGNAL_MINUTES  = 5       # signalen ouder dan dit worden genegeerd
-_ZOMBIE_POSITION_HOURS = 24      # posities zonder close ouder dan dit → zombie
+_ZOMBIE_POSITION_HOURS = 168     # posities zonder close ouder dan dit → zombie (7 dagen)
 
 
 class PaperAnt:
@@ -125,8 +126,9 @@ class PaperAnt:
 
         if self._open_symbols or self._open_research_keys:
             self._log.info(
-                "Herstart gedetecteerd — %d scout positie(s), %d research positie(s) hersteld",
+                "Herstart gedetecteerd — %d scout positie(s), %d research positie(s), %d in ledger",
                 len(self._open_symbols), len(self._open_research_keys),
+                len(self._ledger.open_positions),
             )
 
     # ------------------------------------------------------------------
@@ -288,8 +290,14 @@ class PaperAnt:
         except (ValueError, TypeError):
             return False
 
-    def _is_zombie_position(self, ts_str: str, now: datetime) -> bool:
-        """True als een ongesloten positie ouder is dan _ZOMBIE_POSITION_HOURS. Geen timestamp → False (fail-open)."""
+    def _is_zombie_position(self, ts_str: str, now: datetime, *, biome: str = "") -> bool:
+        """True als een ongesloten positie ouder is dan _ZOMBIE_POSITION_HOURS.
+
+        Crypto-posities (biome='crypto') worden nooit als zombie beschouwd —
+        die handelen 24/7 en kunnen weken open staan. Geen timestamp → False (fail-open).
+        """
+        if biome == "crypto":
+            return False
         if not ts_str:
             return False
         try:
@@ -297,6 +305,55 @@ class PaperAnt:
             return (now - ts).total_seconds() > _ZOMBIE_POSITION_HOURS * 3600
         except (ValueError, TypeError):
             return False
+
+    def _reconstruct_position(
+        self, pos_id: str, payload: dict, ts_str: str
+    ) -> PaperPosition | None:
+        """Reconstrueer een PaperPosition uit een trade_opened payload voor ledger-herstel."""
+        try:
+            try:
+                opened_at = datetime.fromisoformat(str(ts_str).replace("Z", "+00:00"))
+            except (ValueError, TypeError):
+                opened_at = datetime.now(tz=timezone.utc)
+
+            entry_price = float(payload.get("entry_price") or 0)
+            quantity    = float(payload.get("quantity") or 0)
+            sl          = float(payload.get("stop_loss") or 0)
+            tp          = float(payload.get("take_profit") or 0)
+
+            if entry_price <= 0 or quantity <= 0 or sl <= 0 or tp <= 0:
+                self._log.warning(
+                    "Onvolledige payload voor positie %s — ledger-herstel overgeslagen", pos_id
+                )
+                return None
+
+            side_str = str(payload.get("side") or "long")
+            try:
+                side = PositionSide(side_str)
+            except ValueError:
+                side = PositionSide.LONG
+
+            return PaperPosition(
+                position_id=pos_id,
+                symbol=str(payload.get("symbol") or ""),
+                biome=str(payload.get("biome") or self.mission.market_scope.biome),
+                mission_id=self.mission.mission_id,
+                ant_id=self.ant_id,
+                side=side,
+                entry_price=entry_price,
+                quantity=quantity,
+                stop_loss_price=sl,
+                take_profit_price=tp,
+                ttl=self.mission.ttl,
+                current_price=entry_price,
+                peak_price=entry_price,
+                opened_at=opened_at,
+            )
+        except Exception:
+            self._log.warning(
+                "Kan positie %s niet reconstrueren uit log — ledger-herstel overgeslagen", pos_id
+            )
+            return None
 
     def _process_new_signals(self) -> int:
         """Verwerk nieuwe scout-signalen en open posities indien van toepassing."""
@@ -349,7 +406,7 @@ class PaperAnt:
         Scan ANT_LOGS/paper/*.jsonl op trade_opened / trade_closed events.
 
         Retourneert de set van symbolen met een open (onafgesloten) positie.
-        Gebruikt bij startup zodat herstart geen duplicate posities opent.
+        Herstelt ook PaperPosition objecten in de ledger voor SL/TP bewaking.
         """
         if self.logs_root is None:
             return set()
@@ -357,8 +414,9 @@ class PaperAnt:
         if not paper_dir.exists():
             return set()
 
-        opened: dict[str, str] = {}       # position_id → symbol
-        opened_ts: dict[str, str] = {}    # position_id → timestamp str
+        opened: dict[str, str] = {}             # position_id → symbol
+        opened_ts: dict[str, str] = {}          # position_id → timestamp str
+        opened_payload: dict[str, dict] = {}    # position_id → full payload
         closed_ids: set[str] = set()
 
         for path in paper_dir.glob("*.jsonl"):
@@ -382,24 +440,35 @@ class PaperAnt:
                         if sym:
                             opened[pos_id] = sym
                             opened_ts[pos_id] = str(record.get("timestamp") or "")
+                            opened_payload[pos_id] = payload
                     elif action == "trade_closed":
                         closed_ids.add(pos_id)
             except OSError:
                 pass
 
         result: set[str] = set()
+        restored = 0
         now = datetime.now(tz=timezone.utc)
         for pid, sym in opened.items():
             if pid in closed_ids:
                 continue
-            ts_str = opened_ts.get(pid, "")
-            if self._is_zombie_position(ts_str, now):
+            payload = opened_payload.get(pid, {})
+            biome   = str(payload.get("biome") or "")
+            ts_str  = opened_ts.get(pid, "")
+            if self._is_zombie_position(ts_str, now, biome=biome):
                 self._log.info(
                     "Zombie positie genegeerd bij herstel: symbol=%s position_id=%s ts=%s",
                     sym, pid, ts_str,
                 )
                 continue
             result.add(sym)
+            pos = self._reconstruct_position(pid, payload, ts_str)
+            if pos is not None:
+                self._ledger.record_opened(pos)
+                restored += 1
+
+        if restored:
+            self._log.info("%d positie(s) hersteld in ledger", restored)
         return result
 
     def _load_research_keys_from_logs(
@@ -421,6 +490,7 @@ class PaperAnt:
 
         opened: dict[str, tuple[str, str]] = {}    # pos_id → (symbol, strategy_type)
         opened_ts: dict[str, str] = {}              # pos_id → timestamp str
+        opened_biome: dict[str, str] = {}           # pos_id → biome
         closed_ids: set[str] = set()
 
         for path in paper_dir.glob("*.jsonl"):
@@ -445,6 +515,7 @@ class PaperAnt:
                         if sym:
                             opened[pos_id] = (sym, st)
                             opened_ts[pos_id] = str(record.get("timestamp") or "")
+                            opened_biome[pos_id] = str(payload.get("biome") or "")
                     elif action == "trade_closed":
                         closed_ids.add(pos_id)
             except OSError:
@@ -455,7 +526,8 @@ class PaperAnt:
             if pid in closed_ids:
                 continue
             ts_str = opened_ts.get(pid, "")
-            if self._is_zombie_position(ts_str, now):
+            biome  = opened_biome.get(pid, "")
+            if self._is_zombie_position(ts_str, now, biome=biome):
                 self._log.info(
                     "Zombie research positie genegeerd bij herstel: key=%s position_id=%s ts=%s",
                     key, pid, ts_str,

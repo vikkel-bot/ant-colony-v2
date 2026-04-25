@@ -1123,19 +1123,23 @@ def _write_paper_log_with_ts(
     symbol: str,
     timestamp: str,
     strategy_type: str = "scout",
+    biome: str = "",
 ) -> None:
     """Schrijf een trade_opened/trade_closed event met timestamp naar paper log."""
     paper_dir.mkdir(parents=True, exist_ok=True)
+    payload: dict = {
+        "action": action,
+        "position_id": position_id,
+        "symbol": symbol,
+        "strategy_type": strategy_type,
+    }
+    if biome:
+        payload["biome"] = biome
     record = {
         "timestamp": timestamp,
         "event_type": "action_executed",
         "source": ant_id,
-        "payload": {
-            "action": action,
-            "position_id": position_id,
-            "symbol": symbol,
-            "strategy_type": strategy_type,
-        },
+        "payload": payload,
     }
     (paper_dir / f"{ant_id}.jsonl").open("a", encoding="utf-8").write(
         json.dumps(record) + "\n"
@@ -1143,20 +1147,25 @@ def _write_paper_log_with_ts(
 
 
 class TestZombiePositionDetection:
-    """Ongesloten posities ouder dan 24u worden als zombie behandeld bij herstel."""
+    """
+    Zombie-filter bij herstel na herstart:
+    - crypto (biome='crypto'): nooit zombie, altijd herstellen (handelt 24/7)
+    - overig (equities, ''): zombie als ouder dan _ZOMBIE_POSITION_HOURS (168u / 7 dagen)
+    """
 
     def test_old_open_without_close_not_recovered(self, tmp_path: Path) -> None:
-        """trade_opened >24u geleden zonder trade_closed → niet hersteld (zombie)."""
-        old_ts = (datetime.now(tz=timezone.utc) - timedelta(hours=25)).isoformat()
+        """trade_opened >168u geleden (niet-crypto) zonder trade_closed → niet hersteld (zombie)."""
+        old_ts = (datetime.now(tz=timezone.utc) - timedelta(hours=200)).isoformat()
         pos_id = str(uuid.uuid4())
         _write_paper_log_with_ts(
-            tmp_path / "paper", "old-ant", "trade_opened", pos_id, "BTC-EUR", old_ts
+            tmp_path / "paper", "old-ant", "trade_opened", pos_id, "XLK", old_ts,
+            biome="equities",
         )
         ant = make_ant(logs_root=tmp_path)
-        assert "BTC-EUR" not in ant._open_symbols
+        assert "XLK" not in ant._open_symbols
 
     def test_recent_open_without_close_is_recovered(self, tmp_path: Path) -> None:
-        """trade_opened <24u geleden zonder trade_closed → wel hersteld."""
+        """trade_opened <168u geleden zonder trade_closed → wel hersteld."""
         recent_ts = (datetime.now(tz=timezone.utc) - timedelta(hours=1)).isoformat()
         pos_id = str(uuid.uuid4())
         _write_paper_log_with_ts(
@@ -1166,42 +1175,46 @@ class TestZombiePositionDetection:
         assert "ETH-EUR" in ant._open_symbols
 
     def test_old_open_with_close_not_recovered(self, tmp_path: Path) -> None:
-        """trade_opened >24u met bijbehorende trade_closed → niet hersteld (normaal gedrag)."""
-        old_ts = (datetime.now(tz=timezone.utc) - timedelta(hours=30)).isoformat()
+        """trade_opened >168u met bijbehorende trade_closed → niet hersteld (normaal gedrag)."""
+        old_ts = (datetime.now(tz=timezone.utc) - timedelta(hours=200)).isoformat()
         pos_id = str(uuid.uuid4())
         paper_dir = tmp_path / "paper"
-        _write_paper_log_with_ts(paper_dir, "old-ant", "trade_opened", pos_id, "SOL-EUR", old_ts)
-        _write_paper_log_with_ts(paper_dir, "old-ant", "trade_closed", pos_id, "SOL-EUR", old_ts)
+        _write_paper_log_with_ts(paper_dir, "old-ant", "trade_opened", pos_id, "SOL-EUR", old_ts,
+                                  biome="equities")
+        _write_paper_log_with_ts(paper_dir, "old-ant", "trade_closed", pos_id, "SOL-EUR", old_ts,
+                                  biome="equities")
         ant = make_ant(logs_root=tmp_path)
         assert "SOL-EUR" not in ant._open_symbols
 
     def test_zombie_does_not_block_new_position(self, tmp_path: Path) -> None:
-        """Zombie positie op BTC-EUR telt niet mee voor de cap → nieuw signaal wordt verwerkt."""
-        old_ts = (datetime.now(tz=timezone.utc) - timedelta(hours=25)).isoformat()
+        """Zombie positie (>168u, equities) telt niet mee voor de cap → nieuw signaal wordt verwerkt."""
+        old_ts = (datetime.now(tz=timezone.utc) - timedelta(hours=200)).isoformat()
         pos_id = str(uuid.uuid4())
         _write_paper_log_with_ts(
-            tmp_path / "paper", "old-ant", "trade_opened", pos_id, "BTC-EUR", old_ts
+            tmp_path / "paper", "old-ant", "trade_opened", pos_id, "XLK", old_ts,
+            biome="equities",
         )
         ant = make_ant(logs_root=tmp_path)
-        assert "BTC-EUR" not in ant._open_symbols
-        # Nu een nieuw signaal voor hetzelfde symbool — moet doorgang vinden
+        assert "XLK" not in ant._open_symbols
+        # Nu een nieuw signaal voor BTC-EUR — moet doorgang vinden
         write_scout_signal(tmp_path / "scouts", symbol="BTC-EUR")
         ant._tick()
         assert len(ant._ledger.open_positions) == 1
 
     def test_old_research_open_without_close_not_recovered(self, tmp_path: Path) -> None:
-        """Research trade_opened >24u zonder trade_closed → niet hersteld in _open_research_keys."""
-        old_ts = (datetime.now(tz=timezone.utc) - timedelta(hours=25)).isoformat()
+        """Research trade_opened >168u (niet-crypto) zonder trade_closed → niet hersteld."""
+        old_ts = (datetime.now(tz=timezone.utc) - timedelta(hours=200)).isoformat()
         pos_id = str(uuid.uuid4())
         _write_paper_log_with_ts(
-            tmp_path / "paper", "old-ant", "trade_opened", pos_id, "ETH-EUR", old_ts,
+            tmp_path / "paper", "old-ant", "trade_opened", pos_id, "XLK", old_ts,
             strategy_type="sma_crossover",
+            biome="equities",
         )
         ant = make_ant(logs_root=tmp_path)
-        assert ("ETH-EUR", "sma_crossover") not in ant._open_research_keys
+        assert ("XLK", "sma_crossover") not in ant._open_research_keys
 
     def test_recent_research_open_without_close_is_recovered(self, tmp_path: Path) -> None:
-        """Research trade_opened <24u zonder trade_closed → wel hersteld in _open_research_keys."""
+        """Research trade_opened <168u zonder trade_closed → wel hersteld in _open_research_keys."""
         recent_ts = (datetime.now(tz=timezone.utc) - timedelta(hours=2)).isoformat()
         pos_id = str(uuid.uuid4())
         _write_paper_log_with_ts(
@@ -1211,36 +1224,57 @@ class TestZombiePositionDetection:
         ant = make_ant(logs_root=tmp_path)
         assert ("ETH-EUR", "rsi_oversold") in ant._open_research_keys
 
+    def test_crypto_always_recovered_regardless_of_age(self, tmp_path: Path) -> None:
+        """Crypto-posities worden altijd hersteld, ook ouder dan 168u (biome='crypto')."""
+        very_old_ts = (datetime.now(tz=timezone.utc) - timedelta(hours=500)).isoformat()
+        pos_id = str(uuid.uuid4())
+        _write_paper_log_with_ts(
+            tmp_path / "paper", "old-ant", "trade_opened", pos_id, "BTC-EUR", very_old_ts,
+            biome="crypto",
+        )
+        ant = make_ant(logs_root=tmp_path)
+        assert "BTC-EUR" in ant._open_symbols
+
+    def test_crypto_research_always_recovered_regardless_of_age(self, tmp_path: Path) -> None:
+        """Crypto research-posities worden altijd hersteld, ook ouder dan 168u."""
+        very_old_ts = (datetime.now(tz=timezone.utc) - timedelta(hours=500)).isoformat()
+        pos_id = str(uuid.uuid4())
+        _write_paper_log_with_ts(
+            tmp_path / "paper", "old-ant", "trade_opened", pos_id, "ETH-EUR", very_old_ts,
+            strategy_type="sma_crossover",
+            biome="crypto",
+        )
+        ant = make_ant(logs_root=tmp_path)
+        assert ("ETH-EUR", "sma_crossover") in ant._open_research_keys
+
     def test_zombie_filter_consistent_scout_and_research(self, tmp_path: Path) -> None:
         """
-        Zombie-filter (>24u) wordt consistent toegepast op zowel scout- als
+        Zombie-filter (>168u, niet-crypto) wordt consistent toegepast op zowel scout- als
         research-posities bij herstel na herstart.
-
-        Verifies FIX 3: beide _load_open_symbols_from_logs() en
-        _load_research_keys_from_logs() moeten identiek gedrag tonen voor
-        posities ouder dan _ZOMBIE_POSITION_HOURS.
         """
-        old_ts    = (datetime.now(tz=timezone.utc) - timedelta(hours=25)).isoformat()
+        old_ts    = (datetime.now(tz=timezone.utc) - timedelta(hours=200)).isoformat()
         recent_ts = (datetime.now(tz=timezone.utc) - timedelta(hours=2)).isoformat()
         paper_dir = tmp_path / "paper"
 
         old_pid    = str(uuid.uuid4())
         recent_pid = str(uuid.uuid4())
 
-        # Oude scout positie (>24u) — moet genegeerd worden
-        _write_paper_log_with_ts(paper_dir, "ant-old", "trade_opened", old_pid, "BTC-EUR", old_ts)
-        # Recente scout positie (<24u) — moet hersteld worden
+        # Oude scout positie (>168u, equities) — moet genegeerd worden
+        _write_paper_log_with_ts(paper_dir, "ant-old", "trade_opened", old_pid, "XLK", old_ts,
+                                  biome="equities")
+        # Recente scout positie (<168u) — moet hersteld worden
         _write_paper_log_with_ts(paper_dir, "ant-new", "trade_opened", recent_pid, "ETH-EUR", recent_ts)
 
         old_r_pid    = str(uuid.uuid4())
         recent_r_pid = str(uuid.uuid4())
 
-        # Oude research positie (>24u) — moet genegeerd worden
+        # Oude research positie (>168u, equities) — moet genegeerd worden
         _write_paper_log_with_ts(
-            paper_dir, "ant-old", "trade_opened", old_r_pid, "BTC-EUR", old_ts,
+            paper_dir, "ant-old", "trade_opened", old_r_pid, "XLK", old_ts,
             strategy_type="sma_crossover",
+            biome="equities",
         )
-        # Recente research positie (<24u) — moet hersteld worden
+        # Recente research positie (<168u) — moet hersteld worden
         _write_paper_log_with_ts(
             paper_dir, "ant-new", "trade_opened", recent_r_pid, "ETH-EUR", recent_ts,
             strategy_type="rsi_oversold",
@@ -1248,13 +1282,145 @@ class TestZombiePositionDetection:
 
         ant = make_ant(logs_root=tmp_path)
 
-        # Scout: BTC-EUR (oud) weg, ETH-EUR (recent) aanwezig
-        assert "BTC-EUR" not in ant._open_symbols
+        # Scout: XLK (oud, equities) weg, ETH-EUR (recent) aanwezig
+        assert "XLK" not in ant._open_symbols
         assert "ETH-EUR" in ant._open_symbols
 
-        # Research: BTC/sma_crossover (oud) weg, ETH/rsi_oversold (recent) aanwezig
-        assert ("BTC-EUR", "sma_crossover") not in ant._open_research_keys
+        # Research: XLK/sma_crossover (oud) weg, ETH/rsi_oversold (recent) aanwezig
+        assert ("XLK", "sma_crossover") not in ant._open_research_keys
         assert ("ETH-EUR", "rsi_oversold") in ant._open_research_keys
+
+
+# ---------------------------------------------------------------------------
+# Ledger-herstel na herstart (Bug 2)
+# ---------------------------------------------------------------------------
+
+
+def _write_full_paper_log(
+    paper_dir: Path,
+    ant_id: str,
+    position_id: str,
+    symbol: str,
+    timestamp: str,
+    entry_price: float = 50_000.0,
+    quantity: float = 0.001,
+    stop_loss: float = 49_000.0,
+    take_profit: float = 51_500.0,
+    biome: str = "crypto",
+    side: str = "long",
+    strategy_type: str | None = None,
+) -> None:
+    """Schrijf een volledig trade_opened event (met price-velden) naar paper log."""
+    paper_dir.mkdir(parents=True, exist_ok=True)
+    payload: dict = {
+        "action": "trade_opened",
+        "position_id": position_id,
+        "symbol": symbol,
+        "biome": biome,
+        "side": side,
+        "entry_price": entry_price,
+        "quantity": quantity,
+        "stop_loss": stop_loss,
+        "take_profit": take_profit,
+    }
+    if strategy_type:
+        payload["strategy_type"] = strategy_type
+    record = {
+        "timestamp": timestamp,
+        "event_type": "action_executed",
+        "source": ant_id,
+        "payload": payload,
+    }
+    (paper_dir / f"{ant_id}.jsonl").open("a", encoding="utf-8").write(
+        json.dumps(record) + "\n"
+    )
+
+
+class TestLedgerRecovery:
+    """Na herstart worden open posities hersteld in de ledger voor SL/TP bewaking."""
+
+    def test_position_restored_in_ledger_on_restart(self, tmp_path: Path) -> None:
+        """Recente positie met volledige payload → aanwezig in ledger na herstart."""
+        ts = (datetime.now(tz=timezone.utc) - timedelta(hours=1)).isoformat()
+        pos_id = str(uuid.uuid4())
+        _write_full_paper_log(tmp_path / "paper", "old-ant", pos_id, "BTC-EUR", ts)
+        ant = make_ant(logs_root=tmp_path)
+        assert len(ant._ledger.open_positions) == 1
+        pos = ant._ledger.open_positions[0]
+        assert pos.position_id == pos_id
+        assert pos.symbol == "BTC-EUR"
+        assert pos.entry_price == pytest.approx(50_000.0)
+        assert pos.stop_loss_price == pytest.approx(49_000.0)
+        assert pos.take_profit_price == pytest.approx(51_500.0)
+
+    def test_closed_position_not_restored_in_ledger(self, tmp_path: Path) -> None:
+        """Positie met bijbehorende trade_closed → NIET in ledger na herstart."""
+        ts = (datetime.now(tz=timezone.utc) - timedelta(hours=1)).isoformat()
+        pos_id = str(uuid.uuid4())
+        paper_dir = tmp_path / "paper"
+        _write_full_paper_log(paper_dir, "old-ant", pos_id, "BTC-EUR", ts)
+        # Schrijf ook trade_closed voor dezelfde positie
+        closed_record = {
+            "timestamp": ts,
+            "event_type": "action_executed",
+            "source": "old-ant",
+            "payload": {"action": "trade_closed", "position_id": pos_id, "symbol": "BTC-EUR"},
+        }
+        (paper_dir / "old-ant.jsonl").open("a", encoding="utf-8").write(
+            json.dumps(closed_record) + "\n"
+        )
+        ant = make_ant(logs_root=tmp_path)
+        assert len(ant._ledger.open_positions) == 0
+
+    def test_incomplete_payload_skips_ledger_but_keeps_open_symbol(self, tmp_path: Path) -> None:
+        """Positie zonder price-velden → niet in ledger (warning), wel in _open_symbols."""
+        ts = (datetime.now(tz=timezone.utc) - timedelta(hours=1)).isoformat()
+        pos_id = str(uuid.uuid4())
+        # Gebruik de minimale helper (geen entry_price/quantity/sl/tp)
+        _write_paper_log_with_ts(
+            tmp_path / "paper", "old-ant", "trade_opened", pos_id, "ETH-EUR", ts
+        )
+        ant = make_ant(logs_root=tmp_path)
+        assert "ETH-EUR" in ant._open_symbols       # symbool hersteld
+        assert len(ant._ledger.open_positions) == 0  # maar geen ledger-reconstructie
+
+    def test_multiple_positions_all_restored(self, tmp_path: Path) -> None:
+        """Meerdere open posities → allemaal in ledger na herstart."""
+        ts = (datetime.now(tz=timezone.utc) - timedelta(hours=2)).isoformat()
+        paper_dir = tmp_path / "paper"
+        ids_symbols = [
+            (str(uuid.uuid4()), "BTC-EUR", 50_000.0, 49_000.0, 51_500.0),
+            (str(uuid.uuid4()), "ETH-EUR", 3_000.0, 2_940.0, 3_090.0),
+        ]
+        for pid, sym, ep, sl, tp in ids_symbols:
+            _write_full_paper_log(paper_dir, "old-ant", pid, sym, ts,
+                                  entry_price=ep, stop_loss=sl, take_profit=tp)
+        ant = make_ant(logs_root=tmp_path)
+        assert len(ant._ledger.open_positions) == 2
+        recovered_syms = {p.symbol for p in ant._ledger.open_positions}
+        assert recovered_syms == {"BTC-EUR", "ETH-EUR"}
+
+    def test_exits_evaluated_on_recovered_positions(self, tmp_path: Path) -> None:
+        """Na herstart bewaakt de exit-evaluator SL/TP op herstelde posities."""
+        ts = (datetime.now(tz=timezone.utc) - timedelta(hours=1)).isoformat()
+        pos_id = str(uuid.uuid4())
+        paper_dir = tmp_path / "paper"
+        _write_full_paper_log(
+            paper_dir, "old-ant", pos_id, "BTC-EUR", ts,
+            entry_price=50_000.0,
+            stop_loss=49_000.0,
+            take_profit=51_500.0,
+        )
+        ant = make_ant(logs_root=tmp_path)
+        assert len(ant._ledger.open_positions) == 1
+
+        # Zet prijs boven take-profit → exit moet worden getriggerd
+        ant.biome_registry.get.return_value = _make_adapter_with_price(52_000.0)
+        ant._process_exits()
+
+        assert len(ant._ledger.open_positions) == 0
+        assert len(ant._ledger.closed_trades) == 1
+        assert ant._ledger.closed_trades[0].exit_reason.startswith("take_profit")
 
 
 # ---------------------------------------------------------------------------
