@@ -322,9 +322,9 @@ class TestExitFirstDoctrine:
             call_order.append("exits")
             original_exits()
 
-        def entries_spy():
+        def entries_spy(**kwargs):
             call_order.append("entries")
-            original_entries()
+            original_entries(**kwargs)
 
         ant._process_exits = exits_spy
         ant._process_new_signals = entries_spy

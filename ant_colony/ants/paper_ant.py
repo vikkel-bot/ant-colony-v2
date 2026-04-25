@@ -37,6 +37,7 @@ from pathlib import Path
 
 from ant_colony.ants._heartbeat import HeartbeatThread
 from ant_colony.ants.time_filter_ant import read_latest_time_signal
+from ant_colony.ants._queen_regime import read_latest_queen_regime
 from ant_colony.biome.biome_registry import BiomeRegistry
 from ant_colony.colony.scheduler.colony_scheduler import ColonyScheduler
 from ant_colony.entry.entry_signal import EntrySignal, SignalSource
@@ -62,6 +63,12 @@ _SIGNAL_VALIDITY_TICKS = 2       # signal geldig voor heartbeat_interval × 2 se
 _MAX_OPEN_POSITIONS    = 10      # maximaal 10 open posities tegelijk (1 per symbool)
 _STALE_SIGNAL_MINUTES  = 5       # signalen ouder dan dit worden genegeerd
 _ZOMBIE_POSITION_HOURS = 168     # posities zonder close ouder dan dit → zombie (7 dagen)
+
+# --- Regime-gebaseerde entry filtering ---
+_SIDEWAYS_ALLOWED_STRATEGY_TYPES = frozenset(["mean_reversion", "rsi_based"])
+_VOLATILE_MIN_SHARPE    = 0.3    # minimale sharpe voor entry in VOLATILE regime
+_VOLATILE_SL_MULTIPLIER = 1.5    # SL-percentage 50% groter in VOLATILE regime
+_VOLATILE_CAPITAL_MULT  = 0.5    # positiegrootte halveren in VOLATILE regime
 
 
 class PaperAnt:
@@ -204,13 +211,15 @@ class PaperAnt:
         self._process_exits()
         open_before = len(self._ledger.open_positions)
         trading_allowed = self._is_trading_allowed()
-        scout_count    = self._process_new_signals()
-        approved_count = self._process_approved_candidates()
-        research_count = self._process_research_candidates()
+        regime         = self._read_regime()
+        scout_count    = self._process_new_signals(regime=regime)
+        approved_count = self._process_approved_candidates(regime=regime)
+        research_count = self._process_research_candidates(regime=regime)
         opened = len(self._ledger.open_positions) - open_before
         filtered = 1 if not trading_allowed else 0
         self._log.info(
-            "paper tick | scout=%d research=%d approved=%d filtered=%s opened=%d",
+            "paper tick | regime=%s scout=%d research=%d approved=%d filtered=%s opened=%d",
+            regime or "—",
             scout_count, research_count, approved_count,
             "blocked" if filtered else 0,
             opened,
@@ -278,6 +287,58 @@ class PaperAnt:
                 sig.get("session", "unknown"),
             )
         return allowed
+
+    def _read_regime(self) -> str | None:
+        """Lees Queen regime uit ANT_LOGS/queen/regime.jsonl. None = fail-open."""
+        if self.logs_root is None:
+            return None
+        return read_latest_queen_regime(self.logs_root)
+
+    def _is_entry_allowed_by_regime(
+        self,
+        regime: str | None,
+        *,
+        strategy_type: str | None = None,
+        sharpe: float | None = None,
+        is_scout: bool = False,
+        symbol: str = "",
+    ) -> tuple[bool, str]:
+        """
+        Controleer of een entry is toegestaan gegeven het huidige marktregime.
+
+        SIDEWAYS: alleen mean_reversion en rsi_based; scout-signalen geblokkeerd.
+        TRENDING: alles toegestaan (default/fail-open gedrag).
+        VOLATILE: alleen kandidaten met sharpe > _VOLATILE_MIN_SHARPE.
+        None:     fail-open → alle entries toegestaan.
+
+        Returns:
+            (allowed: bool, reden: str)
+        """
+        if regime is None or regime == "TRENDING":
+            return True, ""
+
+        if regime == "SIDEWAYS":
+            if is_scout:
+                return (
+                    False,
+                    f"{symbol} scout-signaal niet toegestaan in SIDEWAYS regime",
+                )
+            if strategy_type and strategy_type not in _SIDEWAYS_ALLOWED_STRATEGY_TYPES:
+                return (
+                    False,
+                    f"{symbol} {strategy_type} niet toegestaan in SIDEWAYS regime",
+                )
+            return True, ""
+
+        if regime == "VOLATILE":
+            if sharpe is not None and sharpe <= _VOLATILE_MIN_SHARPE:
+                return (
+                    False,
+                    f"{symbol} sharpe={sharpe:.2f} ≤ {_VOLATILE_MIN_SHARPE} in VOLATILE regime",
+                )
+            return True, ""
+
+        return True, ""  # onbekend regime → fail-open
 
     @staticmethod
     def _is_stale_timestamp(ts_str: str | None) -> bool:
@@ -355,7 +416,7 @@ class PaperAnt:
             )
             return None
 
-    def _process_new_signals(self) -> int:
+    def _process_new_signals(self, regime: str | None = None) -> int:
         """Verwerk nieuwe scout-signalen en open posities indien van toepassing."""
         if not self._is_trading_allowed():
             return 0
@@ -386,7 +447,15 @@ class PaperAnt:
                 self._log.debug("Negatieve price_move voor %s — overgeslagen", symbol)
                 continue
 
-            self._try_open_position(sig)
+            # Regime-filter: scout-signalen zijn price_move/volume_spike, niet RSI/Bollinger
+            allowed, reason = self._is_entry_allowed_by_regime(
+                regime, is_scout=True, symbol=symbol
+            )
+            if not allowed:
+                self._log.info("Entry geblokkeerd: %s", reason)
+                continue
+
+            self._try_open_position(sig, regime=regime)
 
         return len(signals)
 
@@ -574,7 +643,7 @@ class PaperAnt:
                 pass
         return seen
 
-    def _process_research_candidates(self) -> int:
+    def _process_research_candidates(self, regime: str | None = None) -> int:
         """Verwerk ACCEPTED StrategyCandidate records uit ANT_LOGS/research/*.jsonl."""
         if not self._is_trading_allowed():
             return 0
@@ -614,14 +683,14 @@ class PaperAnt:
                         )
                         continue
 
-                    self._open_from_research_candidate(payload)
+                    self._open_from_research_candidate(payload, regime=regime)
 
             except OSError:
                 self._log.warning("Kan research-log niet lezen: %s", jsonl_path)
 
         return count
 
-    def _open_from_research_candidate(self, payload: dict) -> None:
+    def _open_from_research_candidate(self, payload: dict, regime: str | None = None) -> None:
         """Open een paper positie op basis van een candidate_accepted research record."""
         symbol = str(payload.get("symbol") or "")
         if not symbol:
@@ -639,6 +708,18 @@ class PaperAnt:
 
         tp_pct = float(payload.get("tp_pct") or _TP_PCT)
         sl_pct = float(payload.get("sl_pct") or _SL_PCT)
+
+        # Regime-filter: strategy_type en sharpe valideren
+        sharpe = float(payload.get("sharpe") or payload.get("sharpe_ratio") or 0.0)
+        allowed, reason = self._is_entry_allowed_by_regime(
+            regime,
+            strategy_type=strategy_type,
+            sharpe=sharpe,
+            symbol=symbol,
+        )
+        if not allowed:
+            self._log.info("Entry geblokkeerd: %s", reason)
+            return
 
         if self._has_open_research_position(symbol, strategy_type):
             self._log.debug(
@@ -662,7 +743,7 @@ class PaperAnt:
             "biome":         str(payload.get("biome") or self.mission.market_scope.biome),
             "signal_id":     payload.get("candidate_id"),
         }
-        self._try_open_position(sig, strategy_type=strategy_type, sl_pct=sl_pct, tp_pct=tp_pct)
+        self._try_open_position(sig, strategy_type=strategy_type, sl_pct=sl_pct, tp_pct=tp_pct, regime=regime)
 
     def _try_open_position(
         self,
@@ -671,6 +752,7 @@ class PaperAnt:
         strategy_type: str | None = None,
         sl_pct: float | None = None,
         tp_pct: float | None = None,
+        regime: str | None = None,
     ) -> None:
         """Bouw een EntrySignal en probeer een LONG positie te openen via PaperBroker.
 
@@ -719,11 +801,22 @@ class PaperAnt:
 
         used_sl_pct = sl_pct if sl_pct is not None else _SL_PCT
         used_tp_pct = tp_pct if tp_pct is not None else _TP_PCT
+        capital_fraction = _TRADE_CAPITAL_FRACTION
+
+        # VOLATILE: grotere SL-buffer en kleinere positiegrootte
+        if regime == "VOLATILE":
+            used_sl_pct  = used_sl_pct * _VOLATILE_SL_MULTIPLIER
+            capital_fraction = capital_fraction * _VOLATILE_CAPITAL_MULT
+            self._log.debug(
+                "VOLATILE aanpassing | %s sl_pct=%.3f capital_fraction=%.3f",
+                symbol, used_sl_pct, capital_fraction,
+            )
+
         sl = entry_price * (1.0 - used_sl_pct)
         tp = entry_price * (1.0 + used_tp_pct)
 
         capital_available = self._ledger.capital_available
-        capital_per_trade = capital_available * _TRADE_CAPITAL_FRACTION
+        capital_per_trade = capital_available * capital_fraction
         suggested_qty     = capital_per_trade / entry_price if entry_price > 0 else None
 
         try:
@@ -780,7 +873,7 @@ class PaperAnt:
     # Approved-kandidaten verwerken
     # ------------------------------------------------------------------
 
-    def _process_approved_candidates(self) -> int:
+    def _process_approved_candidates(self, regime: str | None = None) -> int:
         """Verwerk APPROVED StrategyCandidate records uit ANT_LOGS/approved/*.jsonl."""
         if not self._is_trading_allowed():
             return 0
@@ -815,14 +908,14 @@ class PaperAnt:
                         )
                         continue
 
-                    self._open_from_candidate(record)
+                    self._open_from_candidate(record, regime=regime)
 
             except OSError:
                 self._log.warning("Kan approved-log niet lezen: %s", jsonl_path)
 
         return count
 
-    def _open_from_candidate(self, record: dict) -> None:
+    def _open_from_candidate(self, record: dict, regime: str | None = None) -> None:
         """Open een paper positie op basis van een APPROVED StrategyCandidate record."""
         market_scope = record.get("market_scope") or {}
         # Ondersteunt zowel "symbol": "BTC-EUR" als "symbols": ["BTC-EUR", ...]
@@ -860,13 +953,30 @@ class PaperAnt:
             self._log.debug("Al een open positie voor %s — approved candidate overgeslagen", symbol)
             return
 
+        # Regime-filter op approved candidates
+        strategy_type = str(
+            record.get("strategy_type")
+            or (record.get("parameters") or {}).get("strategy_type")
+            or "unknown"
+        )
+        sharpe = float(
+            record.get("sharpe_ratio") or record.get("sharpe")
+            or record.get("fitness_score") or 0.0
+        )
+        allowed, reason = self._is_entry_allowed_by_regime(
+            regime, strategy_type=strategy_type, sharpe=sharpe, symbol=symbol
+        )
+        if not allowed:
+            self._log.info("Entry geblokkeerd: %s", reason)
+            return
+
         sig = {
             "symbol":        symbol,
             "current_price": price,
             "confidence":    float(record.get("fitness_score") or 0.7),
             "biome":         str(record.get("biome") or self.mission.market_scope.biome),
         }
-        self._try_open_position(sig)
+        self._try_open_position(sig, regime=regime)
 
     # ------------------------------------------------------------------
     # Scout-signalen lezen
