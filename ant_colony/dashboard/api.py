@@ -414,6 +414,36 @@ class EquitiesStatusResponse(BaseModel):
     last_piotroski_ts: str | None = None
     last_breakout_ts: str | None = None
     last_dividend_ts: str | None = None
+    # EquitiesPaperAnt statistieken (optioneel, backward compatible)
+    eq_paper_open: int = 0
+    eq_paper_total_pnl_eur: float | None = None
+    eq_paper_winrate: float | None = None
+    eq_paper_closed_count: int = 0
+
+
+class NewsLatestResponse(BaseModel):
+    available: bool
+    timestamp: str | None = None
+    market_sentiment: str | None = None
+    sentiment_score: float | None = None
+    crypto_sentiment: str | None = None
+    crypto_score: float | None = None
+    equities_sentiment: str | None = None
+    equities_score: float | None = None
+    top_headlines: list[str] = []
+    article_count: int | None = None
+    weekend: bool = False
+
+
+class EquitiesBriefingResponse(BaseModel):
+    available: bool
+    timestamp: str | None = None
+    market_sentiment: str | None = None
+    top_sectors: list[str] = []
+    rs_regime: str | None = None
+    headlines: list[str] = []
+    recommendation: str | None = None
+    age_hours: float | None = None
 
 
 _CLAUDE_SESSION_LIMIT_EUR = 1.0   # max €1 per dashboard-activatie
@@ -1532,7 +1562,8 @@ def create_router(ctx: ColonyContext) -> APIRouter:
                 piotroski_candidates=[], breakout_signals=[], dividend_candidates=[],
             )
 
-        data = _read_equities_data(ctx.logs_root)
+        data  = _read_equities_data(ctx.logs_root)
+        paper = _read_equities_paper_stats(ctx.logs_root)
         return EquitiesStatusResponse(
             enabled=enabled,
             sector_long=[EquitiesSectorEntry(**e) for e in data["sector_long"]],
@@ -1546,7 +1577,35 @@ def create_router(ctx: ColonyContext) -> APIRouter:
             last_piotroski_ts=data["last_piotroski_ts"],
             last_breakout_ts=data["last_breakout_ts"],
             last_dividend_ts=data["last_dividend_ts"],
+            eq_paper_open=paper["eq_paper_open"],
+            eq_paper_total_pnl_eur=paper["eq_paper_total_pnl_eur"],
+            eq_paper_winrate=paper["eq_paper_winrate"],
+            eq_paper_closed_count=paper["eq_paper_closed_count"],
         )
+
+    # ------------------------------------------------------------------
+    # GET /api/news/latest
+    # ------------------------------------------------------------------
+
+    @router.get("/news/latest", response_model=NewsLatestResponse)
+    def get_news_latest() -> NewsLatestResponse:
+        """Meest recente NewsAnt snapshot: sentiment, score, top 3 headlines."""
+        if ctx.logs_root is None:
+            return NewsLatestResponse(available=False)
+        data = _read_latest_news(ctx.logs_root)
+        return NewsLatestResponse(**data)
+
+    # ------------------------------------------------------------------
+    # GET /api/equities/briefing
+    # ------------------------------------------------------------------
+
+    @router.get("/equities/briefing", response_model=EquitiesBriefingResponse)
+    def get_equities_briefing() -> EquitiesBriefingResponse:
+        """Meest recente marktopening briefing (<24u) uit queen/briefing.jsonl."""
+        if ctx.logs_root is None:
+            return EquitiesBriefingResponse(available=False)
+        data = _read_latest_briefing(ctx.logs_root)
+        return EquitiesBriefingResponse(**data)
 
     # ------------------------------------------------------------------
     # GET /api/claude-ant/status
@@ -2931,3 +2990,179 @@ def _read_equities_data(logs_root: Path) -> dict:
         "last_breakout_ts":      last_breakout_ts,
         "last_dividend_ts":      last_dividend_ts,
     }
+
+
+# ---------------------------------------------------------------------------
+# Intern — EquitiesPaperAnt statistieken
+# ---------------------------------------------------------------------------
+
+def _read_equities_paper_stats(logs_root: Path) -> dict:
+    """
+    Bereken EquitiesPaperAnt trade-statistieken vanuit ANT_LOGS/paper/*.jsonl.
+
+    Retourneert:
+      eq_paper_open:          int   — openstaande equities posities
+      eq_paper_total_pnl_eur: float — gerealiseerde netto-PnL gesloten trades
+      eq_paper_winrate:       float — fractie trades met positieve PnL (0–1)
+      eq_paper_closed_count:  int   — totaal gesloten equities trades
+    """
+    _EMPTY: dict = {
+        "eq_paper_open": 0,
+        "eq_paper_total_pnl_eur": None,
+        "eq_paper_winrate": None,
+        "eq_paper_closed_count": 0,
+    }
+    paper_dir = logs_root / "paper"
+    if not paper_dir.exists():
+        return _EMPTY
+
+    opened_ids: set[str] = set()
+    closed_ids: set[str] = set()
+    total_pnl    = 0.0
+    win_count    = 0
+    closed_count = 0
+
+    try:
+        for path in paper_dir.glob("*.jsonl"):
+            if "_trades" in path.name:
+                continue
+            try:
+                for line in path.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                        p   = rec.get("payload") or {}
+                        if str(p.get("biome") or "") != "equities":
+                            continue
+                        action = p.get("action")
+                        pos_id = str(p.get("position_id") or "")
+                        if not pos_id:
+                            continue
+                        if action == "trade_opened":
+                            opened_ids.add(pos_id)
+                        elif action == "trade_closed":
+                            closed_ids.add(pos_id)
+                            try:
+                                pnl = float(p.get("realized_pnl") or 0)
+                                total_pnl    += pnl
+                                closed_count += 1
+                                if pnl > 0:
+                                    win_count += 1
+                            except (TypeError, ValueError):
+                                pass
+                    except json.JSONDecodeError:
+                        pass
+            except OSError:
+                pass
+    except Exception:
+        pass
+
+    open_count = len(opened_ids - closed_ids)
+    winrate    = round(win_count / closed_count, 4) if closed_count > 0 else None
+    pnl_total  = round(total_pnl, 4) if closed_count > 0 else None
+
+    return {
+        "eq_paper_open":          open_count,
+        "eq_paper_total_pnl_eur": pnl_total,
+        "eq_paper_winrate":       winrate,
+        "eq_paper_closed_count":  closed_count,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Intern — NewsAnt snapshot reader
+# ---------------------------------------------------------------------------
+
+def _read_latest_news(logs_root: Path) -> dict:
+    """
+    Lees meest recente NewsAnt snapshot uit ANT_LOGS/news/*.json.
+    Sorteert op mtime (nieuwste eerst). Retourneert {"available": False} bij fout.
+    """
+    news_dir = logs_root / "news"
+    if not news_dir.exists():
+        return {"available": False}
+    try:
+        snapshots = sorted(
+            news_dir.glob("*.json"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if not snapshots:
+            return {"available": False}
+        raw = json.loads(snapshots[0].read_text(encoding="utf-8"))
+        headlines = [h for h in (raw.get("top_headlines") or []) if h][:3]
+        try:
+            article_count: int | None = int(raw["article_count"]) if raw.get("article_count") is not None else None
+        except (TypeError, ValueError):
+            article_count = None
+
+        def _f(key: str) -> float | None:
+            v = raw.get(key)
+            if v is None:
+                return None
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return None
+
+        return {
+            "available":          True,
+            "timestamp":          raw.get("timestamp"),
+            "market_sentiment":   raw.get("market_sentiment"),
+            "sentiment_score":    _f("sentiment_score"),
+            "crypto_sentiment":   raw.get("crypto_sentiment"),
+            "crypto_score":       _f("crypto_score"),
+            "equities_sentiment": raw.get("equities_sentiment"),
+            "equities_score":     _f("equities_score"),
+            "top_headlines":      headlines,
+            "article_count":      article_count,
+            "weekend":            bool(raw.get("weekend", False)),
+        }
+    except Exception:
+        return {"available": False}
+
+
+# ---------------------------------------------------------------------------
+# Intern — marktopening briefing reader
+# ---------------------------------------------------------------------------
+
+def _read_latest_briefing(logs_root: Path) -> dict:
+    """
+    Lees meest recente market_opening_briefing uit ANT_LOGS/queen/briefing.jsonl.
+    Retourneert {"available": False} als ouder dan 24u of bestand ontbreekt.
+    """
+    briefing_file = logs_root / "queen" / "briefing.jsonl"
+    if not briefing_file.exists():
+        return {"available": False}
+    try:
+        last_line: str | None = None
+        with briefing_file.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                stripped = line.strip()
+                if stripped:
+                    last_line = stripped
+        if last_line is None:
+            return {"available": False}
+        data = json.loads(last_line)
+        ts   = _parse_ts(data.get("timestamp"))
+        if ts is None:
+            return {"available": False}
+        age_hours = round(
+            (datetime.now(tz=timezone.utc) - ts).total_seconds() / 3600.0, 2
+        )
+        if age_hours > 24.0:
+            return {"available": False, "age_hours": age_hours}
+        return {
+            "available":        True,
+            "timestamp":        data.get("timestamp"),
+            "market_sentiment": data.get("market_sentiment"),
+            "top_sectors":      list(data.get("top_sectors") or []),
+            "rs_regime":        data.get("rs_regime"),
+            "headlines":        [h for h in (data.get("headlines") or []) if h][:3],
+            "recommendation":   data.get("recommendation"),
+            "age_hours":        age_hours,
+        }
+    except Exception:
+        return {"available": False}

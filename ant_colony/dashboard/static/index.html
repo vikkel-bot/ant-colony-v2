@@ -1127,6 +1127,8 @@ const S = {
   queenStatus: null,
   perfChart:   { points:[], total_pnl:0, curve_label:'vandaag', dag:0, week:0, maand:0, jaar:0, alltime:0 },
   equities:    null,
+  news:        null,
+  briefing:    null,
   antEvents:   {},
   expandedAnt:    null,
   expandedQueen:  false,
@@ -1198,7 +1200,7 @@ async function fetchAll() {
   const get = url => _fetchQ(() => fetch(url)
     .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
     .catch(e => { console.error(`[dashboard] GET ${url} failed:`, e.message); return null; }));
-  const [st, me, br, cap, pos, ti, act, qs, pc, eq, oq] = await Promise.all([
+  const [st, me, br, cap, pos, ti, act, qs, pc, eq, oq, nw, brf] = await Promise.all([
     get('/api/status'), get('/api/metrics'),
     get('/api/brokers'), get('/api/capital'),
     get('/api/positions'),
@@ -1206,6 +1208,8 @@ async function fetchAll() {
     get('/api/queen/status'), get('/api/performance/chart'),
     get('/api/equities/status'),
     get('/api/operator/queue'),
+    get('/api/news/latest'),
+    get('/api/equities/briefing'),
   ]);
 
   if (st) {
@@ -1231,6 +1235,8 @@ async function fetchAll() {
   if (qs)  S.queenStatus = qs;
   if (pc)  S.perfChart   = pc;
   if (eq)  S.equities    = eq;
+  if (nw)  S.news        = nw;
+  if (brf) S.briefing    = brf;
   if (oq)  { S.opQueue = oq.items || []; renderOperatorHistory(); }
 
   render();
@@ -2247,6 +2253,126 @@ function renderEquities() {
     <span>${statusTxt}</span>
   </div>`;
 
+  // ── MARKTOPENING BRIEFING ─────────────────────
+  const brf = S.briefing;
+  let briefingCard = '';
+  if (brf && brf.available) {
+    const sentColors = { bullish: ['#d1fae5','#065f46'], bearish: ['#fee2e2','#991b1b'], neutral: ['#f3f4f6','#6b7280'] };
+    const sc = sentColors[brf.market_sentiment] || sentColors.neutral;
+    const sentBadge = brf.market_sentiment
+      ? `<span style="font-size:9px;font-weight:700;text-transform:uppercase;padding:1px 5px;border-radius:3px;background:${sc[0]};color:${sc[1]}">${brf.market_sentiment}</span>`
+      : '';
+    const ageStr  = brf.age_hours != null ? `${brf.age_hours.toFixed(1)}u geleden` : '';
+    const regBadge = brf.rs_regime
+      ? `<span class="eq-score-pill" style="margin-left:6px">${brf.rs_regime}</span>`
+      : '';
+    const sectorsHtml = brf.top_sectors && brf.top_sectors.length
+      ? `<div style="font-size:10px;color:var(--muted);margin-bottom:4px">Focus: <b>${brf.top_sectors.join(' · ')}</b>${regBadge}</div>`
+      : '';
+    const recHtml = brf.recommendation
+      ? `<div style="font-size:11px;color:var(--text);margin-bottom:6px">${brf.recommendation}</div>`
+      : '';
+    const hlItems = (brf.headlines || []).slice(0, 3);
+    const hlHtml  = hlItems.length
+      ? `<ul style="list-style:disc;padding-left:14px;font-size:10px;color:var(--muted)">${hlItems.map(h => `<li style="margin-bottom:2px">${h}</li>`).join('')}</ul>`
+      : '';
+    briefingCard = `<div class="card" style="margin-bottom:10px">
+      <div class="eq-header">
+        <div class="card-title" style="margin:0">Marktopening Briefing</div>
+        <div style="display:flex;align-items:center;gap:6px">${sentBadge}<span style="font-size:9px;color:var(--faint)">${ageStr}</span></div>
+      </div>
+      ${sectorsHtml}${recHtml}${hlHtml}
+    </div>`;
+  }
+
+  // ── NEWS ANT ──────────────────────────────────
+  const nw = S.news;
+  let newsCard;
+  {
+    const avail = nw && nw.available;
+    const nwBadge = avail && nw.market_sentiment
+      ? eqBadge(nw.market_sentiment, nw.market_sentiment === 'bullish' ? 'actief' : nw.market_sentiment === 'bearish' ? 'signaal' : 'wacht')
+      : eqBadge('wacht', 'wacht');
+    let nwRows;
+    if (!avail) {
+      nwRows = '<div class="empty" style="padding:8px 0">NewsAnt niet actief</div>';
+    } else {
+      const fScore = v => v == null ? '—' : (v > 0 ? '+' : '') + Number(v).toFixed(2);
+      const sCls   = v => v == null ? 'eq-mut' : v > 0 ? 'eq-pos' : v < 0 ? 'eq-neg' : 'eq-mut';
+      nwRows = `<div class="eq-row">
+        <span class="eq-sect">Markt</span>
+        <span class="eq-val ${sCls(nw.sentiment_score)}">${fScore(nw.sentiment_score)}</span>
+        <span style="font-size:10px;color:var(--faint);margin-left:4px">${nw.market_sentiment||'—'}</span>
+      </div><div class="eq-row">
+        <span class="eq-sect">Crypto</span>
+        <span class="eq-val ${sCls(nw.crypto_score)}">${fScore(nw.crypto_score)}</span>
+        <span style="font-size:10px;color:var(--faint);margin-left:4px">${nw.crypto_sentiment||'—'}</span>
+      </div><div class="eq-row">
+        <span class="eq-sect">Equities</span>
+        <span class="eq-val ${sCls(nw.equities_score)}">${fScore(nw.equities_score)}</span>
+        <span style="font-size:10px;color:var(--faint);margin-left:4px">${nw.equities_sentiment||'—'}</span>
+      </div>`;
+      const hl = (nw.top_headlines || []).slice(0, 3);
+      if (hl.length) {
+        nwRows += `<div style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--faint);margin:6px 0 2px">Headlines</div>`;
+        nwRows += hl.map(h => `<div style="font-size:10px;color:var(--muted);padding:2px 0;border-top:1px solid var(--border)">${h}</div>`).join('');
+      }
+    }
+    const nwTS  = avail ? fTS(nw.timestamp) : null;
+    const nwArt = avail && nw.article_count != null ? `${nw.article_count} art. · ` : '';
+    newsCard = `<div class="card">
+      <div class="eq-header">
+        <div class="card-title" style="margin:0">NewsAnt</div>
+        ${nwBadge}
+      </div>
+      ${nwRows}
+      ${nwTS ? `<div class="ts-line">${nwArt}Poll: ${nwTS}</div>` : ''}
+    </div>`;
+  }
+
+  // ── EQUITIES PAPER ANT ────────────────────────
+  let paperCard;
+  {
+    const eqPos   = ((S.positions && S.positions.positions) || []).filter(p => p.biome === 'equities');
+    const paperBadge = eqPos.length > 0
+      ? eqBadge(eqPos.length + ' open', 'actief')
+      : eqBadge('geen posities', 'wacht');
+    let paperRows;
+    if (!eqPos.length) {
+      paperRows = '<div class="empty" style="padding:8px 0">Geen open equities posities</div>';
+    } else {
+      paperRows = eqPos.map(p => {
+        const cls2   = p.pnl_eur == null ? '' : p.pnl_eur > 0 ? 'eq-pos' : 'eq-neg';
+        const pnlStr = p.pnl_eur != null ? fPnL(p.pnl_eur) : '—';
+        const tslStr = p.trailing_stop_price != null ? fPrice2(p.trailing_stop_price) : '—';
+        return `<div class="eq-row">
+          <span class="eq-sym">${p.symbol}</span>
+          <span class="eq-sect">TSL ${tslStr}</span>
+          <span class="eq-val ${cls2}" style="margin-left:4px">${pnlStr}</span>
+        </div>`;
+      }).join('');
+    }
+    let statsHtml = '';
+    if (eq.eq_paper_closed_count > 0) {
+      const wr     = eq.eq_paper_winrate != null ? (eq.eq_paper_winrate * 100).toFixed(0) + '% win' : '—';
+      const pnlNet = eq.eq_paper_total_pnl_eur != null ? fPnL(eq.eq_paper_total_pnl_eur) : '—';
+      const pnlColor = (eq.eq_paper_total_pnl_eur || 0) >= 0 ? 'var(--pnl-pos)' : 'var(--pnl-neg)';
+      statsHtml = `<div style="display:flex;justify-content:space-between;font-size:10px;color:var(--muted);margin-top:6px;padding-top:4px;border-top:1px solid var(--border)">
+        <span>${eq.eq_paper_closed_count} gesloten</span>
+        <span>${wr}</span>
+        <span style="font-weight:700;color:${pnlColor}">${pnlNet}</span>
+      </div>`;
+    }
+    paperCard = `<div class="card">
+      <div class="eq-header">
+        <div class="card-title" style="margin:0">EquitiesPaper</div>
+        ${paperBadge}
+      </div>
+      ${paperRows}
+      ${statsHtml}
+    </div>`;
+  }
+
   // ── SECTOR ROTATIE ──────────────────────────
   const sectorLong    = eq.sector_long    || [];
   const sectorNeutral = eq.sector_neutral || [];
@@ -2294,7 +2420,6 @@ function renderEquities() {
   if (!piotList.length && !brkList.length) {
     piotRows = '<div class="empty" style="padding:8px 0">Nog geen Piotroski kandidaten</div>';
   } else {
-    // Breakout signals first
     if (brkList.length) {
       piotRows += `<div style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--faint);margin:4px 0 2px">Breakout signalen</div>`;
       piotRows += brkList.slice(0, 5).map(b => `<div class="eq-row">
@@ -2360,7 +2485,7 @@ function renderEquities() {
     ${divTS ? `<div class="ts-line">Laatste scan: ${divTS}</div>` : ''}
   </div>`;
 
-  el.innerHTML = enabledHtml + `<div class="eq-grid">${sectorCard}${piotCard}${divCard}</div>`;
+  el.innerHTML = enabledHtml + briefingCard + `<div class="eq-grid">${newsCard}${paperCard}${sectorCard}${piotCard}${divCard}</div>`;
 }
 
 function fPrice2(v) {
