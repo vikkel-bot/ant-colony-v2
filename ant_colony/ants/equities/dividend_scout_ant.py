@@ -47,7 +47,7 @@ _DIVIDEND_ARISTOCRATS: list[str] = [
     "ABT", "ABBV", "AFL", "APD", "ATO", "ADP", "BDX", "CAT", "CB",
     "CVX", "CHD", "CINF", "CTAS", "CLX", "KO", "CL", "ED", "DOV",
     "ECL", "EMR", "ESS", "EXPD", "FAST", "FRT", "GPC", "GWW", "HRL",
-    "ITW", "IBM", "JNJ", "KMB", "LOW", "MKC", "MCD", "MDT", "MMM",
+    "ITW", "IBM", "JNJ", "KMB", "LOW", "MKC", "MCD", "MDT",
     "NUE", "O",   "PH",  "PNR", "PCAR", "PEP", "PPG", "PG", "SHW",
     "SPGI", "SWK", "SYY", "TGT", "WMT", "GD", "XOM",
 ]

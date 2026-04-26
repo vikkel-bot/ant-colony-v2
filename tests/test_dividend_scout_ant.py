@@ -420,8 +420,11 @@ class TestDividendAristocratsList:
         assert len(_DIVIDEND_ARISTOCRATS) > 0
 
     def test_known_aristocrats_present(self) -> None:
-        for symbol in ("KO", "JNJ", "PG", "MMM"):
+        for symbol in ("KO", "JNJ", "PG"):
             assert symbol in _DIVIDEND_ARISTOCRATS, f"{symbol} missing from aristocrats"
+
+    def test_mmm_removed_delisted(self) -> None:
+        assert "MMM" not in _DIVIDEND_ARISTOCRATS, "MMM moet verwijderd zijn (yfinance delisted)"
 
     def test_no_duplicate_symbols(self) -> None:
         assert len(_DIVIDEND_ARISTOCRATS) == len(set(_DIVIDEND_ARISTOCRATS))

@@ -54,17 +54,21 @@ _EQUITIES_QUERIES = ["earnings", "S&P 500", "NYSE", "NASDAQ"]
 
 _POSITIVE_WORDS = frozenset([
     "surge", "rally", "gain", "bullish", "growth",
-    "beat", "strong", "rise", "up",
+    "beat", "strong", "rise", "up", "profit", "record",
+    "outperform", "boom", "recovery", "optimism", "soar",
 ])
 _NEGATIVE_WORDS = frozenset([
     "crash", "fall", "drop", "bearish", "recession",
-    "warn", "weak", "down", "loss", "fear",
+    "warn", "weak", "down", "loss", "fear", "plunge", "slump",
+    "concern", "risk", "decline", "tumble", "selloff",
 ])
 
-_BULLISH_THRESHOLD = 0.1
-_BEARISH_THRESHOLD = -0.1
+_BULLISH_THRESHOLD = 0.02
+_BEARISH_THRESHOLD = -0.02
 
 _TOP_HEADLINES_COUNT = 3
+
+_sentiment_log = logging.getLogger("ant.news.sentiment")
 
 
 def _classify(score: float) -> str:
@@ -77,8 +81,11 @@ def _classify(score: float) -> str:
 
 def _sentiment_score(articles: list[dict]) -> float:
     """Bereken gemiddelde sentiment-score over een lijst artikelen."""
-    total = 0.0
-    count = 0
+    total       = 0.0
+    count       = 0
+    pos_total   = 0
+    neg_total   = 0
+    words_total = 0
     for art in articles:
         title = art.get("title") or ""
         desc  = art.get("description") or ""
@@ -88,9 +95,17 @@ def _sentiment_score(articles: list[dict]) -> float:
             continue
         pos   = sum(1 for w in words if w in _POSITIVE_WORDS)
         neg   = sum(1 for w in words if w in _NEGATIVE_WORDS)
-        total += (pos - neg) / len(words)
-        count += 1
-    return total / count if count > 0 else 0.0
+        total       += (pos - neg) / len(words)
+        pos_total   += pos
+        neg_total   += neg
+        words_total += len(words)
+        count       += 1
+    score = total / count if count > 0 else 0.0
+    _sentiment_log.debug(
+        "sentiment_score | artikelen=%d pos_hits=%d neg_hits=%d totaal_woorden=%d score=%.4f",
+        count, pos_total, neg_total, words_total, score,
+    )
+    return score
 
 
 class NewsAnt:
@@ -210,11 +225,12 @@ class NewsAnt:
 
         self._write_snapshot(now, snapshot)
         self._log.info(
-            "NewsAnt snapshot geschreven | articles=%d  market=%s  crypto=%s  equities=%s",
+            "NewsAnt snapshot geschreven | articles=%d  "
+            "market=%s(%.4f)  crypto=%s(%.4f)  equities=%s(%.4f)",
             len(all_articles),
-            snapshot["market_sentiment"],
-            snapshot["crypto_sentiment"],
-            snapshot["equities_sentiment"],
+            snapshot["market_sentiment"],  snapshot["sentiment_score"],
+            snapshot["crypto_sentiment"],  snapshot["crypto_score"],
+            snapshot["equities_sentiment"], snapshot["equities_score"],
         )
 
     def _fetch_queries(self, queries: list[str]) -> list[dict]:
