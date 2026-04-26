@@ -37,6 +37,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from ant_colony.ants._heartbeat import HeartbeatThread
+from ant_colony.ants._market_signal import read_latest_market_signal
 from ant_colony.biome.biome_registry import BiomeRegistry
 from ant_colony.colony.scheduler.colony_scheduler import ColonyScheduler
 from ant_colony.exit_chain.position import PaperPosition, PositionSide, PositionStatus
@@ -302,6 +303,10 @@ class EquitiesPaperAnt:
         if not scout_dir.exists():
             return
 
+        # Bearish-filter: bij negatief nieuws alleen top-1 sector (rank=1) toestaan
+        mkt = read_latest_market_signal(self.logs_root)
+        news_bearish = (mkt or {}).get("news_sentiment") == "bearish"
+
         for path in sorted(scout_dir.glob("*.jsonl")):
             try:
                 for line in path.read_text(encoding="utf-8").splitlines():
@@ -329,6 +334,14 @@ class EquitiesPaperAnt:
 
                     symbol = str(payload.get("symbol") or "")
                     if not symbol or symbol in self._open_symbols:
+                        continue
+
+                    momentum_rank = int(payload.get("momentum_rank") or 0)
+                    if news_bearish and momentum_rank > 1:
+                        self._log.debug(
+                            "Bearish nieuws — %s rank=%d overgeslagen (alleen top-1 toegestaan)",
+                            symbol, momentum_rank,
+                        )
                         continue
 
                     self._try_open_position(symbol, source="sector_scout")
@@ -433,13 +446,29 @@ class EquitiesPaperAnt:
             return
 
         capital_available = self._ledger.capital_available
-        capital_per_trade = capital_available * _TRADE_CAPITAL_FRACTION
+        capital_fraction  = _TRADE_CAPITAL_FRACTION
+        hard_sl_pct       = _HARD_SL_PCT
+
+        # Market signal: aanpassing op positiegrootte en harde SL (trailing stop ongewijzigd)
+        mkt = read_latest_market_signal(self.logs_root) if self.logs_root else None
+        if mkt is not None:
+            capital_fraction *= float(mkt.get("position_size_mult") or 1.0)
+            hard_sl_pct      *= float(mkt.get("sl_mult") or 1.0)
+            if mkt.get("combined_signal") not in (None, "normal"):
+                self._log.debug(
+                    "market_signal aanpassing | %s signal=%s pos_mult=%.2f sl_mult=%.2f",
+                    symbol, mkt.get("combined_signal"),
+                    float(mkt.get("position_size_mult") or 1.0),
+                    float(mkt.get("sl_mult") or 1.0),
+                )
+
+        capital_per_trade = capital_available * capital_fraction
         if capital_per_trade <= 0:
             self._log.debug("Geen kapitaal beschikbaar — %s overgeslagen", symbol)
             return
 
         quantity = capital_per_trade / price
-        sl_price = price * (1.0 - _HARD_SL_PCT)
+        sl_price = price * (1.0 - hard_sl_pct)
         tp_price = price * _DUMMY_TP_MULTIPLIER    # dummy — eigen exit-logica gebruikt trailing stop
 
         try:

@@ -68,6 +68,37 @@ _REGIME_MAP: dict[str, str] = {
     "sideways": "SIDEWAYS",
     "bear":     "VOLATILE",
 }
+
+# Market signal tabel: (regime, news_sentiment) → (combined_signal, position_size_mult, sl_mult)
+_MARKET_SIGNAL_TABLE: dict[tuple[str, str], tuple[str, float, float]] = {
+    ("SIDEWAYS", "bearish"):  ("cautious",           0.5,  1.25),
+    ("SIDEWAYS", "bullish"):  ("normal",              1.0,  1.0),
+    ("SIDEWAYS", "neutral"):  ("normal",              1.0,  1.0),
+    ("TRENDING", "bullish"):  ("optimistic",          1.25, 1.0),
+    ("TRENDING", "bearish"):  ("cautious_trending",   0.75, 1.0),
+    ("TRENDING", "neutral"):  ("normal",              1.0,  1.0),
+    ("VOLATILE", "bullish"):  ("restrictive",         0.5,  1.0),
+    ("VOLATILE", "bearish"):  ("restrictive",         0.5,  1.0),
+    ("VOLATILE", "neutral"):  ("restrictive",         0.5,  1.0),
+}
+_MARKET_SIGNAL_DEFAULT: tuple[str, float, float] = ("normal", 1.0, 1.0)
+
+
+def _compute_market_signal(
+    regime: str | None,
+    news_sentiment: str | None,
+) -> tuple[str, float, float]:
+    """
+    Bereken gecombineerd signaal op basis van regime en nieuwssentiment.
+
+    Returns:
+        (combined_signal, position_size_mult, sl_mult)
+        Valt terug op ("normal", 1.0, 1.0) als regime of sentiment ontbreekt.
+    """
+    if regime is None or news_sentiment is None:
+        return _MARKET_SIGNAL_DEFAULT
+    key = (regime.upper(), (news_sentiment or "neutral").lower())
+    return _MARKET_SIGNAL_TABLE.get(key, _MARKET_SIGNAL_DEFAULT)
 _MIN_TRADES_LOW   = 10     # minimale trades voor verlagen
 _CLAUDE_MIN_CONF  = 6      # minimale confidence voor Claude advies
 
@@ -266,6 +297,12 @@ class QueenAdvisor:
             regime = self._determine_regime(candidates)
             if regime:
                 self._write_regime_signal(regime)
+                news = self._read_latest_news_snapshot()
+                news_sentiment = (
+                    (news.get("market_sentiment") or "neutral") if news else "neutral"
+                )
+                combined, pos_mult, sl_mult = _compute_market_signal(regime, news_sentiment)
+                self._write_market_signal(regime, news_sentiment, combined, pos_mult, sl_mult)
 
             self._log.info(
                 "Advies-cyclus klaar | open=%s regime=%s prioriteit=%d deprioriteer=%d "
@@ -468,6 +505,40 @@ class QueenAdvisor:
             self._log.debug("Regime-signaal geschreven: %s", regime)
         except OSError:
             self._log.exception("Kan regime-signaal niet schrijven naar %s", queen_dir)
+
+    def _write_market_signal(
+        self,
+        regime: str,
+        news_sentiment: str,
+        combined_signal: str,
+        position_size_mult: float,
+        sl_mult: float,
+    ) -> None:
+        """Schrijf gecombineerd markt-signaal append-only naar ANT_LOGS/queen/market_signal.jsonl."""
+        if self._logs_root is None:
+            return
+        queen_dir = self._logs_root / "queen"
+        try:
+            queen_dir.mkdir(parents=True, exist_ok=True)
+            record = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "payload": {
+                    "action":             "market_signal",
+                    "regime":             regime,
+                    "news_sentiment":     news_sentiment,
+                    "combined_signal":    combined_signal,
+                    "position_size_mult": position_size_mult,
+                    "sl_mult":            sl_mult,
+                },
+            }
+            with (queen_dir / "market_signal.jsonl").open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record) + "\n")
+            self._log.debug(
+                "Markt-signaal geschreven: %s (pos_mult=%.2f sl_mult=%.2f)",
+                combined_signal, position_size_mult, sl_mult,
+            )
+        except OSError:
+            self._log.exception("Kan markt-signaal niet schrijven naar %s", queen_dir)
 
     # ------------------------------------------------------------------
     # Weekend / markturen protocol

@@ -201,7 +201,7 @@ Queen weet niet welke exchange — alleen welk biome en risicoprofiel.
 
 Colony draait live op PC2 — dashboard bereikbaar via Tailscale op localhost:8000.
 
-**Actieve ants (9 missions):**
+**Actieve ants (11 missions):**
 - ScoutAnt — detecteert price_move en volume_spike signalen
 - ResearchAnt — genereert StrategyCandidate objecten (SMA crossover, RSI, Bollinger)
 - PaperAnt — paper trades op basis van scout + research kandidaten
@@ -212,18 +212,17 @@ Colony draait live op PC2 — dashboard bereikbaar via Tailscale op localhost:80
 - OperatorAnt — verwerkt operator input via Claude Vision
 - ClaudeAnt — AI-gestuurde analyse (€10/maand budget)
 - TimeFilterAnt — ICT Kill Zone filter
+- NewsAnt — nieuwssentiment via NewsAPI (30-min polls)
+- EquitiesPaperAnt — paper trading equities met trailing stop
 
 **Bekende issues:**
 - PaperAnt opent geen posities buiten kill zones (correct gedrag)
-- PaperAnt time filter wordt inconsistent toegepast: `_process_new_signals()` respecteert
-  de filter, maar `_process_research_candidates()` en `_process_approved_candidates()` niet
-- Dit is de prioritaire fix voor de volgende sessie
 
-**Dashboard staat (laatste snapshot):**
+**Dashboard staat (april 2026):**
 - Totaal kapitaal: €1.591 | Beschikbaar op Bitvavo: €80,64
 - Regime: SIDEWAYS
 - Top strategieën: momentum (ETH-EUR, Sharpe 0.29), hybrid (BTC-EUR, Sharpe 0.29)
-- Colony v1: heartbeat rood (verwacht — v1 draait als apart process)
+- Equities tab actief met nieuws-blok, paper-stats en briefing
 
 ---
 
@@ -255,33 +254,49 @@ Colony draait live op PC2 — dashboard bereikbaar via Tailscale op localhost:80
 | 7 | Paper-mode multi-node simulatie | 487 | ✅ bewezen |
 | 8 | Guarded live adapters | 543 | ✅ bewezen |
 | 9 | Colony Dashboard | 591 | ✅ bewezen |
-| 10 | Live op PC2 — Bitvavo + equities biome | 1757 | 🔄 actief |
+| 10 | Live op PC2 — Bitvavo + equities biome | 2235 | 🔄 actief |
 
 ---
 
 ## FASE 10 — actief
 
 Doel: Colony draait live op PC2. Bitvavo adapter operationeel.
-Equities biome in bouw. Paper trading actief maar nog geen trades door kill zone filter.
+Equities biome in bouw. Paper trading actief.
 
-**Huidige prioriteit: PaperAnt time filter fix**
+**Recent gebouwd (april 2026):**
 
-Probleem: `_process_research_candidates()` en `_process_approved_candidates()` in
-`paper_ant.py` respecteren de TimeFilterAnt niet. Alleen `_process_new_signals()` doet dat.
+| Deliverable | Wat |
+|-------------|-----|
+| D11-D14 | EquitiesPaperAnt — trailing stop (5%), harde SL (7%), handelsdag-TTL (10d) |
+| D15 | Zombie-positie fix + ledger-herstel bij herstart |
+| D16 | ICT Kill Zone fix — alle drie entry-paden in PaperAnt respecteren time filter |
+| D17 | RS Regime filter — SIDEWAYS/TRENDING/VOLATILE entry-filter in PaperAnt |
+| D18 | EquitiesPaperAnt geïsoleerd van equities-loop fouten (start_colony) |
+| D19 | NewsAnt — nieuwssentiment via NewsAPI (30-min polls, 100 calls/dag limiet) |
+| D20 | QueenAdvisor D23 — regime-signaal schrijft naar ANT_LOGS/queen/regime.jsonl |
+| D21 | QueenAdvisor weekend protocol — briefing 15:15-15:30 Amsterdam |
+| D22 | MMM verwijderd uit dividend watchlist (yfinance delisted) |
+| D23 | Dashboard Equities tab: nieuws-blok, paper-stats, marktopening briefing |
+| D24 | Sentiment fix — word lists uitgebreid, drempel verlaagd naar ±0.02 |
+| D25-D26 | News → Queen → PaperAnt koppeling (market signal) |
 
-Fix: extraheer de time filter check naar een helper `_is_trading_allowed() -> bool` en
-roep deze aan aan het begin van alle drie entry-methoden. Exits blijven ongemoeid.
+**Market signal systeem (D25-D26):**
+- `ANT_LOGS/queen/market_signal.jsonl` — gecombineerd regime + nieuwssignaal
+- `_market_signal.py` — reader module (patroon: analoog aan `_queen_regime.py`)
+- `queen_advisor.py` — `_compute_market_signal()` + `_write_market_signal()` in `advise()`
+- `paper_ant.py` — market signal past `capital_fraction` en `sl_pct` aan (voor VOLATILE)
+- `paper_ant_equities.py` — zelfde aanpassing + bearish filter: alleen rank=1 sector bij bearish nieuws
 
-```python
-def _is_trading_allowed(self) -> bool:
-    """True als de TimeFilterAnt trading toestaat (of niet actief is)."""
-    if self.logs_root is None:
-        return True
-    sig = read_latest_time_signal(self.logs_root)
-    if sig is None:
-        return True  # filter niet actief → fail-open
-    return sig.get("trade_allowed", True)
-```
+Signal tabel (regime × sentiment → combined_signal, pos_mult, sl_mult):
+
+| Regime | Sentiment | Signal | pos_mult | sl_mult |
+|--------|-----------|--------|----------|---------|
+| SIDEWAYS | bearish | cautious | 0.5 | 1.25 |
+| SIDEWAYS | bullish/neutral | normal | 1.0 | 1.0 |
+| TRENDING | bullish | optimistic | 1.25 | 1.0 |
+| TRENDING | bearish | cautious_trending | 0.75 | 1.0 |
+| TRENDING | neutral | normal | 1.0 | 1.0 |
+| VOLATILE | any | restrictive | 0.5 | 1.0 |
 
 **Equities biome (in bouw):**
 - Yahoo Finance adapter (data) + IBKR adapter (execution)
@@ -309,4 +324,4 @@ CLAUDE_ANT_MONTHLY_BUDGET_EUR=10.00
 ---
 
 *Dit bestand bijhouden bij elke fase-overgang.*
-*Laatste update: 2026-04-21 — Time filter fix toegevoegd, colony staat bijgewerkt, startprompt sectie verwijderd (staat in chat AC2-ch2)*
+*Laatste update: 2026-04-26 — D25-D26: market signal systeem toegevoegd, colony staat bijgewerkt (2235 tests)*

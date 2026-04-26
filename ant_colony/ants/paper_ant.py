@@ -38,6 +38,7 @@ from pathlib import Path
 from ant_colony.ants._heartbeat import HeartbeatThread
 from ant_colony.ants.time_filter_ant import read_latest_time_signal
 from ant_colony.ants._queen_regime import read_latest_queen_regime
+from ant_colony.ants._market_signal import read_latest_market_signal
 from ant_colony.biome.biome_registry import BiomeRegistry
 from ant_colony.colony.scheduler.colony_scheduler import ColonyScheduler
 from ant_colony.entry.entry_signal import EntrySignal, SignalSource
@@ -803,7 +804,20 @@ class PaperAnt:
         used_tp_pct = tp_pct if tp_pct is not None else _TP_PCT
         capital_fraction = _TRADE_CAPITAL_FRACTION
 
-        # VOLATILE: grotere SL-buffer en kleinere positiegrootte
+        # Market signal: nieuws + regime gecombineerd — komt bovenop VOLATILE aanpassing
+        mkt = read_latest_market_signal(self.logs_root) if self.logs_root else None
+        if mkt is not None:
+            pos_mult = float(mkt.get("position_size_mult") or 1.0)
+            sl_m     = float(mkt.get("sl_mult") or 1.0)
+            if pos_mult != 1.0 or sl_m != 1.0:
+                self._log.debug(
+                    "market_signal aanpassing | %s signal=%s pos_mult=%.2f sl_mult=%.2f",
+                    symbol, mkt.get("combined_signal", "normal"), pos_mult, sl_m,
+                )
+            capital_fraction *= pos_mult
+            used_sl_pct      *= sl_m
+
+        # VOLATILE: grotere SL-buffer en kleinere positiegrootte (op top van market_signal)
         if regime == "VOLATILE":
             used_sl_pct  = used_sl_pct * _VOLATILE_SL_MULTIPLIER
             capital_fraction = capital_fraction * _VOLATILE_CAPITAL_MULT

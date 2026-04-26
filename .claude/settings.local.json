@@ -7,7 +7,12 @@
       "Bash(git config *)",
       "Bash(xargs grep *)",
       "Bash(python *)",
-      "Bash(pip install *)"
+      "Bash(pip install *)",
+      "Bash(sed -n '75,90p' ant_colony/ants/equities/sector_scout_ant.py)",
+      "Bash(sed -n '81,95p' ant_colony/ants/equities/fundamental_ant.py)",
+      "Bash(grep -v \"^--$\")",
+      "Bash(git stash *)",
+      "Bash(awk -F'::' '{print $1}')"
     ]
   }
 }
