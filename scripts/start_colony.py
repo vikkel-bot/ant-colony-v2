@@ -1595,6 +1595,75 @@ def main() -> None:
     except Exception:
         log.exception("NewsAnt bootstrap mislukt — colony draait door zonder NewsAnt.")
 
+    # --- Stap 8h: WatchtowerAnt (opt-in via WATCHTOWER_ENABLED=true) ---
+    try:
+        _watchtower_enabled = os.getenv("WATCHTOWER_ENABLED", "false").lower() == "true"
+        if _watchtower_enabled:
+            from ant_colony.ants.watchtower_ant import WatchtowerAnt
+            from ant_colony.clients.watchtower_client import WatchtowerClient
+            from ant_colony.schemas.mission import (
+                MarketScope as _WTMarketScope,
+                Mission as _WTMission,
+                RiskLimits as _WTRiskLimits,
+                SuccessConditions as _WTSuccessConditions,
+            )
+
+            _wt_client = WatchtowerClient()
+            _wt_healthy = _wt_client.is_healthy()
+            log.info(
+                "Watchtower health check | url=%s  status=%s",
+                _wt_client.base_url,
+                "ONLINE" if _wt_healthy else "OFFLINE",
+            )
+
+            _ts_wt = datetime.now(tz=timezone.utc).strftime("%Y%m%d-%H%M%S")
+            _wt_mission = _WTMission(
+                mission_id=f"watchtower-{_ts_wt}",
+                ant_type="watchtower_ant",
+                allowed_node=args.node_id,
+                allowed_actions=["read_data", "report"],
+                market_scope=_WTMarketScope(biome="crypto", symbols=["GLOBAL"]),
+                capital_limit=0.0,
+                risk_limits=_WTRiskLimits(
+                    max_drawdown_pct=1.0,
+                    max_position_size=1.0,
+                    daily_loss_limit=1.0,
+                    stop_loss_required=False,
+                ),
+                ttl=86400 * 365,
+                heartbeat_interval=int(os.getenv("WATCHTOWER_POLL_INTERVAL", "300")),
+                success_conditions=_WTSuccessConditions(
+                    description="Pollt Watchtower entry-intelligence en filtert bruikbare signalen.",
+                ),
+            )
+            _wt_result = queen.issue_mission(_wt_mission)
+            if _wt_result.accepted:
+                _wt_ant_id = f"watchtower-{uuid.uuid4().hex[:12]}"
+                _wt_ant = WatchtowerAnt(
+                    ant_id=_wt_ant_id,
+                    mission=_wt_mission,
+                    scheduler=scheduler,
+                    logs_root=logs_root,
+                    client=_wt_client,
+                )
+                threading.Thread(
+                    target=_wt_ant.run,
+                    name=f"watchtower-{_wt_ant_id[:16]}",
+                    daemon=True,
+                ).start()
+                log.info(
+                    "WatchtowerAnt gestart | ant_id=%s  url=%s",
+                    _wt_ant_id, _wt_client.base_url,
+                )
+            else:
+                log.warning(
+                    "WatchtowerAnt-missie geweigerd — %s", _wt_result.rejection_reason
+                )
+        else:
+            log.info("WatchtowerAnt uitgeschakeld (zet WATCHTOWER_ENABLED=true om te activeren).")
+    except Exception:
+        log.exception("WatchtowerAnt bootstrap mislukt — colony draait door zonder WatchtowerAnt.")
+
     # --- Stap 9: bouw ColonyContext en start dashboard in watchdog thread ---
     context = ColonyContext(
         queen=queen,

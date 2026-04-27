@@ -1200,7 +1200,7 @@ async function fetchAll() {
   const get = url => _fetchQ(() => fetch(url)
     .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
     .catch(e => { console.error(`[dashboard] GET ${url} failed:`, e.message); return null; }));
-  const [st, me, br, cap, pos, ti, act, qs, pc, eq, oq, nw, brf] = await Promise.all([
+  const [st, me, br, cap, pos, ti, act, qs, pc, eq, oq, nw, brf, wt] = await Promise.all([
     get('/api/status'), get('/api/metrics'),
     get('/api/brokers'), get('/api/capital'),
     get('/api/positions'),
@@ -1210,6 +1210,7 @@ async function fetchAll() {
     get('/api/operator/queue'),
     get('/api/news/latest'),
     get('/api/equities/briefing'),
+    get('/api/watchtower/status'),
   ]);
 
   if (st) {
@@ -1237,6 +1238,7 @@ async function fetchAll() {
   if (eq)  S.equities    = eq;
   if (nw)  S.news        = nw;
   if (brf) S.briefing    = brf;
+  if (wt)  S.watchtower  = wt;
   if (oq)  { S.opQueue = oq.items || []; renderOperatorHistory(); }
 
   render();
@@ -2330,6 +2332,42 @@ function renderEquities() {
     </div>`;
   }
 
+  // ── WATCHTOWER ───────────────────────────────
+  let watchtowerCard;
+  {
+    const wt = S.watchtower;
+    const wtEnabled  = wt && wt.enabled;
+    const wtStatus   = wt ? wt.status : 'DISABLED';
+    const statusColors = { ONLINE: '#22c55e', OFFLINE: '#ef4444', DISABLED: '#9ca3af' };
+    const sc = statusColors[wtStatus] || statusColors.DISABLED;
+    const wtBadge = `<span style="font-size:9px;font-weight:700;text-transform:uppercase;padding:1px 6px;border-radius:3px;background:${sc}22;color:${sc};border:1px solid ${sc}55">${wtStatus}</span>`;
+    let wtRows;
+    if (!wtEnabled || wtStatus === 'DISABLED') {
+      wtRows = '<div class="empty" style="padding:8px 0">WatchtowerAnt uitgeschakeld</div>';
+    } else {
+      const lastTs  = wt.last_signal_ts ? fTS(wt.last_signal_ts) : '—';
+      const sigHour = wt.signals_last_hour != null ? wt.signals_last_hour : 0;
+      const pasHour = wt.passed_filter_last_hour != null ? wt.passed_filter_last_hour : 0;
+      wtRows = `<div class="eq-row">
+        <span class="eq-sect">Laatste signal</span>
+        <span class="eq-val" style="color:var(--muted)">${lastTs}</span>
+      </div><div class="eq-row">
+        <span class="eq-sect">Ontvangen (1u)</span>
+        <span class="eq-val">${sigHour}</span>
+      </div><div class="eq-row">
+        <span class="eq-sect">Door filter (1u)</span>
+        <span class="eq-val" style="color:var(--pnl-pos)">${pasHour}</span>
+      </div>`;
+    }
+    watchtowerCard = `<div class="card">
+      <div class="eq-header">
+        <div class="card-title" style="margin:0">Watchtower</div>
+        ${wtBadge}
+      </div>
+      ${wtRows}
+    </div>`;
+  }
+
   // ── EQUITIES PAPER ANT ────────────────────────
   let paperCard;
   {
@@ -2485,7 +2523,7 @@ function renderEquities() {
     ${divTS ? `<div class="ts-line">Laatste scan: ${divTS}</div>` : ''}
   </div>`;
 
-  el.innerHTML = enabledHtml + briefingCard + `<div class="eq-grid">${newsCard}${paperCard}${sectorCard}${piotCard}${divCard}</div>`;
+  el.innerHTML = enabledHtml + briefingCard + `<div class="eq-grid">${watchtowerCard}${newsCard}${paperCard}${sectorCard}${piotCard}${divCard}</div>`;
 }
 
 function fPrice2(v) {

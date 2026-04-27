@@ -467,6 +467,14 @@ class ClaudeAntDeactivateResponse(BaseModel):
     status: str          # "deactivated" | "not_running"
 
 
+class WatchtowerStatusResponse(BaseModel):
+    enabled: bool
+    status: str                     # "ONLINE" | "OFFLINE" | "DISABLED"
+    last_signal_ts: str | None = None
+    signals_last_hour: int = 0
+    passed_filter_last_hour: int = 0
+
+
 _BITVAVO_TICKER = "https://api.bitvavo.com/v2/{market}/ticker/price"
 
 
@@ -1630,6 +1638,39 @@ def create_router(ctx: ColonyContext) -> APIRouter:
             budget_remaining=budget_remaining,
             session_cost=_claude_state["session_cost"] or None,
             session_status=_claude_state["session_status"],
+        )
+
+    # ------------------------------------------------------------------
+    # GET /api/watchtower/status
+    # ------------------------------------------------------------------
+
+    @router.get("/watchtower/status", response_model=WatchtowerStatusResponse)
+    def get_watchtower_status() -> WatchtowerStatusResponse:
+        """Watchtower status: ONLINE/OFFLINE/DISABLED + signaal-statistieken."""
+        import os as _os
+        enabled = _os.getenv("WATCHTOWER_ENABLED", "false").lower() == "true"
+        if not enabled:
+            return WatchtowerStatusResponse(enabled=False, status="DISABLED")
+
+        # Controleer Watchtower health via HTTP (timeout 5s)
+        try:
+            from ant_colony.clients.watchtower_client import WatchtowerClient
+            healthy = WatchtowerClient().is_healthy()
+        except Exception:
+            healthy = False
+
+        status_str = "ONLINE" if healthy else "OFFLINE"
+
+        if ctx.logs_root is None:
+            return WatchtowerStatusResponse(enabled=True, status=status_str)
+
+        stats = _read_watchtower_stats(ctx.logs_root)
+        return WatchtowerStatusResponse(
+            enabled=True,
+            status=status_str,
+            last_signal_ts=stats["last_signal_ts"],
+            signals_last_hour=stats["signals_last_hour"],
+            passed_filter_last_hour=stats["passed_filter_last_hour"],
         )
 
     # ------------------------------------------------------------------
@@ -3166,3 +3207,47 @@ def _read_latest_briefing(logs_root: Path) -> dict:
         }
     except Exception:
         return {"available": False}
+
+
+# ---------------------------------------------------------------------------
+# Intern — Watchtower stats reader
+# ---------------------------------------------------------------------------
+
+def _read_watchtower_stats(logs_root: Path) -> dict:
+    """Lees Watchtower poll-statistieken uit ANT_LOGS/watchtower/signals.jsonl."""
+    signal_path = logs_root / "watchtower" / "signals.jsonl"
+    if not signal_path.exists():
+        return {"last_signal_ts": None, "signals_last_hour": 0, "passed_filter_last_hour": 0}
+
+    cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=1)
+    last_ts = None
+    signals_hour = 0
+    passed_hour  = 0
+
+    try:
+        with signal_path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                    ts_str = rec.get("timestamp", "")
+                    ts = datetime.fromisoformat(ts_str)
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=timezone.utc)
+                    if last_ts is None or ts > last_ts:
+                        last_ts = ts
+                    if ts >= cutoff:
+                        signals_hour += int(rec.get("received", 0))
+                        passed_hour  += int(rec.get("passed_filter", 0))
+                except (json.JSONDecodeError, ValueError):
+                    continue
+    except OSError:
+        pass
+
+    return {
+        "last_signal_ts":          last_ts.isoformat() if last_ts else None,
+        "signals_last_hour":       signals_hour,
+        "passed_filter_last_hour": passed_hour,
+    }

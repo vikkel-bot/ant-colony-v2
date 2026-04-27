@@ -77,6 +77,9 @@ class PaperPosition(BaseModel):
     exit_price: float | None = None
     exit_reason: str | None = None
 
+    # --- watchtower koppeling (optioneel) ---
+    watchtower_signal_id: str | None = None
+
     # ------------------------------------------------------------------
     # Validatie
     # ------------------------------------------------------------------

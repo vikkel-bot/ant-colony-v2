@@ -31,6 +31,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -138,6 +140,13 @@ class PaperAnt:
                 len(self._open_symbols), len(self._open_research_keys),
                 len(self._ledger.open_positions),
             )
+
+        # Watchtower feedback client (opt-in via WATCHTOWER_ENABLED=true)
+        if os.getenv("WATCHTOWER_ENABLED", "false").lower() == "true":
+            from ant_colony.clients.watchtower_client import WatchtowerClient
+            self._watchtower_client: "WatchtowerClient | None" = WatchtowerClient()
+        else:
+            self._watchtower_client = None
 
     # ------------------------------------------------------------------
     # Publieke interface
@@ -1140,6 +1149,47 @@ class PaperAnt:
             "POSITIE GESLOTEN | %s via %s  pnl_gross=%.4f fee=%.4f pnl_net=%.4f (%.2f%%)",
             position.symbol, position.exit_reason, pnl_gross, fee_total, pnl_net, pnl_pct,
         )
+        self._send_watchtower_feedback(position, pnl_pct)
+
+    def _send_watchtower_feedback(self, position, pnl_pct: float) -> None:
+        """Fire-and-forget feedback naar Watchtower na trade close."""
+        if self._watchtower_client is None:
+            return
+
+        reason = position.exit_reason or "unknown"
+        if "stop_loss" in reason:
+            exit_label = "SL"
+        elif "take_profit" in reason:
+            exit_label = "TP"
+        elif "ttl" in reason:
+            exit_label = "TTL"
+        else:
+            exit_label = reason.upper()
+
+        if position.closed_at and position.opened_at:
+            duration_hours = round(
+                (position.closed_at - position.opened_at).total_seconds() / 3600, 4
+            )
+        else:
+            duration_hours = 0.0
+
+        outcome = {
+            "signal_id":    position.watchtower_signal_id,
+            "asset":        position.symbol,
+            "direction":    position.side.value.upper(),
+            "entry_price":  float(position.entry_price),
+            "exit_price":   float(position.exit_price or 0.0),
+            "pnl_pct":      pnl_pct,
+            "exit_reason":  exit_label,
+            "duration_hours": duration_hours,
+            "timestamp":    datetime.now(timezone.utc).isoformat(),
+        }
+        threading.Thread(
+            target=self._watchtower_client.post_outcome,
+            args=(outcome,),
+            daemon=True,
+            name=f"wt-fb-{position.position_id[:8]}",
+        ).start()
 
     def _emit_pnl_summary(self) -> None:
         """Log een samenvatting van alle trades bij afsluiting."""
