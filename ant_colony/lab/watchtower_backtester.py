@@ -133,6 +133,7 @@ class WatchtowerBacktestReport:
     total_signals: int
     total_trades: int
     skipped_signals: int
+    skipped_by_reason: dict[str, int]
     total_net_pnl: float
     total_return_pct: float
     win_rate: float | None
@@ -153,6 +154,7 @@ class WatchtowerBacktestReport:
             "total_signals": self.total_signals,
             "total_trades": self.total_trades,
             "skipped_signals": self.skipped_signals,
+            "skipped_by_reason": self.skipped_by_reason,
             "total_net_pnl": self.total_net_pnl,
             "total_return_pct": self.total_return_pct,
             "win_rate": self.win_rate,
@@ -293,38 +295,38 @@ class WatchtowerSignalBacktester:
 
         active_exit_times: list[datetime] = []
         trades: list[WatchtowerBacktestTrade] = []
-        skipped = 0
+        skipped_by_reason: dict[str, int] = {}
 
         for signal in sorted(signals, key=lambda s: s.timestamp):
             if signal.direction == "short" and not assumptions.allow_short:
-                skipped += 1
+                _add_skip(skipped_by_reason, "short_disabled")
                 continue
 
             bars = normalized_bars.get(signal.symbol)
             if not bars:
-                skipped += 1
+                _add_skip(skipped_by_reason, "no_bars")
                 continue
 
             entry_idx = _first_bar_after(bars, signal.timestamp)
             if entry_idx is None:
-                skipped += 1
+                _add_skip(skipped_by_reason, "no_next_bar_after_signal")
                 continue
 
             entry_time = bars[entry_idx].timestamp
             active_exit_times = [t for t in active_exit_times if t > entry_time]
             if len(active_exit_times) >= assumptions.max_concurrent_positions:
-                skipped += 1
+                _add_skip(skipped_by_reason, "max_concurrent_positions")
                 continue
 
             trade = self._simulate_trade(signal, bars, entry_idx, assumptions)
             if trade is None:
-                skipped += 1
+                _add_skip(skipped_by_reason, "simulation_failed")
                 continue
 
             trades.append(trade)
             active_exit_times.append(trade.exit_timestamp)
 
-        return self._build_report(signals, trades, skipped, assumptions)
+        return self._build_report(signals, trades, skipped_by_reason, assumptions)
 
     # ------------------------------------------------------------------
     # Internals
@@ -426,7 +428,7 @@ class WatchtowerSignalBacktester:
     def _build_report(
         signals: list[WatchtowerSignal],
         trades: list[WatchtowerBacktestTrade],
-        skipped: int,
+        skipped_by_reason: dict[str, int],
         assumptions: WatchtowerBacktestAssumptions,
     ) -> WatchtowerBacktestReport:
         returns = [t.net_return_pct for t in trades]
@@ -440,7 +442,8 @@ class WatchtowerSignalBacktester:
             assumptions=assumptions,
             total_signals=len(signals),
             total_trades=len(trades),
-            skipped_signals=skipped,
+            skipped_signals=sum(skipped_by_reason.values()),
+            skipped_by_reason=dict(sorted(skipped_by_reason.items())),
             total_net_pnl=round(total_net, 6),
             total_return_pct=round(total_net / assumptions.starting_equity, 8),
             win_rate=_win_rate(returns),
@@ -478,6 +481,10 @@ def _safe_float(value: Any, default: float) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _add_skip(bucket: dict[str, int], reason: str) -> None:
+    bucket[reason] = bucket.get(reason, 0) + 1
 
 
 def _normalize_pct(value: Any, default: float) -> float:

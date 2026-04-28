@@ -155,6 +155,9 @@ def _print_report(report: dict[str, Any]) -> None:
     print(f"Signals           : {report.get('total_signals', 0)}")
     print(f"Trades            : {report.get('total_trades', 0)}")
     print(f"Skipped signals   : {report.get('skipped_signals', 0)}")
+    skipped_by_reason = report.get("skipped_by_reason") or {}
+    if skipped_by_reason:
+        print("Skipped by reason : " + ", ".join(f"{key}={value}" for key, value in skipped_by_reason.items()))
     print(f"Win rate          : {_pct(report.get('win_rate'))}")
     print(f"Expectancy        : {_pct(report.get('expectancy_pct'))}")
     print(f"Avg return/trade  : {_pct(report.get('avg_net_return_pct'))}")

@@ -141,6 +141,7 @@ class TestWatchtowerSignalBacktester:
 
         assert report.total_trades == 0
         assert report.skipped_signals == 1
+        assert report.skipped_by_reason == {"short_disabled": 1}
 
     def test_cross_field_stats_uses_linked_assets(self):
         bars = [_bar(11, 100.0, 104.0, 99.0, 103.0)]
@@ -155,6 +156,33 @@ class TestWatchtowerSignalBacktester:
         assert report.cross_field["signals_with_linked_assets"] == 1
         assert report.cross_field["trades_with_linked_assets"] == 1
         assert report.by_asset_class["equities"]["trade_count"] == 1
+
+    def test_skip_reasons_explain_missing_trades(self):
+        no_bar_signal = _signal(signal_id="no-bars", symbol="SOL-EUR", hour=10)
+        no_next_signal = _signal(signal_id="no-next", symbol="BTC-EUR", hour=12)
+        concurrency_a = _signal(signal_id="conc-a", symbol="ETH-EUR", hour=10)
+        concurrency_b = _signal(signal_id="conc-b", symbol="ETH-BTC", hour=10)
+        bars = {
+            "BTC-EUR": [_bar(11, 100.0, 101.0, 99.0, 100.0)],
+            "ETH-EUR": [
+                _bar(11, 100.0, 102.0, 99.0, 101.0),
+                _bar(12, 101.0, 102.0, 100.0, 101.0),
+            ],
+            "ETH-BTC": [_bar(11, 100.0, 104.0, 99.0, 103.0)],
+        }
+
+        report = WatchtowerSignalBacktester().run(
+            [no_bar_signal, no_next_signal, concurrency_a, concurrency_b],
+            bars,
+            _assumptions(max_bars_held=3, max_concurrent_positions=1),
+        )
+
+        assert report.total_trades == 1
+        assert report.skipped_by_reason == {
+            "max_concurrent_positions": 1,
+            "no_bars": 1,
+            "no_next_bar_after_signal": 1,
+        }
 
 
 class TestWatchtowerSignalLoader:
