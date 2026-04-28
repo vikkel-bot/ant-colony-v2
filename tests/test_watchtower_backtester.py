@@ -11,6 +11,7 @@ from ant_colony.lab.watchtower_backtester import (
     WatchtowerBacktestAssumptions,
     WatchtowerSignal,
     WatchtowerSignalBacktester,
+    append_watchtower_export,
     load_watchtower_signals,
 )
 from ant_colony.schemas.mission import MarketScope, Mission, RiskLimits, SuccessConditions
@@ -184,6 +185,49 @@ class TestWatchtowerSignalLoader:
         assert signals[0].symbol == "BTC-EUR"
         assert signals[0].linked_assets == ("QQQ",)
 
+    def test_appends_watchtower_export_as_replay_log(self, tmp_path):
+        packet = {
+            "generated_at": "2026-04-27T10:00:00+00:00",
+            "count": 1,
+            "filters": {"asset_class": "crypto"},
+            "signals": [
+                {
+                    "signal_id": "wt-export-1",
+                    "asset": "BTC-EUR",
+                    "direction": "long",
+                    "timestamp": "2026-04-27T10:00:00+00:00",
+                    "asset_class": "crypto",
+                }
+            ],
+        }
+
+        path = append_watchtower_export(tmp_path, packet)
+        signals = load_watchtower_signals(tmp_path)
+
+        assert path == tmp_path / "watchtower" / "signals.jsonl"
+        assert len(signals) == 1
+        assert signals[0].signal_id == "wt-export-1"
+
+    def test_loader_deduplicates_signal_ids_across_exports(self, tmp_path):
+        packet = {
+            "generated_at": "2026-04-27T10:00:00+00:00",
+            "signals": [
+                {
+                    "signal_id": "dup-1",
+                    "asset": "BTC-EUR",
+                    "direction": "long",
+                    "timestamp": "2026-04-27T10:00:00+00:00",
+                }
+            ],
+        }
+        append_watchtower_export(tmp_path, packet)
+        append_watchtower_export(tmp_path, packet)
+
+        signals = load_watchtower_signals(tmp_path)
+
+        assert len(signals) == 1
+        assert signals[0].signal_id == "dup-1"
+
 
 class TestWatchtowerBacktestAnt:
     def _mission(self) -> Mission:
@@ -247,4 +291,70 @@ class TestWatchtowerBacktestAnt:
         assert len(files) == 1
         saved = json.loads(files[0].read_text(encoding="utf-8"))
         assert saved["total_trades"] == 1
+        assert report["report_path"].endswith(".json")
 
+    def test_eth_btc_ratio_uses_synthetic_candles(self, tmp_path):
+        log_dir = tmp_path / "watchtower"
+        log_dir.mkdir()
+        record = {
+            "timestamp": "2026-04-27T10:00:00+00:00",
+            "signals": [
+                {
+                    "signal_id": "eth-btc-1",
+                    "asset": "ETH-BTC",
+                    "direction": "LONG",
+                    "entry_score": 0.9,
+                    "confidence": 0.8,
+                    "asset_class": "crypto",
+                }
+            ],
+        }
+        (log_dir / "signals.jsonl").write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+        def candles(symbol, timeframe, limit):
+            if symbol == "ETH-EUR":
+                return [
+                    SimpleNamespace(timestamp=_ts(11), open=2000, high=2080, low=1980, close=2050, volume=1.0),
+                    SimpleNamespace(timestamp=_ts(12), open=2050, high=2200, low=2040, close=2180, volume=1.0),
+                ]
+            if symbol == "BTC-EUR":
+                return [
+                    SimpleNamespace(timestamp=_ts(11), open=50000, high=50500, low=49500, close=50000, volume=1.0),
+                    SimpleNamespace(timestamp=_ts(12), open=50000, high=50200, low=49800, close=50000, volume=1.0),
+                ]
+            return []
+
+        adapter = MagicMock()
+        adapter.get_candles.side_effect = candles
+        registry = MagicMock()
+        registry.get.return_value = adapter
+
+        ant = WatchtowerBacktestAnt(
+            ant_id="wtbt-ethbtc",
+            mission=Mission(
+                mission_id="wt-bt-ethbtc",
+                ant_type="watchtower_backtest_ant",
+                allowed_node="node-1",
+                allowed_actions=["read_data", "backtest", "report"],
+                market_scope=MarketScope(biome="crypto", symbols=["ETH-BTC"]),
+                capital_limit=0.0,
+                risk_limits=RiskLimits(
+                    max_drawdown_pct=1.0,
+                    max_position_size=1.0,
+                    daily_loss_limit=1.0,
+                    stop_loss_required=False,
+                ),
+                ttl=3600,
+                heartbeat_interval=60,
+                success_conditions=SuccessConditions(description="Replay ETH/BTC ratio."),
+            ),
+            scheduler=MagicMock(),
+            logs_root=tmp_path,
+            biome_registry=registry,
+            assumptions=_assumptions(),
+        )
+
+        report = ant.run_once()
+
+        assert report["total_trades"] == 1
+        assert report["trades"][0]["symbol"] == "ETH-BTC"

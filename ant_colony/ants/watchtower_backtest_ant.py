@@ -63,6 +63,7 @@ class WatchtowerBacktestAnt:
         self.candle_limit = candle_limit
         self._backtester = WatchtowerSignalBacktester()
         self._log = logging.getLogger(f"ant.watchtower_backtest.{ant_id[:8]}")
+        self.last_report_path: Path | None = None
 
     def run_once(self) -> dict[str, Any]:
         """
@@ -83,7 +84,9 @@ class WatchtowerBacktestAnt:
         bars_by_symbol = self._load_bars_by_symbol(sorted({s.symbol for s in signals}))
         report = self._backtester.run(signals, bars_by_symbol, self.assumptions)
         payload = report.to_dict()
-        self._write_report(payload)
+        report_path = self._write_report(payload)
+        if report_path is not None:
+            payload["report_path"] = str(report_path)
         return payload
 
     # ------------------------------------------------------------------
@@ -99,15 +102,45 @@ class WatchtowerBacktestAnt:
     def _load_bars_by_symbol(self, symbols: list[str]) -> dict[str, list[OHLCVBar]]:
         result: dict[str, list[OHLCVBar]] = {}
         for symbol in symbols:
-            adapter = self._adapter_for_symbol(symbol)
-            if adapter is None or not hasattr(adapter, "get_candles"):
-                continue
-            candles = self._get_candles(adapter, symbol)
-            bars = [self._to_bar(c) for c in candles]
-            bars = [b for b in bars if b is not None]
+            bars = self._load_symbol_bars(symbol)
             if bars:
                 result[symbol] = bars
         return result
+
+    def _load_symbol_bars(self, symbol: str) -> list[OHLCVBar]:
+        if symbol.upper() == "ETH-BTC":
+            return self._load_ratio_bars("ETH-EUR", "BTC-EUR")
+
+        adapter = self._adapter_for_symbol(symbol)
+        if adapter is None or not hasattr(adapter, "get_candles"):
+            return []
+        candles = self._get_candles(adapter, symbol)
+        bars = [self._to_bar(c) for c in candles]
+        return [b for b in bars if b is not None]
+
+    def _load_ratio_bars(self, base_symbol: str, quote_symbol: str) -> list[OHLCVBar]:
+        base_bars = self._load_symbol_bars(base_symbol)
+        quote_bars = self._load_symbol_bars(quote_symbol)
+        base_by_ts = {bar.timestamp: bar for bar in base_bars}
+        quote_by_ts = {bar.timestamp: bar for bar in quote_bars}
+
+        ratio_bars: list[OHLCVBar] = []
+        for ts in sorted(base_by_ts.keys() & quote_by_ts.keys()):
+            base = base_by_ts[ts]
+            quote = quote_by_ts[ts]
+            if min(quote.open, quote.high, quote.low, quote.close) <= 0:
+                continue
+            ratio_bars.append(
+                OHLCVBar(
+                    timestamp=ts,
+                    open=base.open / quote.open,
+                    high=base.high / quote.low,
+                    low=base.low / quote.high,
+                    close=base.close / quote.close,
+                    volume=base.volume,
+                )
+            )
+        return ratio_bars
 
     def _adapter_for_symbol(self, symbol: str):
         biome = "crypto" if "-" in symbol else "equities"
@@ -148,14 +181,16 @@ class WatchtowerBacktestAnt:
         except Exception:
             return None
 
-    def _write_report(self, payload: dict[str, Any]) -> None:
+    def _write_report(self, payload: dict[str, Any]) -> Path | None:
         if self.logs_root is None:
-            return
+            return None
         out_dir = self.logs_root / "backtests"
         out_dir.mkdir(parents=True, exist_ok=True)
         ts = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%S")
         out_path = out_dir / f"watchtower_backtest_{ts}.json"
         out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        self.last_report_path = out_path
+        return out_path
 
     def _empty_report(self, reason: str) -> dict[str, Any]:
         return {
@@ -166,4 +201,3 @@ class WatchtowerBacktestAnt:
             "skipped_signals": 0,
             "trades": [],
         }
-

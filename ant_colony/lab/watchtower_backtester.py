@@ -185,6 +185,7 @@ def load_watchtower_signals(logs_root: Path) -> list[WatchtowerSignal]:
         return []
 
     signals: list[WatchtowerSignal] = []
+    seen_ids: set[str] = set()
     try:
         for line in path.read_text(encoding="utf-8").splitlines():
             if not line.strip():
@@ -196,13 +197,39 @@ def load_watchtower_signals(logs_root: Path) -> list[WatchtowerSignal]:
             snapshot_ts = _parse_ts(snapshot.get("timestamp"))
             for raw in snapshot.get("signals") or []:
                 signal = normalize_watchtower_signal(raw, fallback_timestamp=snapshot_ts)
-                if signal is not None:
+                if signal is not None and signal.signal_id not in seen_ids:
+                    seen_ids.add(signal.signal_id)
                     signals.append(signal)
     except OSError:
         return []
 
     signals.sort(key=lambda s: s.timestamp)
     return signals
+
+
+def append_watchtower_export(logs_root: Path, export_packet: dict[str, Any]) -> Path:
+    """
+    Append a Watchtower /backtest/signals export as replay input.
+
+    The file format intentionally matches WatchtowerAnt output so the same
+    loader/backtester can replay both continuous polls and one-shot exports.
+    """
+    out_dir = Path(logs_root) / "watchtower"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    signals = export_packet.get("signals") if isinstance(export_packet.get("signals"), list) else []
+    generated_at = _parse_ts(export_packet.get("generated_at")) or datetime.now(timezone.utc)
+    record = {
+        "timestamp": generated_at.isoformat(),
+        "source": "watchtower_backtest_export",
+        "received": int(export_packet.get("count") or len(signals)),
+        "passed_filter": len(signals),
+        "filters": export_packet.get("filters", {}),
+        "signals": signals,
+    }
+    log_path = out_dir / "signals.jsonl"
+    with log_path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return log_path
 
 
 def normalize_watchtower_signal(
@@ -556,4 +583,3 @@ def _cross_field_stats(
         "avg_net_return_pct": round(sum(returns) / len(returns), 8) if returns else None,
         "win_rate": _win_rate(returns),
     }
-

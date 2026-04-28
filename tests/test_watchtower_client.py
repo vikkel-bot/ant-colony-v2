@@ -111,6 +111,64 @@ class TestGetSignals:
 
 
 # ---------------------------------------------------------------------------
+# get_backtest_signals — replay export
+# ---------------------------------------------------------------------------
+
+class TestGetBacktestSignals:
+    def test_returns_export_packet_when_online(self):
+        packet = {
+            "source": "watchtower",
+            "export_type": "signals",
+            "count": 1,
+            "signals": [{"signal_id": "sig-1", "asset": "BTC-EUR"}],
+        }
+        client = _make_client()
+        with patch("httpx.get", return_value=_mock_response(200, packet)):
+            result = client.get_backtest_signals(asset_class="crypto", exchange="BITVAVO")
+
+        assert result == packet
+        assert client.last_get_succeeded is True
+
+    def test_backtest_export_passes_filters(self):
+        captured = {}
+
+        def fake_get(url, params=None, timeout=None):
+            captured["url"] = url
+            captured["params"] = params
+            return _mock_response(200, {"signals": []})
+
+        client = _make_client(url="http://watchtower.local")
+        with patch("httpx.get", side_effect=fake_get):
+            client.get_backtest_signals(
+                limit=123,
+                asset="BTC-EUR",
+                asset_class="crypto",
+                exchange="BITVAVO",
+                from_ts="2026-04-28T09:22:00Z",
+                to_ts="2026-04-28T10:22:00Z",
+            )
+
+        assert captured["url"] == "http://watchtower.local/backtest/signals"
+        assert captured["params"] == {
+            "limit": 123,
+            "asset": "BTC-EUR",
+            "asset_class": "crypto",
+            "exchange": "BITVAVO",
+            "from": "2026-04-28T09:22:00Z",
+            "to": "2026-04-28T10:22:00Z",
+        }
+
+    def test_returns_empty_packet_when_offline(self):
+        client = _make_client()
+        with patch("httpx.get", side_effect=httpx.ConnectError("refused")):
+            result = client.get_backtest_signals(asset_class="crypto")
+
+        assert result["signals"] == []
+        assert result["count"] == 0
+        assert client.last_get_succeeded is False
+
+
+# ---------------------------------------------------------------------------
 # post_outcome — fire-and-forget
 # ---------------------------------------------------------------------------
 

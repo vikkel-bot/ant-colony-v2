@@ -72,6 +72,57 @@ class WatchtowerClient:
             )
             return []
 
+    def get_backtest_signals(
+        self,
+        limit: int = 1000,
+        asset: str | None = None,
+        asset_class: str | None = None,
+        exchange: str | None = None,
+        region: str | None = None,
+        from_ts: str | None = None,
+        to_ts: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        GET /backtest/signals for immutable replay input.
+
+        Returns Watchtower's export packet when available. On any error, returns
+        an empty packet and marks last_get_succeeded=False so callers can fail
+        gracefully without breaking the colony.
+        """
+        params: dict[str, Any] = {"limit": limit}
+        if asset:
+            params["asset"] = asset
+        if asset_class:
+            params["asset_class"] = asset_class
+        if exchange:
+            params["exchange"] = exchange
+        if region:
+            params["region"] = region
+        if from_ts:
+            params["from"] = from_ts
+        if to_ts:
+            params["to"] = to_ts
+
+        try:
+            resp = httpx.get(
+                f"{self.base_url}/backtest/signals",
+                params=params,
+                timeout=self.timeout,
+            )
+            resp.raise_for_status()
+            self.last_get_succeeded = True
+            data = resp.json()
+            if isinstance(data, dict) and isinstance(data.get("signals"), list):
+                return data
+            return self._empty_backtest_export(params)
+        except Exception:
+            self.last_get_succeeded = False
+            _log.warning(
+                "Watchtower get_backtest_signals mislukt (%s) — degrading gracefully",
+                self.base_url,
+            )
+            return self._empty_backtest_export(params)
+
     def post_outcome(self, outcome: dict) -> bool:
         """
         POST /outcomes/evaluate
@@ -111,3 +162,13 @@ class WatchtowerClient:
             return resp.status_code == 200
         except Exception:
             return False
+
+    def _empty_backtest_export(self, filters: dict[str, Any] | None = None) -> dict[str, Any]:
+        return {
+            "source": "watchtower",
+            "export_type": "signals",
+            "generated_at": None,
+            "count": 0,
+            "filters": filters or {},
+            "signals": [],
+        }

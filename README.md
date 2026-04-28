@@ -52,3 +52,30 @@ capital override.
 
 Zet live modes alleen aan wanneer credentials, brokeromgeving en risico-limieten
 bewust zijn gecontroleerd.
+
+## Watchtower backtest replay
+
+Met Watchtower draaiend op `http://127.0.0.1:8011` kun je de export ophalen,
+opslaan als replay-input en direct een conservatieve Colony-backtest draaien:
+
+```powershell
+Set-Location C:\Users\Gebruiker\ant-colony-v2
+
+.\.venv\Scripts\python.exe scripts\run_watchtower_backtest.py `
+  --watchtower-url http://127.0.0.1:8011 `
+  --asset-class crypto `
+  --exchange BITVAVO `
+  --from 2026-04-28T09:22:00Z `
+  --timeframe 1h `
+  --candle-limit 1000
+```
+
+Het script schrijft:
+
+- replay input: `logs/watchtower/signals.jsonl`
+- backtest report: `logs/backtests/watchtower_backtest_*.json`
+
+De console toont direct `win_rate`, `expectancy`, `max_drawdown`, `profit_factor`,
+per-asset stats en cross-field stats. Voor een snelle rooktest op verse signalen
+kun je `--timeframe 1m --max-bars-held 60` gebruiken; voor zuiverdere validatie
+gebruik je oudere signalen en een timeframe die past bij het Watchtower-signaal.
