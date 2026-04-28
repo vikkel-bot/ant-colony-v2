@@ -123,6 +123,51 @@ class WatchtowerClient:
             )
             return self._empty_backtest_export(params)
 
+    def get_seed_signals(
+        self,
+        asset: str | None = None,
+        from_dt: str | None = None,
+        to_dt: str | None = None,
+        min_entry_score: float = 0.5,
+        limit: int = 250,
+    ) -> list[dict]:
+        """
+        GET /backtest/signals/seed for historical seeded replay signals.
+
+        Returns a list of signal dicts. On any error, returns [] and logs a
+        warning so the colony can continue without Watchtower seed input.
+        """
+        params: dict[str, Any] = {
+            "limit": limit,
+            "min_entry_score": min_entry_score,
+        }
+        if asset:
+            params["asset"] = asset
+        if from_dt:
+            params["from_dt"] = from_dt
+        if to_dt:
+            params["to_dt"] = to_dt
+
+        try:
+            resp = httpx.get(
+                f"{self.base_url}/backtest/signals/seed",
+                params=params,
+                timeout=self.timeout,
+            )
+            resp.raise_for_status()
+            self.last_get_succeeded = True
+            data = resp.json()
+            if isinstance(data, dict) and isinstance(data.get("signals"), list):
+                return data["signals"]
+            return []
+        except Exception:
+            self.last_get_succeeded = False
+            _log.warning(
+                "Watchtower get_seed_signals mislukt (%s) — degrading gracefully",
+                self.base_url,
+            )
+            return []
+
     def post_outcome(self, outcome: dict) -> bool:
         """
         POST /outcomes/evaluate

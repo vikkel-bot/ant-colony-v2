@@ -169,6 +169,59 @@ class TestGetBacktestSignals:
 
 
 # ---------------------------------------------------------------------------
+# get_seed_signals — seeded replay export
+# ---------------------------------------------------------------------------
+
+class TestGetSeedSignals:
+    def test_returns_seed_signals_when_online(self):
+        packet = {
+            "count": 1,
+            "signals": [{"signal_id": "seed-1", "asset": "BTC-EUR"}],
+        }
+        client = _make_client()
+        with patch("httpx.get", return_value=_mock_response(200, packet)):
+            result = client.get_seed_signals(asset="BTC-EUR", min_entry_score=0.6)
+
+        assert result == packet["signals"]
+        assert client.last_get_succeeded is True
+
+    def test_seed_signals_passes_filters(self):
+        captured = {}
+
+        def fake_get(url, params=None, timeout=None):
+            captured["url"] = url
+            captured["params"] = params
+            return _mock_response(200, {"signals": []})
+
+        client = _make_client(url="http://watchtower.local")
+        with patch("httpx.get", side_effect=fake_get):
+            client.get_seed_signals(
+                limit=123,
+                asset="BTC-EUR",
+                from_dt="2026-03-01T00:00:00Z",
+                to_dt="2026-04-28T00:00:00Z",
+                min_entry_score=0.55,
+            )
+
+        assert captured["url"] == "http://watchtower.local/backtest/signals/seed"
+        assert captured["params"] == {
+            "limit": 123,
+            "min_entry_score": 0.55,
+            "asset": "BTC-EUR",
+            "from_dt": "2026-03-01T00:00:00Z",
+            "to_dt": "2026-04-28T00:00:00Z",
+        }
+
+    def test_seed_signals_returns_empty_when_offline(self):
+        client = _make_client()
+        with patch("httpx.get", side_effect=httpx.ConnectError("refused")):
+            result = client.get_seed_signals(asset="BTC-EUR")
+
+        assert result == []
+        assert client.last_get_succeeded is False
+
+
+# ---------------------------------------------------------------------------
 # post_outcome — fire-and-forget
 # ---------------------------------------------------------------------------
 

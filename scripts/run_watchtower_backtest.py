@@ -13,6 +13,7 @@ import json
 import os
 import sys
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -40,21 +41,32 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.no_fetch:
         client = WatchtowerClient(base_url=args.watchtower_url, timeout=args.timeout)
-        packet = client.get_backtest_signals(
-            limit=args.limit,
-            asset=args.asset,
-            asset_class=args.asset_class,
-            exchange=args.exchange,
-            region=args.region,
-            from_ts=args.from_ts,
-            to_ts=args.to_ts,
-        )
+        if args.signal_source == "seed":
+            seed_signals = client.get_seed_signals(
+                limit=args.limit,
+                asset=args.asset,
+                from_dt=args.from_ts,
+                to_dt=args.to_ts,
+                min_entry_score=args.min_entry_score,
+            )
+            seed_signals = _filter_seed_signals(seed_signals, args)
+            packet = _seed_export_packet(seed_signals, args)
+        else:
+            packet = client.get_backtest_signals(
+                limit=args.limit,
+                asset=args.asset,
+                asset_class=args.asset_class,
+                exchange=args.exchange,
+                region=args.region,
+                from_ts=args.from_ts,
+                to_ts=args.to_ts,
+            )
         if not client.last_get_succeeded:
             print(f"Watchtower export ophalen mislukt: {client.base_url}")
             return 2
 
         replay_path = append_watchtower_export(logs_root, packet)
-        print(f"Watchtower export opgehaald: {len(packet.get('signals', []))} signalen")
+        print(f"Watchtower {args.signal_source} export opgehaald: {len(packet.get('signals', []))} signalen")
         print(f"Replay input: {replay_path}")
     else:
         print("Watchtower fetch overgeslagen; bestaande replay logs worden gebruikt.")
@@ -71,6 +83,7 @@ def main(argv: list[str] | None = None) -> int:
         assumptions=_assumptions(args),
         timeframe=args.timeframe,
         candle_limit=args.candle_limit,
+        signal_source=args.signal_source,
     )
     report = ant.run_once()
     _print_report(report)
@@ -92,6 +105,8 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--from", dest="from_ts")
     parser.add_argument("--to", dest="to_ts")
     parser.add_argument("--limit", type=int, default=1000)
+    parser.add_argument("--signal-source", choices=["live", "seed"], default="live")
+    parser.add_argument("--min-entry-score", type=float, default=0.5)
     parser.add_argument("--symbols", default="GLOBAL", help="Comma-separated symbols, or GLOBAL for all exported signals.")
     parser.add_argument("--timeframe", default="1h")
     parser.add_argument("--candle-limit", type=int, default=1000)
@@ -107,6 +122,39 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--no-fetch", action="store_true", help="Use existing ANT_LOGS/watchtower/signals.jsonl only.")
     parser.add_argument("--print-json", action="store_true")
     return parser.parse_args(argv)
+
+
+def _seed_export_packet(signals: list[dict], args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "source": "watchtower",
+        "export_type": "seed_signals",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "count": len(signals),
+        "filters": {
+            "asset": args.asset,
+            "asset_class": args.asset_class,
+            "exchange": args.exchange,
+            "region": args.region,
+            "from": args.from_ts,
+            "to": args.to_ts,
+            "min_entry_score": args.min_entry_score,
+            "signal_source": "seed",
+        },
+        "signals": signals,
+    }
+
+
+def _filter_seed_signals(signals: list[dict], args: argparse.Namespace) -> list[dict]:
+    filtered = []
+    for signal in signals:
+        if args.asset_class and signal.get("asset_class") and str(signal["asset_class"]).lower() != args.asset_class.lower():
+            continue
+        if args.exchange and signal.get("exchange") and str(signal["exchange"]).upper() != args.exchange.upper():
+            continue
+        if args.region and signal.get("region") and str(signal["region"]).lower() != args.region.lower():
+            continue
+        filtered.append(signal)
+    return filtered
 
 
 def _symbols(value: str) -> list[str]:

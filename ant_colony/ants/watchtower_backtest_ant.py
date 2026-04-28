@@ -52,6 +52,7 @@ class WatchtowerBacktestAnt:
         assumptions: WatchtowerBacktestAssumptions | None = None,
         timeframe: str = "1h",
         candle_limit: int = 1000,
+        signal_source: str = "live",
     ) -> None:
         self.ant_id = ant_id
         self.mission = mission
@@ -61,6 +62,7 @@ class WatchtowerBacktestAnt:
         self.assumptions = assumptions or WatchtowerBacktestAssumptions()
         self.timeframe = timeframe
         self.candle_limit = candle_limit
+        self.signal_source = signal_source
         self._backtester = WatchtowerSignalBacktester()
         self._log = logging.getLogger(f"ant.watchtower_backtest.{ant_id[:8]}")
         self.last_report_path: Path | None = None
@@ -84,6 +86,7 @@ class WatchtowerBacktestAnt:
         bars_by_symbol = self._load_bars_by_symbol(sorted({s.symbol for s in signals}))
         report = self._backtester.run(signals, bars_by_symbol, self.assumptions)
         payload = report.to_dict()
+        payload["signal_source"] = self.signal_source
         report_path = self._write_report(payload)
         if report_path is not None:
             payload["report_path"] = str(report_path)

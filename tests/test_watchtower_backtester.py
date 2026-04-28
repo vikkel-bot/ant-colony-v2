@@ -321,6 +321,46 @@ class TestWatchtowerBacktestAnt:
         assert saved["total_trades"] == 1
         assert report["report_path"].endswith(".json")
 
+    def test_run_once_reports_seed_signal_source(self, tmp_path):
+        log_dir = tmp_path / "watchtower"
+        log_dir.mkdir()
+        record = {
+            "timestamp": "2026-04-27T10:00:00+00:00",
+            "signals": [
+                {
+                    "signal_id": "seed-wt-1",
+                    "asset": "BTC-EUR",
+                    "direction": "LONG",
+                    "entry_score": 0.9,
+                    "confidence": 0.8,
+                    "asset_class": "crypto",
+                }
+            ],
+        }
+        (log_dir / "signals.jsonl").write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+        adapter = MagicMock()
+        adapter.get_candles.return_value = [
+            SimpleNamespace(timestamp=_ts(11), open=100.0, high=104.0, low=99.0, close=103.0, volume=1.0),
+        ]
+        registry = MagicMock()
+        registry.get.return_value = adapter
+
+        ant = WatchtowerBacktestAnt(
+            ant_id="wtbt-seed",
+            mission=self._mission(),
+            scheduler=MagicMock(),
+            logs_root=tmp_path,
+            biome_registry=registry,
+            assumptions=_assumptions(),
+            signal_source="seed",
+        )
+
+        report = ant.run_once()
+
+        assert report["signal_source"] == "seed"
+        assert report["total_trades"] == 1
+
     def test_eth_btc_ratio_uses_synthetic_candles(self, tmp_path):
         log_dir = tmp_path / "watchtower"
         log_dir.mkdir()
