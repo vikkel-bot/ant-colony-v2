@@ -57,13 +57,13 @@ class HeartbeatThread(threading.Thread):
             daemon=True,
             name=f"hb-{ant.ant_id[:8]}",
         )
-        self._ant      = ant
-        self._interval = interval
-        self._stop     = threading.Event()
+        self._ant        = ant
+        self._interval   = interval
+        self._stop_event = threading.Event()
 
     def run(self) -> None:
         """Heartbeat-loop: wacht interval seconden, stuur heartbeat, herhaal."""
-        while not self._stop.wait(self._interval):
+        while not self._stop_event.wait(self._interval):
             if self._ant._status != AntStatus.RUNNING:
                 break
             try:
@@ -73,5 +73,6 @@ class HeartbeatThread(threading.Thread):
 
     def stop(self) -> None:
         """Signaleer stop en wacht tot thread klaar is (max interval + 1s)."""
-        self._stop.set()
-        self.join(timeout=self._interval + 1.0)
+        self._stop_event.set()
+        if self is not threading.current_thread() and self._started.is_set():
+            self.join(timeout=self._interval + 1.0)
