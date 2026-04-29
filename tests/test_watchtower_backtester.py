@@ -256,6 +256,27 @@ class TestWatchtowerSignalLoader:
         assert len(signals) == 1
         assert signals[0].signal_id == "dup-1"
 
+    def test_loader_can_replay_neutral_signals_as_long(self, tmp_path):
+        packet = {
+            "generated_at": "2026-04-27T10:00:00+00:00",
+            "signals": [
+                {
+                    "signal_id": "neutral-1",
+                    "asset": "BTC-EUR",
+                    "direction": "neutral",
+                    "timestamp": "2026-04-27T10:00:00+00:00",
+                }
+            ],
+        }
+        append_watchtower_export(tmp_path, packet)
+
+        assert load_watchtower_signals(tmp_path) == []
+        signals = load_watchtower_signals(tmp_path, include_neutral_as_long=True)
+
+        assert len(signals) == 1
+        assert signals[0].direction == "long"
+        assert signals[0].raw["original_direction"] == "neutral"
+
 
 class TestWatchtowerBacktestAnt:
     def _mission(self) -> Mission:
@@ -360,6 +381,101 @@ class TestWatchtowerBacktestAnt:
 
         assert report["signal_source"] == "seed"
         assert report["total_trades"] == 1
+
+    def test_run_once_filters_degraded_seed_market_quality(self, tmp_path):
+        log_dir = tmp_path / "watchtower"
+        log_dir.mkdir()
+        record = {
+            "timestamp": "2026-04-27T10:00:00+00:00",
+            "signals": [
+                {
+                    "signal_id": "seed-historical",
+                    "asset": "BTC-EUR",
+                    "direction": "LONG",
+                    "timestamp": "2026-04-27T10:00:00+00:00",
+                    "entry_score": 0.9,
+                    "asset_class": "crypto",
+                    "seed_market_quality": "historical",
+                },
+                {
+                    "signal_id": "seed-degraded",
+                    "asset": "BTC-EUR",
+                    "direction": "LONG",
+                    "timestamp": "2026-04-27T11:00:00+00:00",
+                    "entry_score": 0.9,
+                    "asset_class": "crypto",
+                    "seed_market_quality": "degraded",
+                },
+            ],
+        }
+        (log_dir / "signals.jsonl").write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+        adapter = MagicMock()
+        adapter.get_candles.return_value = [
+            SimpleNamespace(timestamp=_ts(11), open=100.0, high=104.0, low=99.0, close=103.0, volume=1.0),
+            SimpleNamespace(timestamp=_ts(12), open=103.0, high=107.0, low=102.0, close=106.0, volume=1.0),
+        ]
+        registry = MagicMock()
+        registry.get.return_value = adapter
+
+        ant = WatchtowerBacktestAnt(
+            ant_id="wtbt-quality",
+            mission=self._mission(),
+            scheduler=MagicMock(),
+            logs_root=tmp_path,
+            biome_registry=registry,
+            assumptions=_assumptions(max_concurrent_positions=3),
+            signal_source="seed",
+            min_market_quality="historical",
+        )
+
+        report = ant.run_once()
+
+        assert report["min_market_quality"] == "historical"
+        assert report["total_signals"] == 1
+        assert report["trades"][0]["signal_id"] == "seed-historical"
+
+    def test_run_once_can_include_neutral_signals(self, tmp_path):
+        log_dir = tmp_path / "watchtower"
+        log_dir.mkdir()
+        record = {
+            "timestamp": "2026-04-27T10:00:00+00:00",
+            "signals": [
+                {
+                    "signal_id": "seed-neutral",
+                    "asset": "BTC-EUR",
+                    "direction": "neutral",
+                    "timestamp": "2026-04-27T10:00:00+00:00",
+                    "entry_score": 0.9,
+                    "asset_class": "crypto",
+                    "seed_market_quality": "historical",
+                },
+            ],
+        }
+        (log_dir / "signals.jsonl").write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+        adapter = MagicMock()
+        adapter.get_candles.return_value = [
+            SimpleNamespace(timestamp=_ts(11), open=100.0, high=104.0, low=99.0, close=103.0, volume=1.0),
+        ]
+        registry = MagicMock()
+        registry.get.return_value = adapter
+
+        ant = WatchtowerBacktestAnt(
+            ant_id="wtbt-neutral",
+            mission=self._mission(),
+            scheduler=MagicMock(),
+            logs_root=tmp_path,
+            biome_registry=registry,
+            assumptions=_assumptions(),
+            include_neutral=True,
+        )
+
+        report = ant.run_once()
+
+        assert report["include_neutral"] is True
+        assert report["total_trades"] == 1
+        assert report["trades"][0]["direction"] == "long"
 
     def test_eth_btc_ratio_uses_synthetic_candles(self, tmp_path):
         log_dir = tmp_path / "watchtower"

@@ -84,6 +84,8 @@ def main(argv: list[str] | None = None) -> int:
         timeframe=args.timeframe,
         candle_limit=args.candle_limit,
         signal_source=args.signal_source,
+        min_market_quality=args.min_market_quality,
+        include_neutral=args.include_neutral,
     )
     report = ant.run_once()
     _print_report(report)
@@ -107,6 +109,8 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=1000)
     parser.add_argument("--signal-source", choices=["live", "seed"], default="live")
     parser.add_argument("--min-entry-score", type=float, default=0.5)
+    parser.add_argument("--min-market-quality", choices=["historical"], help="Skip seed signals without historical market candles.")
+    parser.add_argument("--include-neutral", action="store_true", help="Replay neutral Watchtower signals as long for edge analysis.")
     parser.add_argument("--symbols", default="GLOBAL", help="Comma-separated symbols, or GLOBAL for all exported signals.")
     parser.add_argument("--timeframe", default="1h")
     parser.add_argument("--candle-limit", type=int, default=1000)
@@ -138,6 +142,8 @@ def _seed_export_packet(signals: list[dict], args: argparse.Namespace) -> dict[s
             "from": args.from_ts,
             "to": args.to_ts,
             "min_entry_score": args.min_entry_score,
+            "min_market_quality": args.min_market_quality,
+            "include_neutral": args.include_neutral,
             "signal_source": "seed",
         },
         "signals": signals,
@@ -153,6 +159,10 @@ def _filter_seed_signals(signals: list[dict], args: argparse.Namespace) -> list[
             continue
         if args.region and signal.get("region") and str(signal["region"]).lower() != args.region.lower():
             continue
+        if args.min_market_quality == "historical":
+            quality = str(signal.get("seed_market_quality") or "").lower()
+            if quality != "historical":
+                continue
         filtered.append(signal)
     return filtered
 

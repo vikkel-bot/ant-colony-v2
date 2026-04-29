@@ -174,7 +174,10 @@ class WatchtowerBacktestReport:
 # Signal loading
 # ---------------------------------------------------------------------------
 
-def load_watchtower_signals(logs_root: Path) -> list[WatchtowerSignal]:
+def load_watchtower_signals(
+    logs_root: Path,
+    include_neutral_as_long: bool = False,
+) -> list[WatchtowerSignal]:
     """
     Load filtered signals from ANT_LOGS/watchtower/signals.jsonl.
 
@@ -198,7 +201,11 @@ def load_watchtower_signals(logs_root: Path) -> list[WatchtowerSignal]:
                 continue
             snapshot_ts = _parse_ts(snapshot.get("timestamp"))
             for raw in snapshot.get("signals") or []:
-                signal = normalize_watchtower_signal(raw, fallback_timestamp=snapshot_ts)
+                signal = normalize_watchtower_signal(
+                    raw,
+                    fallback_timestamp=snapshot_ts,
+                    include_neutral_as_long=include_neutral_as_long,
+                )
                 if signal is not None and signal.signal_id not in seen_ids:
                     seen_ids.add(signal.signal_id)
                     signals.append(signal)
@@ -237,39 +244,45 @@ def append_watchtower_export(logs_root: Path, export_packet: dict[str, Any]) -> 
 def normalize_watchtower_signal(
     raw: dict[str, Any],
     fallback_timestamp: datetime | None = None,
+    include_neutral_as_long: bool = False,
 ) -> WatchtowerSignal | None:
     """Normalize one raw Watchtower signal dict."""
-    symbol = str(raw.get("asset") or raw.get("symbol") or "").strip()
+    raw_payload = dict(raw)
+    symbol = str(raw_payload.get("asset") or raw_payload.get("symbol") or "").strip()
     if not symbol:
         return None
 
-    ts = _parse_ts(raw.get("timestamp")) or fallback_timestamp
+    ts = _parse_ts(raw_payload.get("timestamp")) or fallback_timestamp
     if ts is None:
         return None
 
-    direction = str(raw.get("direction") or "LONG").strip().lower()
+    direction = str(raw_payload.get("direction") or "LONG").strip().lower()
+    if direction == "neutral" and include_neutral_as_long:
+        raw_payload["original_direction"] = "neutral"
+        raw_payload["direction"] = "long"
+        direction = "long"
     if direction not in ("long", "short"):
         return None
 
     asset_class = str(
-        raw.get("asset_class") or raw.get("biome") or _infer_asset_class(symbol)
+        raw_payload.get("asset_class") or raw_payload.get("biome") or _infer_asset_class(symbol)
     ).strip().lower()
     source_field = str(
-        raw.get("source_field") or raw.get("field") or asset_class
+        raw_payload.get("source_field") or raw_payload.get("field") or asset_class
     ).strip().lower()
-    linked = tuple(str(x) for x in (raw.get("linked_assets") or []) if x)
+    linked = tuple(str(x) for x in (raw_payload.get("linked_assets") or []) if x)
 
     return WatchtowerSignal(
-        signal_id=str(raw.get("signal_id") or f"wt-{symbol}-{int(ts.timestamp())}"),
+        signal_id=str(raw_payload.get("signal_id") or f"wt-{symbol}-{int(ts.timestamp())}"),
         symbol=symbol,
         direction=direction,
         timestamp=ts,
-        entry_score=_safe_float(raw.get("entry_score"), 0.0),
-        confidence=_safe_float(raw.get("confidence"), 0.0),
+        entry_score=_safe_float(raw_payload.get("entry_score"), 0.0),
+        confidence=_safe_float(raw_payload.get("confidence"), 0.0),
         asset_class=asset_class or "unknown",
         source_field=source_field or "unknown",
         linked_assets=linked,
-        raw=dict(raw),
+        raw=raw_payload,
     )
 
 

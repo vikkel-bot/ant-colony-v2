@@ -53,6 +53,8 @@ class WatchtowerBacktestAnt:
         timeframe: str = "1h",
         candle_limit: int = 1000,
         signal_source: str = "live",
+        min_market_quality: str | None = None,
+        include_neutral: bool = False,
     ) -> None:
         self.ant_id = ant_id
         self.mission = mission
@@ -63,6 +65,8 @@ class WatchtowerBacktestAnt:
         self.timeframe = timeframe
         self.candle_limit = candle_limit
         self.signal_source = signal_source
+        self.min_market_quality = min_market_quality
+        self.include_neutral = include_neutral
         self._backtester = WatchtowerSignalBacktester()
         self._log = logging.getLogger(f"ant.watchtower_backtest.{ant_id[:8]}")
         self.last_report_path: Path | None = None
@@ -78,7 +82,11 @@ class WatchtowerBacktestAnt:
         if self.logs_root is None:
             return self._empty_report("logs_root_none")
 
-        signals = load_watchtower_signals(self.logs_root)
+        signals = load_watchtower_signals(
+            self.logs_root,
+            include_neutral_as_long=self.include_neutral,
+        )
+        signals = self._filter_market_quality(signals)
         allowed = self._allowed_symbols()
         if allowed is not None:
             signals = [s for s in signals if s.symbol in allowed]
@@ -87,6 +95,8 @@ class WatchtowerBacktestAnt:
         report = self._backtester.run(signals, bars_by_symbol, self.assumptions)
         payload = report.to_dict()
         payload["signal_source"] = self.signal_source
+        payload["min_market_quality"] = self.min_market_quality
+        payload["include_neutral"] = self.include_neutral
         report_path = self._write_report(payload)
         if report_path is not None:
             payload["report_path"] = str(report_path)
@@ -109,6 +119,15 @@ class WatchtowerBacktestAnt:
             if bars:
                 result[symbol] = bars
         return result
+
+    def _filter_market_quality(self, signals):
+        if self.min_market_quality != "historical":
+            return signals
+        return [
+            signal
+            for signal in signals
+            if str(signal.raw.get("seed_market_quality") or "").lower() == "historical"
+        ]
 
     def _load_symbol_bars(self, symbol: str) -> list[OHLCVBar]:
         if symbol.upper() == "ETH-BTC":
