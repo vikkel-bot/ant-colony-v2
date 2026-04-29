@@ -106,24 +106,45 @@ class WatchtowerAnt:
             return
 
         received = len(signals)
-        filtered = [
-            s for s in signals
-            if (
-                s.get("entry_score", 0.0) >= _MIN_ENTRY_SCORE
-                and s.get("confidence", 0.0) >= _MIN_CONFIDENCE
-                and "HIGH_RISK" not in s.get("risk_flags", [])
-            )
-        ]
+        filtered: list[dict] = []
+        rejections: list[dict] = []
+        for signal in signals:
+            reasons: list[str] = []
+            if signal.get("entry_score", 0.0) < _MIN_ENTRY_SCORE:
+                reasons.append("score too low")
+            if signal.get("confidence", 0.0) < _MIN_CONFIDENCE:
+                reasons.append("confidence too low")
+            if "HIGH_RISK" in signal.get("risk_flags", []):
+                reasons.append("risk_flag HIGH_RISK")
+
+            if reasons:
+                rejections.append({
+                    "signal_id": signal.get("signal_id") or signal.get("id"),
+                    "asset": signal.get("asset") or signal.get("symbol"),
+                    "direction": signal.get("direction"),
+                    "timestamp": signal.get("timestamp") or signal.get("created_at"),
+                    "entry_score": signal.get("entry_score"),
+                    "confidence": signal.get("confidence"),
+                    "risk_flags": signal.get("risk_flags", []),
+                    "rejection_reason": "; ".join(reasons),
+                })
+            else:
+                filtered.append(signal)
 
         self._log.info(
             "Watchtower poll | ontvangen=%d  door_filter=%d",
             received, len(filtered),
         )
 
-        self._write_snapshot(now, received, filtered)   # altijd schrijven — ook bij 0 gefilterd (voor stats)
+        # altijd schrijven — ook bij 0 gefilterd (voor dashboard stats)
+        self._write_snapshot(now, received, filtered, rejections)
 
     def _write_snapshot(
-        self, now: datetime, total_received: int, filtered: list[dict]
+        self,
+        now: datetime,
+        total_received: int,
+        filtered: list[dict],
+        rejections: list[dict] | None = None,
     ) -> None:
         """Schrijf poll-resultaat naar ANT_LOGS/watchtower/signals.jsonl."""
         if self._out_dir is None:
@@ -135,6 +156,7 @@ class WatchtowerAnt:
             "received":      total_received,
             "passed_filter": len(filtered),
             "signals":       filtered,
+            "rejections":    rejections or [],
         }
         log_path = self._out_dir / "signals.jsonl"
         try:

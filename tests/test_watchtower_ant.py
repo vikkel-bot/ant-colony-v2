@@ -191,6 +191,7 @@ class TestSignalFilter:
         ant._tick()
         rec = json.loads((tmp_path / "watchtower" / "signals.jsonl").read_text())
         assert rec["passed_filter"] == 0
+        assert rec["rejections"][0]["rejection_reason"] == "risk_flag HIGH_RISK"
 
     def test_zero_passed_filter_still_writes_snapshot(self, tmp_path):
         """Als geen signalen door het filter komen maar Watchtower online is, schrijft toch snapshot (voor stats)."""
@@ -218,6 +219,7 @@ class TestSignalFilter:
         rec = json.loads(log_path.read_text(encoding="utf-8").strip())
         assert rec["received"] == 1
         assert rec["passed_filter"] == 0
+        assert rec["rejections"][0]["rejection_reason"] == "score too low; confidence too low"
         assert rec["signals"] == []
 
 

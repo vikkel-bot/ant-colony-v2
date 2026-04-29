@@ -789,6 +789,61 @@
     .eq-neg  { color: var(--pnl-neg); }
     .eq-mut  { color: var(--muted); }
 
+    .eq-focus-stack {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+
+    .eq-table-wrap {
+      width: 100%;
+      overflow-x: auto;
+    }
+
+    .eq-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 10px;
+      min-width: 920px;
+    }
+
+    .eq-table th {
+      text-align: left;
+      font-size: 8px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: .4px;
+      color: var(--faint);
+      padding: 0 8px 6px 0;
+      border-bottom: 1px solid var(--border);
+      white-space: nowrap;
+    }
+
+    .eq-table td {
+      padding: 6px 8px 6px 0;
+      border-bottom: 1px solid var(--border-soft);
+      vertical-align: top;
+      white-space: nowrap;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .eq-table tr:last-child td { border-bottom: none; }
+    .eq-table td.wrap { white-space: normal; min-width: 220px; line-height: 1.3; color: var(--muted); }
+    .eq-summary-line {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px 14px;
+      margin-top: 8px;
+      padding-top: 7px;
+      border-top: 1px solid var(--border-soft);
+      font-size: 10px;
+      color: var(--muted);
+    }
+    .eq-summary-line strong { color: var(--text); font-weight: 700; }
+    .eq-accept-yes { color: var(--pnl-pos); font-weight: 800; }
+    .eq-accept-no  { color: var(--pnl-neg); font-weight: 800; }
+
     .eq-score-pill {
       font-size: 9px; font-weight: 700;
       padding: 1px 5px; border-radius: 3px;
@@ -1127,6 +1182,8 @@ const S = {
   queenStatus: null,
   perfChart:   { points:[], total_pnl:0, curve_label:'vandaag', dag:0, week:0, maand:0, jaar:0, alltime:0 },
   equities:    null,
+  equitiesPositions: { open_positions:[], closed_positions:[], summary:{}, fetched_at:'' },
+  watchtowerReceived: { signals:[], summary:{}, fetched_at:'' },
   news:        null,
   briefing:    null,
   antEvents:   {},
@@ -1200,13 +1257,15 @@ async function fetchAll() {
   const get = url => _fetchQ(() => fetch(url)
     .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
     .catch(e => { console.error(`[dashboard] GET ${url} failed:`, e.message); return null; }));
-  const [st, me, br, cap, pos, ti, act, qs, pc, eq, oq, nw, brf, wt] = await Promise.all([
+  const [st, me, br, cap, pos, ti, act, qs, pc, eq, eqp, wtr, oq, nw, brf, wt] = await Promise.all([
     get('/api/status'), get('/api/metrics'),
     get('/api/brokers'), get('/api/capital'),
     get('/api/positions'),
     get('/api/ticker'), get('/api/ants/activity'),
     get('/api/queen/status'), get('/api/performance/chart'),
     get('/api/equities/status'),
+    get('/api/equities/positions'),
+    get('/api/watchtower/signals/received'),
     get('/api/operator/queue'),
     get('/api/news/latest'),
     get('/api/equities/briefing'),
@@ -1236,6 +1295,8 @@ async function fetchAll() {
   if (qs)  S.queenStatus = qs;
   if (pc)  S.perfChart   = pc;
   if (eq)  S.equities    = eq;
+  if (eqp) S.equitiesPositions = eqp;
+  if (wtr) S.watchtowerReceived = wtr;
   if (nw)  S.news        = nw;
   if (brf) S.briefing    = brf;
   if (wt)  S.watchtower  = wt;
@@ -1593,6 +1654,21 @@ function renderQueen() {
     stratHtml = '<div style="font-size:10px;color:var(--faint);margin-bottom:7px">Nog geen gekwalificeerde strategieën</div>';
   }
 
+  const wt24 = q.watchtower_signals_24h || {};
+  const wtReasons = q.watchtower_rejection_reasons || {};
+  const wtLast = q.watchtower_last_signal || null;
+  const wtLastTxt = wtLast && wtLast.timestamp
+    ? `${fTS(wtLast.timestamp) || wtLast.timestamp} · ${wtLast.asset || '—'}`
+    : '—';
+  const wtHtml = `<div class="queen-decision" style="margin-bottom:7px">
+    <div class="queen-dec-ts">Watchtower → Queen</div>
+    <div style="display:grid;grid-template-columns:1fr auto;gap:3px 8px;font-size:10px;color:var(--muted)">
+      <span>Laatste signaal</span><strong style="color:var(--text);font-weight:600">${wtLastTxt}</strong>
+      <span>24u ontvangen</span><strong style="color:var(--text);font-weight:600">${wt24.received || 0} · ${wt24.accepted || 0} ja · ${wt24.rejected || 0} nee</strong>
+      <span>Afwijsredenen</span><strong style="color:var(--text);font-weight:600">regime=${wtReasons.regime || 0} · score=${wtReasons.score || 0} · risk_flag=${wtReasons.risk_flag || 0}</strong>
+    </div>
+  </div>`;
+
   const expandedCls = S.expandedQueen ? ' qd-expanded' : '';
   let decisionHtml = '';
   if (q.last_decision) {
@@ -1622,7 +1698,7 @@ function renderQueen() {
     </div>`;
   }
 
-  el.innerHTML = regimeHtml + stratHtml + decisionHtml;
+  el.innerHTML = regimeHtml + stratHtml + wtHtml + decisionHtml;
 }
 
 // ── Brokers ───────────────────────────────────
@@ -2240,6 +2316,154 @@ function fTS(ts) {
   } catch { return null; }
 }
 
+function h(v) {
+  return String(v == null ? '' : v)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function fPctPlain(v) {
+  if (v == null) return '—';
+  const n = Number(v);
+  const sign = n >= 0 ? '+' : '';
+  return sign + n.toFixed(2) + '%';
+}
+
+function fScorePlain(v) {
+  if (v == null) return '—';
+  return Number(v).toFixed(3);
+}
+
+function fHoursPlain(v) {
+  if (v == null) return '—';
+  const n = Number(v);
+  if (n >= 24) return (n / 24).toFixed(1) + ' dagen';
+  return n.toFixed(1) + ' uur';
+}
+
+function pnlPctClass(v) {
+  if (v == null) return 'eq-mut';
+  return Number(v) > 0 ? 'eq-pos' : Number(v) < 0 ? 'eq-neg' : 'eq-mut';
+}
+
+function renderOpenEquitiesPositions() {
+  const data = S.equitiesPositions || {};
+  const rows = data.open_positions || [];
+  const summary = data.summary || {};
+  const table = rows.length
+    ? `<div class="eq-table-wrap"><table class="eq-table">
+      <thead><tr>
+        <th>Symbol</th><th>Richting</th><th>Entry</th><th>Huidig</th><th>PnL %</th><th>PnL €</th>
+        <th>Open sinds</th><th>TTL</th><th>Stop loss</th><th>Trailing stop</th><th>Exit reden</th>
+      </tr></thead>
+      <tbody>${rows.map(p => {
+        const cls = pnlPctClass(p.pnl_pct);
+        const opened = `${fTS(p.opened_at) || '—'}${p.open_since ? `<div style="color:var(--faint);font-size:9px">${h(p.open_since)}</div>` : ''}`;
+        return `<tr>
+          <td><strong>${h(p.symbol)}</strong></td>
+          <td>${h(p.side || 'LONG')}</td>
+          <td>${fPosPrice(p.entry_price)}</td>
+          <td>${fPosPrice(p.current_price)}</td>
+          <td class="${cls}">${fPctPlain(p.pnl_pct)}</td>
+          <td class="${cls}">${fPnL(p.pnl_eur)}</td>
+          <td>${opened}</td>
+          <td>${p.ttl_trading_days_remaining == null ? '—' : Number(p.ttl_trading_days_remaining).toFixed(1) + 'd'}</td>
+          <td>${fPosPrice(p.stop_loss_price)}</td>
+          <td>${fPosPrice(p.trailing_stop_price)}</td>
+          <td>${h(p.exit_reason || '—')}</td>
+        </tr>`;
+      }).join('')}</tbody>
+    </table></div>`
+    : '<div class="empty" style="padding:8px 0">Geen open equities posities</div>';
+
+  const best = summary.best_position ? `${h(summary.best_position.symbol)} ${fPctPlain(summary.best_position.pnl_pct)}` : '—';
+  const worst = summary.worst_position ? `${h(summary.worst_position.symbol)} ${fPctPlain(summary.worst_position.pnl_pct)}` : '—';
+  return `<div class="card">
+    <div class="eq-header"><div class="card-title" style="margin:0">Open Posities Equities</div>${eqBadge(`${rows.length} open`, rows.length ? 'actief' : 'wacht')}</div>
+    ${table}
+    <div class="eq-summary-line">
+      <span>Totaal ingezet: <strong>${fEUR2(summary.total_invested_equities || 0)}</strong></span>
+      <span>Gem. PnL: <strong class="${pnlPctClass(summary.avg_pnl_pct_open)}">${fPctPlain(summary.avg_pnl_pct_open)}</strong></span>
+      <span>Beste: <strong>${best}</strong></span>
+      <span>Slechtste: <strong>${worst}</strong></span>
+    </div>
+  </div>`;
+}
+
+function renderClosedEquitiesPositions() {
+  const data = S.equitiesPositions || {};
+  const rows = data.closed_positions || [];
+  const summary = data.summary || {};
+  const table = rows.length
+    ? `<div class="eq-table-wrap"><table class="eq-table">
+      <thead><tr>
+        <th>Symbol</th><th>Richting</th><th>Entry</th><th>Exit</th><th>PnL %</th><th>Gerealiseerd</th>
+        <th>Open sinds</th><th>Duur</th><th>Exit reden</th><th>Stop loss</th><th>Trailing stop</th>
+      </tr></thead>
+      <tbody>${rows.map(p => {
+        const cls = pnlPctClass(p.pnl_pct);
+        return `<tr>
+          <td><strong>${h(p.symbol)}</strong></td>
+          <td>${h(p.side || 'LONG')}</td>
+          <td>${fPosPrice(p.entry_price)}</td>
+          <td>${fPosPrice(p.exit_price)}</td>
+          <td class="${cls}">${fPctPlain(p.pnl_pct)}</td>
+          <td class="${cls}">${fPnL(p.realized_pnl_eur)}</td>
+          <td>${fTS(p.opened_at) || '—'}</td>
+          <td>${fHoursPlain(p.duration_hours)}</td>
+          <td>${h(p.exit_reason || '—')}</td>
+          <td>${fPosPrice(p.stop_loss_price)}</td>
+          <td>${fPosPrice(p.trailing_stop_price)}</td>
+        </tr>`;
+      }).join('')}</tbody>
+    </table></div>`
+    : '<div class="empty" style="padding:8px 0">Geen gesloten equities posities</div>';
+
+  return `<div class="card">
+    <div class="eq-header"><div class="card-title" style="margin:0">Gesloten Posities <span style="color:var(--faint);font-weight:600">(laatste 30)</span></div>${eqBadge(`${rows.length} gesloten`, rows.length ? 'actief' : 'wacht')}</div>
+    ${table}
+    <div class="eq-summary-line">
+      <span>Wins: <strong>${summary.wins || 0}</strong></span>
+      <span>Losses: <strong>${summary.losses || 0}</strong></span>
+      <span>Win rate: <strong>${summary.win_rate == null ? '—' : Number(summary.win_rate).toFixed(1) + '%'}</strong></span>
+      <span>Totaal PnL: <strong class="${pnlPctClass(summary.total_realized_pnl)}">${fPnL(summary.total_realized_pnl || 0)}</strong></span>
+    </div>
+  </div>`;
+}
+
+function renderWatchtowerReceivedEquities() {
+  const data = S.watchtowerReceived || {};
+  const rows = (data.signals || []).slice(0, 50);
+  const last24 = rows.filter(s => {
+    try { return (Date.now() - new Date(s.timestamp).getTime()) <= 24 * 3600 * 1000; }
+    catch { return true; }
+  });
+  const table = last24.length
+    ? `<div class="eq-table-wrap"><table class="eq-table" style="min-width:760px">
+      <thead><tr>
+        <th>Timestamp</th><th>Asset</th><th>Entry score</th><th>Confidence</th><th>Queen</th><th>Afwijsreden</th>
+      </tr></thead>
+      <tbody>${last24.map(s => {
+        const accepted = !!s.queen_accepted;
+        return `<tr>
+          <td>${fTS(s.timestamp) || '—'}</td>
+          <td><strong>${h(s.asset)}</strong></td>
+          <td>${fScorePlain(s.entry_score)}</td>
+          <td>${fScorePlain(s.confidence)}</td>
+          <td class="${accepted ? 'eq-accept-yes' : 'eq-accept-no'}">${accepted ? 'JA' : 'NEE'}</td>
+          <td class="wrap">${accepted ? '—' : h(s.rejection_reason || 'onbekend')}</td>
+        </tr>`;
+      }).join('')}</tbody>
+    </table></div>`
+    : '<div class="empty" style="padding:8px 0">Geen Watchtower signalen in de laatste 24u</div>';
+  return `<div class="card">
+    <div class="eq-header"><div class="card-title" style="margin:0">Watchtower Signalen Ontvangen <span style="color:var(--faint);font-weight:600">(laatste 24u)</span></div>${eqBadge(`${last24.length} signals`, last24.length ? 'signaal' : 'wacht')}</div>
+    ${table}
+  </div>`;
+}
+
 function renderEquities() {
   const el = document.getElementById('equities-content');
   const eq = S.equities;
@@ -2253,6 +2477,12 @@ function renderEquities() {
   const enabledHtml = `<div class="eq-enabled-row">
     <div class="eq-enabled-dot ${dotCls}"></div>
     <span>${statusTxt}</span>
+  </div>`;
+
+  const focusHtml = `<div class="eq-focus-stack">
+    ${renderOpenEquitiesPositions()}
+    ${renderClosedEquitiesPositions()}
+    ${renderWatchtowerReceivedEquities()}
   </div>`;
 
   // ── MARKTOPENING BRIEFING ─────────────────────
@@ -2523,7 +2753,7 @@ function renderEquities() {
     ${divTS ? `<div class="ts-line">Laatste scan: ${divTS}</div>` : ''}
   </div>`;
 
-  el.innerHTML = enabledHtml + briefingCard + `<div class="eq-grid">${watchtowerCard}${newsCard}${paperCard}${sectorCard}${piotCard}${divCard}</div>`;
+  el.innerHTML = enabledHtml + focusHtml + briefingCard + `<div class="eq-grid">${watchtowerCard}${newsCard}${paperCard}${sectorCard}${piotCard}${divCard}</div>`;
 }
 
 function fPrice2(v) {

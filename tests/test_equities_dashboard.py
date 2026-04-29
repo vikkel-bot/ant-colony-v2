@@ -11,7 +11,8 @@ import os
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -327,3 +328,146 @@ class TestReadEquitiesData:
         }])
         result = _read_equities_data(tmp_path)
         assert result["piotroski_candidates"] == []
+
+
+# ---------------------------------------------------------------------------
+# 8. Equities posities endpoint
+# ---------------------------------------------------------------------------
+
+class TestEquitiesPositionsEndpoint:
+
+    def _registry_with_price(self, price: float) -> MagicMock:
+        adapter = MagicMock()
+        adapter.get_market_data.return_value = SimpleNamespace(close=price)
+        registry = MagicMock()
+        registry.list_biomes.return_value = ["equities"]
+        registry.get.return_value = adapter
+        return registry
+
+    def test_returns_200_empty_positions(self):
+        r = _client(ColonyContext()).get("/api/equities/positions")
+        assert r.status_code == 200
+        d = r.json()
+        assert d["open_positions"] == []
+        assert d["closed_positions"] == []
+        assert d["summary"]["open_count"] == 0
+
+    def test_pnl_calculated_for_open_equities_position(self, tmp_path: Path):
+        _write_jsonl(tmp_path / "paper" / "eq-ant.jsonl", [{
+            "timestamp": _now_iso(),
+            "payload": {
+                "action": "trade_opened",
+                "position_id": "eq-1",
+                "symbol": "AAPL",
+                "biome": "equities",
+                "side": "long",
+                "entry_price": 100.0,
+                "quantity": 2.0,
+                "stop_loss": 92.0,
+                "take_profit": 120.0,
+                "trailing_stop_price": 95.0,
+            },
+        }])
+        ctx = ColonyContext(
+            logs_root=tmp_path,
+            biome_registry=self._registry_with_price(110.0),
+        )
+        d = _client(ctx).get("/api/equities/positions").json()
+        assert len(d["open_positions"]) == 1
+        pos = d["open_positions"][0]
+        assert pos["symbol"] == "AAPL"
+        assert pos["current_price"] == pytest.approx(110.0)
+        assert pos["pnl_pct"] == pytest.approx(10.0)
+        assert pos["pnl_eur"] == pytest.approx(20.0)
+        assert d["summary"]["total_invested_equities"] == pytest.approx(200.0)
+
+    def test_closed_positions_summary(self, tmp_path: Path):
+        now = _now_iso()
+        _write_jsonl(tmp_path / "paper" / "eq-ant.jsonl", [
+            {
+                "timestamp": now,
+                "payload": {
+                    "action": "trade_opened",
+                    "position_id": "eq-1",
+                    "symbol": "MSFT",
+                    "biome": "equities",
+                    "side": "long",
+                    "entry_price": 100.0,
+                    "quantity": 1.0,
+                    "stop_loss": 92.0,
+                    "take_profit": 120.0,
+                    "trailing_stop_price": 95.0,
+                },
+            },
+            {
+                "timestamp": now,
+                "payload": {
+                    "action": "trade_closed",
+                    "position_id": "eq-1",
+                    "symbol": "MSFT",
+                    "biome": "equities",
+                    "side": "long",
+                    "entry_price": 100.0,
+                    "exit_price": 112.0,
+                    "quantity": 1.0,
+                    "exit_reason": "take_profit",
+                    "trailing_stop_price": 104.0,
+                    "realized_pnl": 12.0,
+                    "pnl_pct": 12.0,
+                    "trading_seconds": 3600,
+                },
+            },
+        ])
+        d = _client(ColonyContext(logs_root=tmp_path)).get("/api/equities/positions").json()
+        assert d["open_positions"] == []
+        assert len(d["closed_positions"]) == 1
+        assert d["closed_positions"][0]["exit_reason"] == "TP"
+        assert d["summary"]["wins"] == 1
+        assert d["summary"]["win_rate"] == pytest.approx(100.0)
+
+
+# ---------------------------------------------------------------------------
+# 9. Watchtower → Queen doorstroom endpoint
+# ---------------------------------------------------------------------------
+
+class TestWatchtowerReceivedEndpoint:
+
+    def test_returns_200_empty(self):
+        r = _client(ColonyContext()).get("/api/watchtower/signals/received")
+        assert r.status_code == 200
+        assert r.json()["signals"] == []
+
+    def test_queen_acceptance_status_from_watchtower_log(self, tmp_path: Path):
+        ts = _now_iso()
+        _write_jsonl(tmp_path / "watchtower" / "signals.jsonl", [{
+            "timestamp": ts,
+            "received": 2,
+            "passed_filter": 1,
+            "signals": [{
+                "id": "sig-aapl",
+                "asset": "AAPL",
+                "direction": "long",
+                "timestamp": ts,
+                "entry_score": 0.72,
+                "confidence": 0.66,
+            }],
+            "rejections": [{
+                "id": "sig-msft",
+                "asset": "MSFT",
+                "direction": "long",
+                "timestamp": ts,
+                "entry_score": 0.42,
+                "confidence": 0.61,
+                "rejection_reason": "score too low",
+            }],
+        }])
+
+        d = _client(ColonyContext(logs_root=tmp_path)).get("/api/watchtower/signals/received").json()
+        by_asset = {s["asset"]: s for s in d["signals"]}
+        assert by_asset["AAPL"]["queen_accepted"] is True
+        assert by_asset["MSFT"]["queen_accepted"] is False
+        assert by_asset["MSFT"]["rejection_reason"] == "score too low"
+        assert d["summary"]["received_24h"] == 2
+        assert d["summary"]["accepted_24h"] == 1
+        assert d["summary"]["rejected_24h"] == 1
+        assert d["summary"]["rejection_reasons"]["score"] == 1

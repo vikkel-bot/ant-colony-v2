@@ -38,7 +38,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ant_colony.biome.biome_registry import BiomeRegistry
 from ant_colony.colony.scheduler.colony_scheduler import ColonyScheduler
@@ -310,6 +310,9 @@ class QueenStatusResponse(BaseModel):
     regime: str | None
     top_strategies: list[QueenStrategyEntry]
     last_decision: dict[str, Any] | None
+    watchtower_last_signal: dict[str, Any] | None = None
+    watchtower_signals_24h: dict[str, int] = Field(default_factory=dict)
+    watchtower_rejection_reasons: dict[str, int] = Field(default_factory=dict)
 
 
 class QueenDecisionEntry(BaseModel):
@@ -419,6 +422,56 @@ class EquitiesStatusResponse(BaseModel):
     eq_paper_total_pnl_eur: float | None = None
     eq_paper_winrate: float | None = None
     eq_paper_closed_count: int = 0
+
+
+class EquitiesPositionEntry(BaseModel):
+    position_id: str
+    symbol: str
+    side: str
+    status: str
+    entry_price: float
+    current_price: float | None = None
+    quantity: float
+    invested_eur: float
+    market_value_eur: float | None = None
+    pnl_pct: float | None = None
+    pnl_eur: float | None = None
+    opened_at: str | None = None
+    open_since: str | None = None
+    age_hours: float | None = None
+    ttl_trading_days_remaining: float | None = None
+    stop_loss_price: float | None = None
+    take_profit_price: float | None = None
+    trailing_stop_price: float | None = None
+    exit_price: float | None = None
+    exit_reason: str | None = None
+    closed_at: str | None = None
+    duration_hours: float | None = None
+    realized_pnl_eur: float | None = None
+
+
+class EquitiesPositionsResponse(BaseModel):
+    open_positions: list[EquitiesPositionEntry]
+    closed_positions: list[EquitiesPositionEntry]
+    summary: dict[str, Any]
+    fetched_at: str
+
+
+class WatchtowerReceivedSignalEntry(BaseModel):
+    timestamp: str
+    asset: str
+    direction: str | None = None
+    entry_score: float | None = None
+    confidence: float | None = None
+    queen_accepted: bool
+    rejection_reason: str | None = None
+    signal_id: str | None = None
+
+
+class WatchtowerReceivedResponse(BaseModel):
+    signals: list[WatchtowerReceivedSignalEntry]
+    summary: dict[str, Any]
+    fetched_at: str
 
 
 class NewsLatestResponse(BaseModel):
@@ -1508,10 +1561,18 @@ def create_router(ctx: ColonyContext) -> APIRouter:
             return QueenStatusResponse(regime=None, top_strategies=[], last_decision=None)
 
         data = _read_queen_status_data(ctx.logs_root)
+        wt_summary = _read_watchtower_received_signals(ctx.logs_root, limit=50)["summary"]
         return QueenStatusResponse(
             regime=data["regime"],
             top_strategies=[QueenStrategyEntry(**s) for s in data["top_strategies"]],
             last_decision=data["last_decision"],
+            watchtower_last_signal=wt_summary.get("last_signal"),
+            watchtower_signals_24h={
+                "received": int(wt_summary.get("received_24h") or 0),
+                "accepted": int(wt_summary.get("accepted_24h") or 0),
+                "rejected": int(wt_summary.get("rejected_24h") or 0),
+            },
+            watchtower_rejection_reasons=dict(wt_summary.get("rejection_reasons") or {}),
         )
 
     # ------------------------------------------------------------------
@@ -1589,6 +1650,33 @@ def create_router(ctx: ColonyContext) -> APIRouter:
             eq_paper_total_pnl_eur=paper["eq_paper_total_pnl_eur"],
             eq_paper_winrate=paper["eq_paper_winrate"],
             eq_paper_closed_count=paper["eq_paper_closed_count"],
+        )
+
+    # ------------------------------------------------------------------
+    # GET /api/equities/positions
+    # ------------------------------------------------------------------
+
+    @router.get("/equities/positions", response_model=EquitiesPositionsResponse)
+    def get_equities_positions() -> EquitiesPositionsResponse:
+        """Open en gesloten EquitiesPaperAnt posities met PnL-detail."""
+        fetched_at = datetime.now(tz=timezone.utc).isoformat()
+        if ctx.logs_root is None and not ctx.paper_ledgers:
+            return EquitiesPositionsResponse(
+                open_positions=[],
+                closed_positions=[],
+                summary=_empty_equities_positions_summary(),
+                fetched_at=fetched_at,
+            )
+        data = _read_equities_positions(
+            ctx.logs_root,
+            registry=ctx.biome_registry,
+            paper_ledgers=ctx.paper_ledgers,
+        )
+        return EquitiesPositionsResponse(
+            open_positions=[EquitiesPositionEntry(**p) for p in data["open_positions"]],
+            closed_positions=[EquitiesPositionEntry(**p) for p in data["closed_positions"]],
+            summary=data["summary"],
+            fetched_at=fetched_at,
         )
 
     # ------------------------------------------------------------------
@@ -1671,6 +1759,27 @@ def create_router(ctx: ColonyContext) -> APIRouter:
             last_signal_ts=stats["last_signal_ts"],
             signals_last_hour=stats["signals_last_hour"],
             passed_filter_last_hour=stats["passed_filter_last_hour"],
+        )
+
+    # ------------------------------------------------------------------
+    # GET /api/watchtower/signals/received
+    # ------------------------------------------------------------------
+
+    @router.get("/watchtower/signals/received", response_model=WatchtowerReceivedResponse)
+    def get_watchtower_received_signals() -> WatchtowerReceivedResponse:
+        """Laatste Watchtower signalen met Queen/filter acceptatiestatus."""
+        fetched_at = datetime.now(tz=timezone.utc).isoformat()
+        if ctx.logs_root is None:
+            return WatchtowerReceivedResponse(
+                signals=[],
+                summary=_empty_watchtower_received_summary(),
+                fetched_at=fetched_at,
+            )
+        data = _read_watchtower_received_signals(ctx.logs_root, limit=50)
+        return WatchtowerReceivedResponse(
+            signals=[WatchtowerReceivedSignalEntry(**s) for s in data["signals"]],
+            summary=data["summary"],
+            fetched_at=fetched_at,
         )
 
     # ------------------------------------------------------------------
@@ -3113,6 +3222,335 @@ def _read_equities_paper_stats(logs_root: Path) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Intern — EquitiesPaperAnt positie-overzicht
+# ---------------------------------------------------------------------------
+
+_EQ_TRADING_DAY_SECONDS = 6.5 * 3600
+_EQ_TTL_TRADING_DAYS = 10.0
+_EQ_TTL_TRADING_SECONDS = _EQ_TTL_TRADING_DAYS * _EQ_TRADING_DAY_SECONDS
+_EQ_TRAILING_STOP_PCT = 0.05
+
+
+def _empty_equities_positions_summary() -> dict[str, Any]:
+    return {
+        "open_count": 0,
+        "closed_count": 0,
+        "total_invested_equities": 0.0,
+        "avg_pnl_pct_open": None,
+        "best_position": None,
+        "worst_position": None,
+        "wins": 0,
+        "losses": 0,
+        "win_rate": None,
+        "total_realized_pnl": 0.0,
+    }
+
+
+def _float_or_none(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _round_or_none(value: float | None, digits: int = 4) -> float | None:
+    return round(value, digits) if value is not None else None
+
+
+def _dt_iso(dt: datetime | None) -> str | None:
+    return dt.isoformat() if dt is not None else None
+
+
+def _hours_between(start: datetime | None, end: datetime | None) -> float | None:
+    if start is None or end is None:
+        return None
+    return round(max(0.0, (end - start).total_seconds()) / 3600.0, 2)
+
+
+def _open_since_label(opened_at: datetime | None, now: datetime) -> str | None:
+    if opened_at is None:
+        return None
+    seconds = max(0.0, (now - opened_at).total_seconds())
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    if hours >= 48:
+        days = hours // 24
+        rem = hours % 24
+        return f"{days} dagen {rem} uur geleden"
+    if hours >= 1:
+        return f"{hours} uur geleden"
+    if minutes >= 1:
+        return f"{minutes} min geleden"
+    return "< 1 min geleden"
+
+
+def _exit_reason_label(reason: str | None) -> str | None:
+    if not reason:
+        return None
+    key = str(reason).lower()
+    mapping = {
+        "hard_stop_loss": "SL",
+        "stop_loss": "SL",
+        "sl": "SL",
+        "take_profit": "TP",
+        "tp": "TP",
+        "trailing_stop": "TRAILING",
+        "trailing": "TRAILING",
+        "ttl_trading_days": "TTL",
+        "ttl": "TTL",
+    }
+    return mapping.get(key, str(reason).upper())
+
+
+def _calc_position_pnl(
+    side: str,
+    entry: float | None,
+    current: float | None,
+    quantity: float | None,
+) -> tuple[float | None, float | None]:
+    if entry is None or current is None or quantity is None or entry <= 0 or quantity <= 0:
+        return None, None
+    raw = (current - entry) * quantity if side.lower() != "short" else (entry - current) * quantity
+    pct = raw / (entry * quantity) * 100.0
+    return round(raw, 4), round(pct, 4)
+
+
+def _ttl_days_remaining(trading_seconds: float | None) -> float | None:
+    if trading_seconds is None:
+        return _EQ_TTL_TRADING_DAYS
+    remaining = max(0.0, _EQ_TTL_TRADING_SECONDS - trading_seconds)
+    return round(remaining / _EQ_TRADING_DAY_SECONDS, 2)
+
+
+def _read_equities_position_records(logs_root: Path | None) -> list[tuple[datetime | None, dict]]:
+    if logs_root is None:
+        return []
+    paper_dir = logs_root / "paper"
+    if not paper_dir.exists():
+        return []
+
+    records: list[tuple[datetime | None, dict]] = []
+    for path in sorted(paper_dir.glob("*.jsonl")):
+        if "_trades" in path.name:
+            continue
+        try:
+            with path.open("r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    payload = rec.get("payload") or {}
+                    if str(payload.get("biome") or "") != "equities":
+                        continue
+                    records.append((_parse_ts(rec.get("timestamp")), rec))
+        except OSError:
+            continue
+    records.sort(key=lambda item: item[0] or datetime.min.replace(tzinfo=timezone.utc))
+    return records
+
+
+def _build_equities_position_row(
+    base: dict[str, Any],
+    *,
+    status: str,
+    now: datetime,
+    registry: BiomeRegistry | None,
+) -> dict[str, Any]:
+    symbol = str(base.get("symbol") or "")
+    side = str(base.get("side") or "long").lower()
+    entry = _float_or_none(base.get("entry_price")) or 0.0
+    quantity = _float_or_none(base.get("quantity")) or 0.0
+    opened_dt = _parse_ts(base.get("opened_at"))
+    closed_dt = _parse_ts(base.get("closed_at"))
+
+    current = _float_or_none(base.get("current_price"))
+    if status == "open" and registry is not None and symbol:
+        live = _get_live_price(registry, "equities", symbol)
+        if live is not None:
+            current = live
+    if status == "closed":
+        current = _float_or_none(base.get("exit_price")) or current
+    if current is None and status == "open":
+        current = entry if entry > 0 else None
+
+    pnl_eur, pnl_pct = _calc_position_pnl(side, entry, current, quantity)
+    realized = _float_or_none(base.get("realized_pnl_eur"))
+    if status == "closed":
+        if realized is not None:
+            pnl_eur = realized
+        raw_pct = _float_or_none(base.get("pnl_pct"))
+        if raw_pct is not None:
+            pnl_pct = raw_pct
+
+    trading_seconds = _float_or_none(base.get("trading_seconds"))
+    duration_hours = _hours_between(opened_dt, closed_dt)
+    if duration_hours is None and status == "closed" and trading_seconds is not None:
+        duration_hours = round(trading_seconds / 3600.0, 2)
+
+    market_value = round(current * quantity, 4) if current is not None and quantity > 0 else None
+    return {
+        "position_id": str(base.get("position_id") or ""),
+        "symbol": symbol,
+        "side": side.upper(),
+        "status": status,
+        "entry_price": round(entry, 6),
+        "current_price": _round_or_none(current, 6),
+        "quantity": round(quantity, 8),
+        "invested_eur": round(entry * quantity, 4),
+        "market_value_eur": market_value,
+        "pnl_pct": pnl_pct,
+        "pnl_eur": pnl_eur,
+        "opened_at": _dt_iso(opened_dt),
+        "open_since": _open_since_label(opened_dt, now) if status == "open" else None,
+        "age_hours": _hours_between(opened_dt, now) if status == "open" else None,
+        "ttl_trading_days_remaining": _ttl_days_remaining(trading_seconds) if status == "open" else 0.0,
+        "stop_loss_price": _round_or_none(_float_or_none(base.get("stop_loss_price")), 6),
+        "take_profit_price": _round_or_none(_float_or_none(base.get("take_profit_price")), 6),
+        "trailing_stop_price": _round_or_none(_float_or_none(base.get("trailing_stop_price")), 6),
+        "exit_price": _round_or_none(_float_or_none(base.get("exit_price")), 6),
+        "exit_reason": _exit_reason_label(base.get("exit_reason")),
+        "closed_at": _dt_iso(closed_dt),
+        "duration_hours": duration_hours,
+        "realized_pnl_eur": _round_or_none(realized if realized is not None else pnl_eur, 4),
+    }
+
+
+def _read_equities_positions(
+    logs_root: Path | None,
+    *,
+    registry: BiomeRegistry | None = None,
+    paper_ledgers: list | None = None,
+) -> dict[str, Any]:
+    now = datetime.now(tz=timezone.utc)
+    opened: dict[str, dict[str, Any]] = {}
+    closed_rows: list[dict[str, Any]] = []
+
+    for ts, rec in _read_equities_position_records(logs_root):
+        payload = rec.get("payload") or {}
+        action = payload.get("action")
+        pos_id = str(payload.get("position_id") or "")
+        if not pos_id:
+            continue
+
+        if action == "trade_opened":
+            opened[pos_id] = {
+                "position_id": pos_id,
+                "symbol": str(payload.get("symbol") or ""),
+                "side": str(payload.get("side") or "long"),
+                "entry_price": payload.get("entry_price"),
+                "quantity": payload.get("quantity"),
+                "stop_loss_price": payload.get("stop_loss"),
+                "take_profit_price": payload.get("take_profit"),
+                "trailing_stop_price": payload.get("trailing_stop_price"),
+                "current_price": payload.get("entry_price"),
+                "opened_at": rec.get("timestamp"),
+                "trading_seconds": 0.0,
+            }
+        elif action == "position_update" and pos_id in opened:
+            opened[pos_id]["current_price"] = payload.get("current_price", opened[pos_id].get("current_price"))
+            opened[pos_id]["trailing_stop_price"] = payload.get(
+                "trailing_stop_price", opened[pos_id].get("trailing_stop_price")
+            )
+            opened[pos_id]["trading_seconds"] = payload.get(
+                "trading_seconds", opened[pos_id].get("trading_seconds")
+            )
+        elif action == "trade_closed":
+            base = dict(opened.pop(pos_id, {}))
+            base.update({
+                "position_id": pos_id,
+                "symbol": payload.get("symbol", base.get("symbol", "")),
+                "side": payload.get("side", base.get("side", "long")),
+                "entry_price": payload.get("entry_price", base.get("entry_price")),
+                "quantity": payload.get("quantity", base.get("quantity")),
+                "exit_price": payload.get("exit_price"),
+                "exit_reason": payload.get("exit_reason") or payload.get("exit_type"),
+                "trailing_stop_price": payload.get(
+                    "trailing_stop_price", base.get("trailing_stop_price")
+                ),
+                "current_price": payload.get("exit_price", base.get("current_price")),
+                "realized_pnl_eur": payload.get("realized_pnl"),
+                "pnl_pct": payload.get("pnl_pct"),
+                "trading_seconds": payload.get("trading_seconds", base.get("trading_seconds")),
+                "opened_at": base.get("opened_at") or rec.get("timestamp"),
+                "closed_at": rec.get("timestamp") or _dt_iso(ts),
+            })
+            closed_rows.append(_build_equities_position_row(
+                base, status="closed", now=now, registry=registry
+            ))
+
+    if paper_ledgers:
+        for ledger in paper_ledgers:
+            for pos in getattr(ledger, "open_positions", []) or []:
+                if str(getattr(pos, "biome", "")) != "equities":
+                    continue
+                pos_id = str(getattr(pos, "position_id", "") or "")
+                if not pos_id:
+                    continue
+                peak_price = _float_or_none(getattr(pos, "peak_price", None))
+                trailing = peak_price * (1.0 - _EQ_TRAILING_STOP_PCT) if peak_price else None
+                opened[pos_id] = {
+                    "position_id": pos_id,
+                    "symbol": str(getattr(pos, "symbol", "") or ""),
+                    "side": getattr(getattr(pos, "side", None), "value", getattr(pos, "side", "long")),
+                    "entry_price": getattr(pos, "entry_price", None),
+                    "quantity": getattr(pos, "quantity", None),
+                    "stop_loss_price": getattr(pos, "stop_loss_price", None),
+                    "take_profit_price": getattr(pos, "take_profit_price", None),
+                    "trailing_stop_price": trailing,
+                    "current_price": getattr(pos, "entry_price", None),
+                    "opened_at": getattr(pos, "opened_at", None).isoformat()
+                    if getattr(pos, "opened_at", None) is not None else None,
+                    "trading_seconds": None,
+                }
+
+    open_rows = [
+        _build_equities_position_row(base, status="open", now=now, registry=registry)
+        for base in opened.values()
+    ]
+    open_rows.sort(key=lambda r: _parse_ts(r.get("opened_at")) or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+    closed_rows.sort(key=lambda r: _parse_ts(r.get("closed_at")) or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+    closed_rows = closed_rows[:30]
+
+    summary = _empty_equities_positions_summary()
+    summary["open_count"] = len(open_rows)
+    summary["closed_count"] = len(closed_rows)
+    summary["total_invested_equities"] = round(sum(r["invested_eur"] for r in open_rows), 2)
+
+    pnl_rows = [r for r in open_rows if r.get("pnl_pct") is not None]
+    if pnl_rows:
+        summary["avg_pnl_pct_open"] = round(
+            sum(float(r["pnl_pct"]) for r in pnl_rows) / len(pnl_rows), 4
+        )
+        best = max(pnl_rows, key=lambda r: float(r["pnl_pct"]))
+        worst = min(pnl_rows, key=lambda r: float(r["pnl_pct"]))
+        summary["best_position"] = {"symbol": best["symbol"], "pnl_pct": best["pnl_pct"]}
+        summary["worst_position"] = {"symbol": worst["symbol"], "pnl_pct": worst["pnl_pct"]}
+
+    realized_rows = [r for r in closed_rows if r.get("realized_pnl_eur") is not None]
+    wins = sum(1 for r in realized_rows if float(r["realized_pnl_eur"]) > 0)
+    losses = sum(1 for r in realized_rows if float(r["realized_pnl_eur"]) < 0)
+    total_closed = wins + losses
+    summary["wins"] = wins
+    summary["losses"] = losses
+    summary["win_rate"] = round(wins / total_closed * 100.0, 2) if total_closed else None
+    summary["total_realized_pnl"] = round(
+        sum(float(r["realized_pnl_eur"]) for r in realized_rows), 4
+    )
+
+    return {
+        "open_positions": open_rows,
+        "closed_positions": closed_rows,
+        "summary": summary,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Intern — NewsAnt snapshot reader
 # ---------------------------------------------------------------------------
 
@@ -3251,3 +3689,153 @@ def _read_watchtower_stats(logs_root: Path) -> dict:
         "signals_last_hour":       signals_hour,
         "passed_filter_last_hour": passed_hour,
     }
+
+
+# ---------------------------------------------------------------------------
+# Intern — Watchtower → Queen/filter doorstroom
+# ---------------------------------------------------------------------------
+
+def _empty_watchtower_received_summary() -> dict[str, Any]:
+    return {
+        "last_signal": None,
+        "received_24h": 0,
+        "accepted_24h": 0,
+        "rejected_24h": 0,
+        "rejection_reasons": {
+            "regime": 0,
+            "score": 0,
+            "risk_flag": 0,
+            "other": 0,
+        },
+    }
+
+
+def _classify_watchtower_rejection(reason: str | None) -> str:
+    text = (reason or "").lower()
+    if "regime" in text:
+        return "regime"
+    if "score" in text or "threshold" in text or "confidence" in text or "laag" in text:
+        return "score"
+    if "risk" in text or "flag" in text or "high_risk" in text:
+        return "risk_flag"
+    return "other"
+
+
+def _watchtower_signal_ts(signal: dict[str, Any], fallback: datetime | None) -> datetime | None:
+    for key in ("timestamp", "created_at", "emitted_at", "received_at"):
+        ts = _parse_ts(signal.get(key))
+        if ts is not None:
+            return ts
+    return fallback
+
+
+def _watchtower_signal_row(
+    signal: dict[str, Any],
+    *,
+    fallback_ts: datetime | None,
+    accepted: bool,
+) -> dict[str, Any] | None:
+    ts = _watchtower_signal_ts(signal, fallback_ts)
+    if ts is None:
+        return None
+    reason = (
+        signal.get("rejection_reason")
+        or signal.get("reject_reason")
+        or signal.get("skip_reason")
+        or signal.get("reason")
+    )
+    return {
+        "timestamp": ts.isoformat(),
+        "asset": str(signal.get("asset") or signal.get("symbol") or signal.get("market") or "UNKNOWN"),
+        "direction": signal.get("direction"),
+        "entry_score": _round_or_none(_float_or_none(signal.get("entry_score")), 4),
+        "confidence": _round_or_none(_float_or_none(signal.get("confidence")), 4),
+        "queen_accepted": bool(accepted),
+        "rejection_reason": None if accepted else (str(reason) if reason else "details_not_logged"),
+        "signal_id": signal.get("signal_id") or signal.get("id"),
+    }
+
+
+def _iter_watchtower_rejections(record: dict[str, Any]) -> list[dict[str, Any]]:
+    rejected: list[dict[str, Any]] = []
+    for key in ("rejections", "rejected_signals", "skipped_signals", "skipped"):
+        value = record.get(key)
+        if isinstance(value, list):
+            rejected.extend([v for v in value if isinstance(v, dict)])
+        elif isinstance(value, dict):
+            rejected.extend([v for v in value.values() if isinstance(v, dict)])
+    return rejected
+
+
+def _read_watchtower_received_signals(logs_root: Path, limit: int = 50) -> dict[str, Any]:
+    signal_path = logs_root / "watchtower" / "signals.jsonl"
+    summary = _empty_watchtower_received_summary()
+    if not signal_path.exists():
+        return {"signals": [], "summary": summary}
+
+    now = datetime.now(tz=timezone.utc)
+    cutoff = now - timedelta(hours=24)
+    rows: list[dict[str, Any]] = []
+
+    try:
+        with signal_path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                rec_ts = _parse_ts(rec.get("timestamp"))
+                signals = [s for s in (rec.get("signals") or []) if isinstance(s, dict)]
+                rejections = _iter_watchtower_rejections(rec)
+
+                if rec_ts is not None and rec_ts >= cutoff:
+                    received = _float_or_none(rec.get("received"))
+                    accepted = _float_or_none(rec.get("passed_filter"))
+                    if received is None:
+                        received = float(len(signals) + len(rejections))
+                    if accepted is None:
+                        accepted = float(len(signals))
+                    summary["received_24h"] += int(received)
+                    summary["accepted_24h"] += int(accepted)
+
+                    rejected_count = max(0, int(received) - int(accepted))
+                    summary["rejected_24h"] += rejected_count
+                    if not rejections and rejected_count > 0:
+                        summary["rejection_reasons"]["other"] += rejected_count
+
+                for sig in signals:
+                    row = _watchtower_signal_row(sig, fallback_ts=rec_ts, accepted=True)
+                    if row is None:
+                        continue
+                    ts = _parse_ts(row["timestamp"])
+                    if ts is not None and ts >= cutoff:
+                        rows.append(row)
+
+                for rej in rejections:
+                    row = _watchtower_signal_row(rej, fallback_ts=rec_ts, accepted=False)
+                    if row is None:
+                        continue
+                    ts = _parse_ts(row["timestamp"])
+                    if ts is not None and ts >= cutoff:
+                        rows.append(row)
+                        cls = _classify_watchtower_rejection(row.get("rejection_reason"))
+                        summary["rejection_reasons"][cls] = summary["rejection_reasons"].get(cls, 0) + 1
+    except OSError:
+        return {"signals": [], "summary": summary}
+
+    rows.sort(
+        key=lambda r: _parse_ts(r.get("timestamp")) or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
+    if rows:
+        latest = rows[0]
+        summary["last_signal"] = {
+            "timestamp": latest["timestamp"],
+            "asset": latest["asset"],
+            "queen_accepted": latest["queen_accepted"],
+        }
+
+    return {"signals": rows[: max(1, min(limit, 200))], "summary": summary}
