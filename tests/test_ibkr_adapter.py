@@ -9,8 +9,10 @@ lazy-import inside de adapter de mock module ziet.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
+import threading
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -371,6 +373,30 @@ class TestGetCandles:
             candles = _connected_adapter(ib).get_candles("AAPL")
         assert candles[0].timestamp.year == 2026
         assert candles[0].timestamp.month == 4
+
+    def test_get_candles_creates_event_loop_in_worker_thread(self) -> None:
+        ib = MagicMock()
+        ib.isConnected.return_value = True
+
+        def req_historical_data(*args, **kwargs):
+            asyncio.get_event_loop()
+            return [_make_bar(close=151.0)]
+
+        ib.reqHistoricalData.side_effect = req_historical_data
+        result: dict[str, object] = {}
+
+        def worker() -> None:
+            with patched_ib(ib):
+                result["candles"] = _connected_adapter(ib).get_candles("AAPL")
+
+        thread = threading.Thread(target=worker, name="eq-sector-test")
+        thread.start()
+        thread.join(timeout=5)
+
+        assert not thread.is_alive()
+        candles = result["candles"]
+        assert len(candles) == 1
+        assert candles[0].close == pytest.approx(151.0)
 
 
 # ---------------------------------------------------------------------------

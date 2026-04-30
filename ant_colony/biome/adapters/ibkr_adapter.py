@@ -38,6 +38,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -139,6 +140,7 @@ class IBKRAdapter:
         self._port       = port or int(os.getenv("IBKR_PORT", str(default_port)))
         self._client_id  = client_id or int(os.getenv("IBKR_CLIENT_ID", "1"))
         self._ib: Any    = None  # ib_insync.IB instance, lazy init
+        self._ib_lock    = threading.RLock()
         self._log        = logging.getLogger(
             f"adapter.ibkr.{'paper' if paper else 'live'}"
         )
@@ -326,15 +328,7 @@ class IBKRAdapter:
             True bij succesvolle verbinding, False bij fout.
         """
         try:
-            # ib_insync gebruikt asyncio intern. Python 3.12+ maakt geen
-            # impliciete event loop aan in worker threads — fix dat hier
-            # zodat ib_insync altijd een bruikbare loop aantreft.
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_closed():
-                    raise RuntimeError("loop is closed")
-            except RuntimeError:
-                asyncio.set_event_loop(asyncio.new_event_loop())
+            self._ensure_thread_event_loop()
 
             from ib_insync import IB
 
@@ -421,24 +415,27 @@ class IBKRAdapter:
             Lijst van MarketData (oudste eerst), leeg bij fout of geen data.
         """
         try:
-            if not self._ensure_connected():
-                return []
+            self._ensure_thread_event_loop()
 
-            from ib_insync import Stock
+            with self._ib_lock:
+                if not self._ensure_connected():
+                    return []
 
-            contract  = Stock(symbol, exchange, currency)
-            duration  = _PERIOD_TO_DURATION.get(period, "3 M")
-            bar_size  = _INTERVAL_TO_BAR_SIZE.get(interval, "1 day")
+                from ib_insync import Stock
 
-            bars = self._ib.reqHistoricalData(
-                contract,
-                endDateTime="",
-                durationStr=duration,
-                barSizeSetting=bar_size,
-                whatToShow="TRADES",
-                useRTH=True,
-                formatDate=1,
-            )
+                contract  = Stock(symbol, exchange, currency)
+                duration  = _PERIOD_TO_DURATION.get(period, "3 M")
+                bar_size  = _INTERVAL_TO_BAR_SIZE.get(interval, "1 day")
+
+                bars = self._ib.reqHistoricalData(
+                    contract,
+                    endDateTime="",
+                    durationStr=duration,
+                    barSizeSetting=bar_size,
+                    whatToShow="TRADES",
+                    useRTH=True,
+                    formatDate=1,
+                )
 
             result: list[MarketData] = []
             for bar in bars:
@@ -652,6 +649,24 @@ class IBKRAdapter:
             self._ib = None  # sessie verloren, opnieuw verbinden
 
         return self.connect()
+
+    def _ensure_thread_event_loop(self) -> asyncio.AbstractEventLoop:
+        """
+        Zorg dat de huidige thread een open asyncio event loop heeft.
+
+        ib_insync gebruikt asyncio ook in zijn synchrone API. Equity ants
+        draaien in worker threads, en Python maakt daar geen impliciete loop
+        aan. Deze helper is thread-local via asyncio.set_event_loop().
+        """
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_closed():
+                raise RuntimeError("loop is closed")
+            return loop
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            return loop
 
     def __del__(self) -> None:
         """Verbreek verbinding bij garbage collection."""
