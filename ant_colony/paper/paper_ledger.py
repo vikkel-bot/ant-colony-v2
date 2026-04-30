@@ -40,6 +40,11 @@ logger = logging.getLogger(__name__)
 
 BROKER_FEE_PCT = 0.0025  # 0.25% Bitvavo maker/taker tarief per kant
 
+# IBKR Tiered, EUR-denominated ETFs on Euronext, position size >= EUR 2500.
+# 0.05% commission + EUR 0.75 exchange fee ~ 0.052% round-trip at target scale.
+# Conservative audit assumption: 0.0010 per side.
+EQUITY_FEE_PCT = 0.0010
+
 
 class PaperLedger:
     """
