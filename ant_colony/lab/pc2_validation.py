@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import csv
 import json
+import logging
 import math
 import os
 import statistics
@@ -24,6 +25,7 @@ AUDIT_FEE_PER_SIDE = 0.0010
 AUDIT_SLIPPAGE_PER_SIDE = 0.0010
 DEFAULT_RISK_PER_TRADE = 0.01
 BENCHMARK_CAGR = 0.106
+log = logging.getLogger(__name__)
 
 POSITIVE_EDGE_ASSETS = ("JNJ", "GLD", "XLK", "AAPL", "XLY", "QQQ", "XLF", "XLI")
 VALIDATION_ASSETS = (
@@ -162,6 +164,23 @@ def _record_payload(record: dict[str, Any]) -> dict[str, Any]:
     return record
 
 
+def _broker_connection_warning(exc: BaseException) -> str | None:
+    text = str(exc).strip() or exc.__class__.__name__
+    lowered = text.lower()
+    winerror = getattr(exc, "winerror", None)
+    if isinstance(exc, ConnectionRefusedError) or winerror == 10061:
+        return f"IBKR niet bereikbaar: {text}"
+    if isinstance(exc, OSError) and (
+        "connection refused" in lowered
+        or "connect call failed" in lowered
+        or "actively refused" in lowered
+        or "tws" in lowered
+        or "ib gateway" in lowered
+    ):
+        return f"IBKR niet bereikbaar: {text}"
+    return None
+
+
 def _in_range(dt: datetime, from_dt: datetime, to_dt: datetime) -> bool:
     utc = parse_dt(dt)
     return bool(utc and from_dt <= utc <= to_dt)
@@ -227,7 +246,12 @@ def load_broker_candles(
 
         adapter = IBKRAdapter()
         raw = adapter.get_candles(asset, period="5y", interval="1d")
-    except Exception:
+    except Exception as exc:
+        warning = _broker_connection_warning(exc)
+        if warning:
+            log.warning("%s; broker candles voor %s worden als ontbrekend behandeld", warning, asset)
+        else:
+            log.warning("Broker candles laden mislukt voor %s: %s", asset, exc)
         raw = []
 
     candles: list[Candle] = []
@@ -498,27 +522,42 @@ def run_price_validation(
     broker_loader: Any | None = None,
 ) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    broker_api_unavailable = False
     yf_loader = yfinance_loader or load_yfinance_candles
     br_loader = broker_loader or load_broker_candles
     for asset in assets:
-        broker = br_loader(
-            asset,
-            from_dt,
-            to_dt,
-            logs_root=logs_root,
-            broker_cache_dir=broker_cache_dir,
-            use_broker_api=use_broker_api,
-        )
+        try:
+            broker = br_loader(
+                asset,
+                from_dt,
+                to_dt,
+                logs_root=logs_root,
+                broker_cache_dir=broker_cache_dir,
+                use_broker_api=use_broker_api and not broker_api_unavailable,
+            )
+        except Exception as exc:
+            warning = _broker_connection_warning(exc)
+            if warning is None:
+                raise
+            broker_api_unavailable = True
+            if not warnings:
+                warnings.append(
+                    f"{warning}. Alle assets zonder cache worden als NO_BROKER_DATA gemarkeerd; "
+                    "fee-, live-log- en signaalvalidatie lopen door."
+                )
+            log.warning("%s; %s krijgt NO_BROKER_DATA", warning, asset)
+            broker = []
         yf = yf_loader(asset, from_dt, to_dt)
         rows.append(compare_price_series(asset, broker, yf))
 
     _write_csv(output_dir / "price_validation.csv", rows)
-    summary = build_price_summary(rows)
+    summary = build_price_summary(rows, warnings=warnings)
     _write_text(output_dir / "price_validation_summary.md", summary)
-    return {"rows": rows, "summary": summary}
+    return {"rows": rows, "summary": summary, "warnings": warnings}
 
 
-def build_price_summary(rows: list[dict[str, Any]]) -> str:
+def build_price_summary(rows: list[dict[str, Any]], *, warnings: list[str] | None = None) -> str:
     blocked = [r for r in rows if r.get("canary_blocked")]
     matches = sum(1 for r in rows if r.get("verdict") == "DATA_MATCH")
     minor = sum(1 for r in rows if r.get("verdict") == "DATA_MINOR_DRIFT")
@@ -538,6 +577,11 @@ def build_price_summary(rows: list[dict[str, Any]]) -> str:
         lines.append("## Blocking Assets")
         for row in blocked:
             lines.append(f"- {row['asset']}: {row['verdict']}")
+    if warnings:
+        lines.append("")
+        lines.append("## Warnings")
+        for warning in warnings:
+            lines.append(f"- {warning}")
     return "\n".join(lines) + "\n"
 
 

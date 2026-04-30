@@ -48,6 +48,8 @@ def main() -> int:
         risk_per_trade=args.risk_per_trade,
     )
     print(f"validation_report.md: {output_dir / 'validation_report.md'}")
+    for warning in result.get("price", {}).get("warnings", []):
+        print(f"warning: {warning}")
     for line in result["report"].splitlines():
         if line in {"CLEAR_TO_DEPLOY", "BLOCKED_PENDING_SIGNAL_FLOW", "BLOCKED_PENDING_LIVE_DATA", "DO_NOT_DEPLOY", "BLOCKED_PENDING_VALIDATION"}:
             print(f"final verdict: {line}")

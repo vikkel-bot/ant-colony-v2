@@ -39,6 +39,34 @@ def test_price_comparison_flags_match_and_no_broker_data() -> None:
     assert missing["canary_blocked"] is True
 
 
+def test_price_validation_treats_ibkr_connection_refused_as_no_broker_data() -> None:
+    out = _local_tmp("pc2_price_ibkr_refused")
+    logs = _local_tmp("pc2_price_ibkr_refused_logs")
+    from_dt = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    to_dt = from_dt + timedelta(days=3)
+
+    def broker_refused(asset, from_dt, to_dt, **kwargs):
+        raise ConnectionRefusedError("TWS niet actief")
+
+    def yahoo(asset, from_dt, to_dt):
+        return [_candle(asset, 1, 100), _candle(asset, 2, 101), _candle(asset, 3, 102)]
+
+    result = v.run_price_validation(
+        output_dir=out,
+        logs_root=logs,
+        from_dt=from_dt,
+        to_dt=to_dt,
+        assets=("JNJ", "GLD"),
+        yfinance_loader=yahoo,
+        broker_loader=broker_refused,
+    )
+
+    assert [row["verdict"] for row in result["rows"]] == ["NO_BROKER_DATA", "NO_BROKER_DATA"]
+    assert all(row["canary_blocked"] for row in result["rows"])
+    assert result["warnings"]
+    assert "IBKR niet bereikbaar" in result["summary"]
+
+
 def test_adjusted_expectancy_blocks_when_real_fees_are_too_high() -> None:
     rows = v.adjusted_expectancy_rows(actual_fee_per_side=0.0025, actual_slippage_per_side=0.0010)
     jnj = next(row for row in rows if row["combo_id"] == "JNJ:momentum long")
