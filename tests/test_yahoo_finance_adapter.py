@@ -314,6 +314,14 @@ class TestGetDividendInfo:
         dates = [pd.Timestamp(f"{yr}-06-01", tz="UTC") for yr in years]
         return pd.Series([1.0] * len(dates), index=pd.DatetimeIndex(dates))
 
+    def _make_dividend_history(self, years: list[int]) -> pd.DataFrame:
+        df = make_ohlcv_df([
+            (f"{yr}-06-01", 100.0, 101.0, 99.0, 100.0, 1_000)
+            for yr in sorted(set(years))
+        ])
+        df["Dividends"] = 1.0
+        return df
+
     def test_returns_required_keys(self) -> None:
         adapter = YahooFinanceAdapter()
         ticker = make_ticker_mock(info={"dividendYield": 0.03, "payoutRatio": 0.45})
@@ -333,27 +341,26 @@ class TestGetDividendInfo:
         adapter = YahooFinanceAdapter()
         current_year = datetime.now(tz=timezone.utc).year
         years = list(range(current_year - 29, current_year + 1))
-        divs = self._make_dividend_series(years)
         ticker = make_ticker_mock(
             info={"dividendYield": 0.03, "payoutRatio": 0.4},
-            dividends=divs,
-        )
-        with patch_yfinance(ticker):
-            result = adapter.get_dividend_info("KO")
-        assert result["consecutive_years"] == 30
-
-    def test_gap_in_years_stops_count(self) -> None:
-        adapter = YahooFinanceAdapter()
-        current_year = datetime.now(tz=timezone.utc).year
-        years = list(range(current_year - 4, current_year + 1)) + [current_year - 10]
-        divs = self._make_dividend_series(years)
-        ticker = make_ticker_mock(
-            info={"dividendYield": 0.03, "payoutRatio": 0.4},
-            dividends=divs,
+            history_df=self._make_dividend_history(years),
         )
         with patch_yfinance(ticker):
             result = adapter.get_dividend_info("KO")
         assert result["consecutive_years"] == 5
+        ticker.history.assert_called_once_with(period="5y", interval="1d", actions=True, auto_adjust=False)
+
+    def test_gap_in_years_stops_count(self) -> None:
+        adapter = YahooFinanceAdapter()
+        current_year = datetime.now(tz=timezone.utc).year
+        years = [current_year, current_year - 1, current_year - 3]
+        ticker = make_ticker_mock(
+            info={"dividendYield": 0.03, "payoutRatio": 0.4},
+            history_df=self._make_dividend_history(years),
+        )
+        with patch_yfinance(ticker):
+            result = adapter.get_dividend_info("KO")
+        assert result["consecutive_years"] == 2
 
     def test_empty_dividends_returns_zero_years(self) -> None:
         adapter = YahooFinanceAdapter()

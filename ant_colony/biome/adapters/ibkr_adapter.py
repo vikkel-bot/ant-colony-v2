@@ -103,6 +103,22 @@ def _is_connection_refused(exc: BaseException) -> bool:
     return False
 
 
+def _is_historical_data_fallback_error(exc: BaseException) -> bool:
+    """Herken IBKR historical-data fouten waarbij yfinance een veilige fallback is."""
+    if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
+        return True
+    text = str(exc).lower()
+    return (
+        "timeout" in text
+        or "timed out" in text
+        or "market data subscription" in text
+        or "market data permissions" in text
+        or "no market data permissions" in text
+        or "requested market data is not subscribed" in text
+        or "error 162" in text
+    )
+
+
 class IBKRAdapter:
     """
     BiomeAdapter voor Interactive Brokers via ib_insync.
@@ -427,15 +443,25 @@ class IBKRAdapter:
                 duration  = _PERIOD_TO_DURATION.get(period, "3 M")
                 bar_size  = _INTERVAL_TO_BAR_SIZE.get(interval, "1 day")
 
-                bars = self._ib.reqHistoricalData(
-                    contract,
-                    endDateTime="",
-                    durationStr=duration,
-                    barSizeSetting=bar_size,
-                    whatToShow="TRADES",
-                    useRTH=True,
-                    formatDate=1,
-                )
+                try:
+                    bars = self._ib.reqHistoricalData(
+                        contract,
+                        endDateTime="",
+                        durationStr=duration,
+                        barSizeSetting=bar_size,
+                        whatToShow="TRADES",
+                        useRTH=True,
+                        formatDate=1,
+                    )
+                except Exception as exc:
+                    if not _is_historical_data_fallback_error(exc):
+                        raise
+                    self._log.warning(
+                        "IBKR historical data niet beschikbaar voor %s (%s) — fallback naar yfinance",
+                        symbol,
+                        exc,
+                    )
+                    return self._get_yfinance_candles(symbol, period=period, interval=interval)
 
             result: list[MarketData] = []
             for bar in bars:
@@ -649,6 +675,25 @@ class IBKRAdapter:
             self._ib = None  # sessie verloren, opnieuw verbinden
 
         return self.connect()
+
+    def _get_yfinance_candles(
+        self,
+        symbol: str,
+        period: str,
+        interval: str,
+    ) -> list[MarketData]:
+        """Read-only fallback voor ontbrekende IBKR market-data subscriptions."""
+        try:
+            from ant_colony.biome.adapters.yahoo_finance_adapter import YahooFinanceAdapter
+
+            return YahooFinanceAdapter(biome_id=self.biome_id).get_candles(
+                symbol,
+                period=period,
+                interval=interval,
+            )
+        except Exception:
+            self._log.exception("yfinance fallback mislukt voor %s", symbol)
+            return []
 
     def _ensure_thread_event_loop(self) -> asyncio.AbstractEventLoop:
         """

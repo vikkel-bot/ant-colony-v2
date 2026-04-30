@@ -29,6 +29,7 @@ from ant_colony.biome.adapters.ibkr_adapter import (
     _PORT_LIVE,
     _PORT_PAPER,
 )
+from ant_colony.biome.biome_adapter import MarketData
 from ant_colony.schemas.order import LiveOrder, OrderSide, OrderType
 
 
@@ -356,6 +357,32 @@ class TestGetCandles:
         with patched_ib(ib):
             result = _connected_adapter(ib).get_candles("AAPL")
         assert result == []
+
+    def test_timeout_falls_back_to_yfinance(self) -> None:
+        ib = MagicMock()
+        ib.isConnected.return_value = True
+        ib.reqHistoricalData.side_effect = TimeoutError("historical data request timed out")
+        fallback = [
+            MarketData(
+                symbol="XLK",
+                timeframe="1d",
+                timestamp=datetime.now(tz=timezone.utc),
+                open=100.0,
+                high=102.0,
+                low=99.0,
+                close=101.0,
+                volume=1_000_000,
+                biome_id="equities",
+            )
+        ]
+        with patched_ib(ib):
+            with patch(
+                "ant_colony.biome.adapters.yahoo_finance_adapter.YahooFinanceAdapter.get_candles",
+                return_value=fallback,
+            ) as yf_get:
+                result = _connected_adapter(ib).get_candles("XLK", period="3mo", interval="1d")
+        assert result == fallback
+        yf_get.assert_called_once_with("XLK", period="3mo", interval="1d")
 
     def test_exchange_and_currency_passed_to_stock(self) -> None:
         ib = MagicMock()

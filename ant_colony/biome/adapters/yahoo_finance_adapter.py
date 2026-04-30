@@ -34,6 +34,7 @@ log = logging.getLogger(__name__)
 _BIOME_ID_DEFAULT    = "equities"
 _CACHE_TTL_SECS      = 300.0    # 5 minuten marktdata cache
 _FUND_CACHE_TTL_SECS = 86_400.0 # 24 uur fundamentals cache
+_DIVIDEND_HISTORY_PERIOD = "5y"
 
 
 class YahooFinanceAdapter:
@@ -293,11 +294,19 @@ class YahooFinanceAdapter:
 
             consecutive_years = 0
             try:
-                divs = ticker.dividends
-                if divs is not None and not divs.empty:
+                # Gebruik geen ticker.dividends: yfinance haalt daarvoor impliciet
+                # volledige historie op, soms met startdatums rond 1927.
+                history = ticker.history(
+                    period=_DIVIDEND_HISTORY_PERIOD,
+                    interval="1d",
+                    actions=True,
+                    auto_adjust=False,
+                )
+                if history is not None and not history.empty and "Dividends" in history.columns:
+                    divs = history[history["Dividends"].fillna(0.0) > 0.0]
                     years_with_divs = set(divs.index.year)
                     current_year    = datetime.now(tz=timezone.utc).year
-                    for yr in range(current_year, current_year - 60, -1):
+                    for yr in range(current_year, current_year - 5, -1):
                         if yr in years_with_divs:
                             consecutive_years += 1
                         else:
