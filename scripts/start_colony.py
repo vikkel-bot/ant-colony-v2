@@ -1459,6 +1459,8 @@ def main() -> None:
                 # Sector ETF's (SectorScoutAnt doelwitten)
                 "XLK", "XLE", "XLV", "XLF", "XLI", "XLB",
                 "XLP", "XLY", "XLU", "XLRE", "XLC",
+                # Positive-edge momentum canaries (3yr audit)
+                "GLD", "QQQ",
                 # Dividend Aristocrats (DividendScoutAnt doelwitten)
                 "KO", "PG", "ABT", "PEP", "MCD",
                 "WMT", "XOM", "CVX", "CL", "GD", "EMR",
@@ -1513,10 +1515,10 @@ def main() -> None:
                 ))
                 _paper_ledgers.append(_eq_paper_ant._ledger)
                 log.info(
-                    "EquitiesPaperAnt gestart | ant_id=%s  capital=€%.2f  symbols=%d",
+                    "EquitiesPaperAnt gestart | ant_id=%s  capital=€%.2f  symbols=%s",
                     _eq_paper_ant_id,
                     _eq_paper_mission.capital_limit,
-                    len(_eq_paper_symbols),
+                    ",".join(_eq_paper_symbols),
                 )
             else:
                 log.warning(

@@ -46,6 +46,7 @@ def main() -> int:
         capital=args.capital,
         equity_fee_per_side=args.equity_fee,
         risk_per_trade=args.risk_per_trade,
+        repo_root=_REPO_ROOT,
     )
     print(f"validation_report.md: {output_dir / 'validation_report.md'}")
     for warning in result.get("price", {}).get("warnings", []):

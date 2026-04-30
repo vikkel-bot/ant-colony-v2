@@ -1116,6 +1116,80 @@ def build_signal_generation_summary(rows: list[dict[str, Any]]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Equities activation validation
+# ---------------------------------------------------------------------------
+
+_EQUITIES_STARTUP_MARKERS = {
+    "sector_scout_ant": "Equities ant gestart | type=sector_scout_ant",
+    "fundamental_ant": "Equities ant gestart | type=fundamental_ant",
+    "dividend_scout_ant": "Equities ant gestart | type=dividend_scout_ant",
+    "paper_ant_equities": "EquitiesPaperAnt gestart",
+}
+
+
+def run_equities_config_validation(*, logs_root: Path, repo_root: Path | None = None) -> dict[str, Any]:
+    root = repo_root or Path.cwd()
+    env_values = _read_env_file(root / ".env")
+    startup_text = _recent_log_text(logs_root)
+    markers = {name: marker in startup_text for name, marker in _EQUITIES_STARTUP_MARKERS.items()}
+    tradable_symbols_confirmed = "GLD" in startup_text and "QQQ" in startup_text and "EquitiesPaperAnt gestart" in startup_text
+    env_confirmed = (
+        env_values.get("EQUITIES_ENABLED", "").lower() == "true"
+        and env_values.get("IBKR_PAPER_MODE", "").lower() == "true"
+    )
+    startup_confirmed = all(markers.values()) and tradable_symbols_confirmed
+    status = "CONFIRMED" if env_confirmed and startup_confirmed else "NOT_FOUND"
+    return {
+        "status": status,
+        "env_path": str(root / ".env"),
+        "env_confirmed": env_confirmed,
+        "startup_confirmed": startup_confirmed,
+        "startup_markers": markers,
+        "tradable_symbols_confirmed": tradable_symbols_confirmed,
+    }
+
+
+def _read_env_file(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            key, value = stripped.split("=", 1)
+            values[key.strip()] = value.strip()
+    except OSError:
+        return {}
+    return values
+
+
+def _recent_log_text(logs_root: Path, *, max_files: int = 8, max_chars_per_file: int = 20000) -> str:
+    if not logs_root.exists():
+        return ""
+    try:
+        files = [
+            p for p in logs_root.rglob("*")
+            if p.is_file() and p.suffix.lower() in {".log", ".txt", ".jsonl"}
+        ]
+    except OSError:
+        return ""
+    def _mtime(path: Path) -> float:
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    chunks: list[str] = []
+    for path in sorted(files, key=_mtime, reverse=True)[:max_files]:
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        chunks.append(text[-max_chars_per_file:])
+    return "\n".join(chunks)
+
+
+# ---------------------------------------------------------------------------
 # Final validation report
 # ---------------------------------------------------------------------------
 
@@ -1131,6 +1205,7 @@ def run_full_pc2_validation(
     capital: float = 150_000.0,
     equity_fee_per_side: float | None = AUDIT_FEE_PER_SIDE,
     risk_per_trade: float = DEFAULT_RISK_PER_TRADE,
+    repo_root: Path | None = None,
 ) -> dict[str, Any]:
     failures: list[str] = []
     try:
@@ -1166,11 +1241,17 @@ def run_full_pc2_validation(
     except Exception as exc:
         failures.append(f"SIGNAL FLOW failed: {exc}")
         signals = _failed_signal_result(str(exc))
+    try:
+        equities_config = run_equities_config_validation(logs_root=logs_root, repo_root=repo_root)
+    except Exception as exc:
+        failures.append(f"EQUITIES CONFIG failed: {exc}")
+        equities_config = {"status": "NOT_FOUND", "error": str(exc)}
     report = build_validation_report(
         price=price,
         fees=fees,
         live=live,
         signals=signals,
+        equities_config=equities_config,
         logs_root=logs_root,
         capital=capital,
         risk_per_trade=risk_per_trade,
@@ -1178,7 +1259,7 @@ def run_full_pc2_validation(
     if failures:
         report += "\nTask failures:\n" + "\n".join(f"- {failure}" for failure in failures) + "\n"
     _write_text(output_dir / "validation_report.md", report)
-    return {"price": price, "fees": fees, "live": live, "signals": signals, "failures": failures, "report": report}
+    return {"price": price, "fees": fees, "live": live, "signals": signals, "equities_config": equities_config, "failures": failures, "report": report}
 
 
 def _failed_price_result(error: str) -> dict[str, Any]:
@@ -1245,6 +1326,7 @@ def build_validation_report(
     fees: dict[str, Any],
     live: dict[str, Any],
     signals: dict[str, Any],
+    equities_config: dict[str, Any] | None = None,
     logs_root: Path,
     capital: float = 150_000.0,
     risk_per_trade: float = DEFAULT_RISK_PER_TRADE,
@@ -1275,6 +1357,7 @@ def build_validation_report(
     else:
         non_flow = [str(r["verdict"]) for r in signal_rows if r["verdict"] != "SIGNAL_FLOWING"]
         signal_status = sorted(non_flow, key=non_flow.count, reverse=True)[0] if non_flow else "FLOWING"
+    equities_config_status = (equities_config or {}).get("status", "NOT_FOUND")
 
     final = final_verdict(price_pass, fee_status, live_status, signal_status)
     blocked_reasons = blocking_reasons(price_rows, fees, signals)
@@ -1295,6 +1378,7 @@ def build_validation_report(
         f"FEE VALIDATION:  {fee_status} - actual fees/slippage vs assumptions",
         f"LIVE TRADES:     {live_status}",
         f"SIGNAL FLOW:     {signal_status}",
+        f"EQUITIES CONFIG: {equities_config_status}",
         "",
         "CANARY DEPLOYMENT VERDICT:",
         final,

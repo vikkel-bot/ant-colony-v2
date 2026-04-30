@@ -148,6 +148,33 @@ def test_signal_flow_reads_research_and_paper_logs() -> None:
     assert row["paper_opens"] == 1
 
 
+def test_equities_config_validation_confirms_env_and_startup_markers() -> None:
+    repo = _local_tmp("pc2_equities_config_repo")
+    logs = _local_tmp("pc2_equities_config_logs")
+    (repo / ".env").write_text(
+        "EQUITIES_ENABLED=true\nIBKR_PAPER_MODE=true\n",
+        encoding="utf-8",
+    )
+    (logs / "startup.log").write_text(
+        "\n".join(
+            [
+                "Equities ant gestart | type=sector_scout_ant  ant_id=abc  ttl=86400",
+                "Equities ant gestart | type=fundamental_ant  ant_id=def  ttl=86400",
+                "Equities ant gestart | type=dividend_scout_ant  ant_id=ghi  ttl=86400",
+                "EquitiesPaperAnt gestart | ant_id=eq-paper  capital=500.00  symbols=XLK,GLD,QQQ",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = v.run_equities_config_validation(logs_root=logs, repo_root=repo)
+
+    assert result["status"] == "CONFIRMED"
+    assert result["env_confirmed"] is True
+    assert result["startup_confirmed"] is True
+    assert result["tradable_symbols_confirmed"] is True
+
+
 def test_full_runner_writes_report_with_blocked_verdict_without_pc2_data() -> None:
     out = _local_tmp("pc2_validation_out")
     logs = _local_tmp("pc2_validation_empty_logs")
@@ -176,4 +203,5 @@ def test_full_runner_writes_report_with_blocked_verdict_without_pc2_data() -> No
     report = v.build_validation_report(price=price, fees=fees, live=live, signals=signals, logs_root=logs)
 
     assert "CANARY DEPLOYMENT VERDICT:" in report
+    assert "EQUITIES CONFIG:" in report
     assert "DO_NOT_DEPLOY" in report
