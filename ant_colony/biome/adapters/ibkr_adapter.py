@@ -85,6 +85,23 @@ _DEFAULT_EXCHANGE = "SMART"
 _DEFAULT_CURRENCY = "USD"
 
 
+def _is_connection_refused(exc: BaseException) -> bool:
+    """Herken lokale TWS/IB Gateway connectiefouten zonder stacktrace-ruis."""
+    if isinstance(exc, ConnectionRefusedError):
+        return True
+    winerror = getattr(exc, "winerror", None)
+    if winerror == 10061:
+        return True
+    if isinstance(exc, OSError):
+        text = str(exc).lower()
+        return (
+            "connection refused" in text
+            or "connect call failed" in text
+            or "actively refused" in text
+        )
+    return False
+
+
 class IBKRAdapter:
     """
     BiomeAdapter voor Interactive Brokers via ib_insync.
@@ -338,7 +355,21 @@ class IBKRAdapter:
                 self._ib = None
 
             ib = IB()
-            ib.connect(host_, port_, clientId=client_id_, timeout=10, readonly=False)
+            try:
+                ib.connect(host_, port_, clientId=client_id_, timeout=10, readonly=False)
+            except Exception as exc:
+                if not _is_connection_refused(exc):
+                    raise
+                self._log.warning(
+                    "IBKR niet bereikbaar | %s:%d clientId=%d paper=%s | %s",
+                    host_, port_, client_id_, self._paper_mode, exc,
+                )
+                try:
+                    ib.disconnect()
+                except Exception:
+                    pass
+                self._ib = None
+                return False
             self._ib = ib
             self._log.info(
                 "IBKR verbonden | %s:%d clientId=%d paper=%s",

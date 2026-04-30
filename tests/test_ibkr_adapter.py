@@ -213,7 +213,7 @@ class TestConnect:
         assert result is True
         assert adapter._ib is ib
 
-    def test_connect_failure_returns_false(self) -> None:
+    def test_connect_failure_returns_false(self, caplog) -> None:
         ib = MagicMock()
         ib.connect.side_effect = ConnectionRefusedError("TWS niet actief")
         with patched_ib(ib):
@@ -221,6 +221,7 @@ class TestConnect:
             result  = adapter.connect()
         assert result is False
         assert adapter._ib is None
+        assert "IBKR niet bereikbaar" in caplog.text
 
     def test_connect_uses_paper_port(self) -> None:
         ib = MagicMock()
