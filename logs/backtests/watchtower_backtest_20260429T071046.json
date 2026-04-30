@@ -1,0 +1,38 @@
+{
+  "generated_at": "2026-04-29T07:10:46.573461+00:00",
+  "assumptions": {
+    "starting_equity": 10000.0,
+    "notional_per_trade": 500.0,
+    "fee_pct_per_side": 0.0025,
+    "slippage_pct": 0.001,
+    "default_take_profit_pct": 0.03,
+    "default_stop_loss_pct": 0.015,
+    "max_bars_held": 24,
+    "max_concurrent_positions": 3,
+    "allow_short": false
+  },
+  "total_signals": 0,
+  "total_trades": 0,
+  "skipped_signals": 0,
+  "skipped_by_reason": {},
+  "total_net_pnl": 0,
+  "total_return_pct": 0.0,
+  "win_rate": null,
+  "expectancy_pct": null,
+  "avg_net_return_pct": null,
+  "profit_factor": null,
+  "sharpe_ratio": null,
+  "max_drawdown_pct": 0.0,
+  "by_symbol": {},
+  "by_asset_class": {},
+  "cross_field": {
+    "signals_with_linked_assets": 0,
+    "trades_with_linked_assets": 0,
+    "avg_net_return_pct": null,
+    "win_rate": null
+  },
+  "trades": [],
+  "signal_source": "seed",
+  "min_market_quality": "historical",
+  "include_neutral": false
+}

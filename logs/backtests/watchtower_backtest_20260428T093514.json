@@ -1,0 +1,73 @@
+{
+  "generated_at": "2026-04-28T09:35:14.031622+00:00",
+  "assumptions": {
+    "starting_equity": 10000.0,
+    "notional_per_trade": 500.0,
+    "fee_pct_per_side": 0.0025,
+    "slippage_pct": 0.001,
+    "default_take_profit_pct": 0.03,
+    "default_stop_loss_pct": 0.015,
+    "max_bars_held": 60,
+    "max_concurrent_positions": 1,
+    "allow_short": false
+  },
+  "total_signals": 8,
+  "total_trades": 1,
+  "skipped_signals": 7,
+  "total_net_pnl": -3.966468,
+  "total_return_pct": -0.00039665,
+  "win_rate": 0.0,
+  "expectancy_pct": -0.00793294,
+  "avg_net_return_pct": -0.00793294,
+  "profit_factor": 0.0,
+  "sharpe_ratio": null,
+  "max_drawdown_pct": 0.00039665,
+  "by_symbol": {
+    "BTC-EUR": {
+      "trade_count": 1,
+      "total_net_pnl": -3.966468,
+      "avg_net_return_pct": -0.00793294,
+      "win_rate": 0.0
+    }
+  },
+  "by_asset_class": {
+    "crypto": {
+      "trade_count": 1,
+      "total_net_pnl": -3.966468,
+      "avg_net_return_pct": -0.00793294,
+      "win_rate": 0.0
+    }
+  },
+  "cross_field": {
+    "signals_with_linked_assets": 6,
+    "trades_with_linked_assets": 1,
+    "avg_net_return_pct": -0.00793294,
+    "win_rate": 0.0
+  },
+  "trades": [
+    {
+      "signal_id": "sig_725f937d5dc8",
+      "symbol": "BTC-EUR",
+      "direction": "long",
+      "asset_class": "crypto",
+      "source_field": "crypto",
+      "entry_timestamp": "2026-04-28T09:23:00+00:00",
+      "exit_timestamp": "2026-04-28T09:35:00+00:00",
+      "entry_price": 65731.666,
+      "exit_price": 65538.396,
+      "quantity": 0.007606683817,
+      "exit_reason": "ttl",
+      "gross_pnl": -1.470144,
+      "fee_cost": 2.496325,
+      "net_pnl": -3.966468,
+      "net_return_pct": -0.00793294,
+      "bars_held": 13,
+      "linked_assets": [
+        "BITVAVO:ETH-BTC",
+        "BITVAVO:ETH-EUR",
+        "FX:DXY",
+        "NASDAQ:QQQ"
+      ]
+    }
+  ]
+}
