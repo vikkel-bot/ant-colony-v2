@@ -14,7 +14,9 @@ import logging
 import os
 import sys
 import threading
+import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
@@ -453,6 +455,49 @@ class TestGetCandles:
         candles = result["candles"]
         assert len(candles) == 1
         assert candles[0].close == pytest.approx(151.0)
+
+    def test_concurrent_candle_fetches_do_not_deadlock_on_ibkr_lock(self) -> None:
+        ib = MagicMock()
+        ib.isConnected.return_value = True
+
+        def req_historical_data(*args, **kwargs):
+            time.sleep(0.3)
+            raise TimeoutError("historical data request timed out")
+
+        ib.reqHistoricalData.side_effect = req_historical_data
+        fallback = [
+            MarketData(
+                symbol="ETF",
+                timeframe="1d",
+                timestamp=datetime.now(tz=timezone.utc),
+                open=100.0,
+                high=102.0,
+                low=99.0,
+                close=101.0,
+                volume=1_000_000,
+                biome_id="equities",
+            )
+        ]
+
+        with patched_ib(ib):
+            with patch(
+                "ant_colony.biome.adapters.yahoo_finance_adapter.YahooFinanceAdapter.get_candles",
+                return_value=fallback,
+            ) as yf_get:
+                adapter = _connected_adapter(ib)
+                started = time.monotonic()
+                with ThreadPoolExecutor(max_workers=5) as executor:
+                    futures = [
+                        executor.submit(adapter.get_candles, f"ETF{i}", period="3mo", interval="1d")
+                        for i in range(5)
+                    ]
+                    results = [future.result(timeout=3) for future in futures]
+                elapsed = time.monotonic() - started
+
+        assert elapsed < 3.0
+        assert all(result == fallback for result in results)
+        assert yf_get.call_count == 5
+        assert ib.reqHistoricalData.call_count == 1
 
 
 # ---------------------------------------------------------------------------

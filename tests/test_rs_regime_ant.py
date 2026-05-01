@@ -15,6 +15,7 @@ Getest gedrag:
 from __future__ import annotations
 
 import json
+import time
 import uuid
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -227,6 +228,37 @@ class TestRsRegimeAntTick:
         assert len(records) >= 1
         assert records[-1]["payload"]["action"] == "regime_signal"
         assert records[-1]["payload"]["regime"] in {"RISK_ON", "NEUTRAL", "RISK_OFF", "CRISIS"}
+
+    def test_parallel_fetch_of_10_symbols_finishes_under_15s(self):
+        ant = _make_ant(adapter=MagicMock())
+        symbols = [f"R{i}" for i in range(10)]
+
+        def get_candles(symbol, period, interval):
+            time.sleep(0.2)
+            return _make_candles(_build_closes(60))
+
+        started = time.monotonic()
+        closes = ant._fetch_closes_parallel(symbols, get_candles)
+        elapsed = time.monotonic() - started
+
+        assert set(closes) == set(symbols)
+        assert elapsed < 15.0
+        assert elapsed < 1.5
+
+    def test_failing_symbol_does_not_block_other_symbols(self, caplog):
+        ant = _make_ant(adapter=MagicMock())
+        symbols = ["QQQ", "BROKEN", "GLD"]
+
+        def get_candles(symbol, period, interval):
+            if symbol == "BROKEN":
+                raise RuntimeError("provider timeout")
+            return _make_candles(_build_closes(60))
+
+        with caplog.at_level(logging.WARNING, logger=f"ant.rs_regime.{ant.ant_id[:8]}"):
+            closes = ant._fetch_closes_parallel(symbols, get_candles)
+
+        assert set(closes) == {"QQQ", "GLD"}
+        assert "Candle fetch mislukt voor BROKEN" in caplog.text
 
 
 # ---------------------------------------------------------------------------

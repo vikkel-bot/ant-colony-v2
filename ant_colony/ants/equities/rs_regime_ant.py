@@ -40,6 +40,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import mean
@@ -70,6 +71,7 @@ _RS_CRISIS       = 1.2   # defensieve RS boven dit niveau = CRISIS kandidaat
 
 _CANDLE_PERIOD   = "3mo"  # yfinance period — geeft ≈ 63 handelsdagen
 _CANDLE_INTERVAL = "1d"
+_MAX_CANDLE_WORKERS = 5
 
 
 # ---------------------------------------------------------------------------
@@ -258,8 +260,10 @@ class RSRegimeAnt:
             self._last_action = "tick:no_get_candles"
             return None
 
+        closes_by_symbol = self._fetch_closes_parallel([_QQQ, *_DEFENSIVE_BASKET], get_candles_fn)
+
         # Haal QQQ-data op
-        qqq_closes = self._fetch_closes(_QQQ, get_candles_fn)
+        qqq_closes = closes_by_symbol.get(_QQQ)
         if qqq_closes is None or len(qqq_closes) < _MIN_BARS:
             self._log.warning(
                 "Onvoldoende QQQ-data (%d bars, minimaal %d vereist) — tick overgeslagen",
@@ -289,7 +293,7 @@ class RSRegimeAnt:
         rs_values: list[float] = []
 
         for symbol in _DEFENSIVE_BASKET:
-            closes = self._fetch_closes(symbol, get_candles_fn)
+            closes = closes_by_symbol.get(symbol)
             if closes is None or len(closes) < _MIN_BARS:
                 self._log.warning("Onvoldoende data voor %s — overgeslagen", symbol)
                 continue
@@ -357,6 +361,38 @@ class RSRegimeAnt:
         except Exception:
             self._log.exception("Fout bij ophalen candles voor %s", symbol)
             return None
+
+    def _fetch_closes_parallel(self, symbols: list[str], get_candles_fn) -> dict[str, list[float]]:
+        """Fetch sluitprijzen parallel voor regime-symbolen."""
+        t0 = time.monotonic()
+        closes_by_symbol: dict[str, list[float]] = {}
+        if not symbols:
+            return closes_by_symbol
+
+        workers = min(_MAX_CANDLE_WORKERS, len(symbols))
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="rs-candles") as executor:
+            futures = {
+                executor.submit(self._fetch_symbol_closes, symbol, get_candles_fn): symbol
+                for symbol in symbols
+            }
+            for future in as_completed(futures):
+                symbol, closes = future.result()
+                if closes:
+                    closes_by_symbol[symbol] = closes
+
+        elapsed = time.monotonic() - t0
+        self._log.info("Candle fetch klaar | symbols=%d tijd=%.1fs", len(symbols), elapsed)
+        return closes_by_symbol
+
+    def _fetch_symbol_closes(self, symbol: str, get_candles_fn) -> tuple[str, list[float] | None]:
+        try:
+            candles = get_candles_fn(symbol, period=_CANDLE_PERIOD, interval=_CANDLE_INTERVAL)
+            if not candles:
+                return symbol, None
+            return symbol, [c.close for c in candles if c.close > 0]
+        except Exception as exc:
+            self._log.warning("Candle fetch mislukt voor %s: %s", symbol, exc)
+            return symbol, None
 
     # ------------------------------------------------------------------
     # Log events

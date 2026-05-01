@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -54,6 +55,7 @@ _MIN_BARS        = 2       # minimum candles voor betrouwbare return
 _TOP_N           = 3       # top 3 sectoren krijgen een LONG-signaal
 _CONFIDENCE_TOP  = 0.90    # confidence voor de sterkste sector
 _CONFIDENCE_BASE = 0.75    # confidence voor de zwakste top-3 sector
+_MAX_CANDLE_WORKERS = 5
 
 
 class SectorScoutAnt:
@@ -173,13 +175,7 @@ class SectorScoutAnt:
             self._last_action = "tick:no_get_candles"
             return []
 
-        returns: dict[str, float] = {}
-        for symbol in _SPDR_ETFS:
-            ret = self._get_3mo_return(symbol, get_candles_fn)
-            if ret is not None:
-                returns[symbol] = ret
-            else:
-                self._log.warning("3-maands return niet beschikbaar voor %s — overgeslagen", symbol)
+        returns = self._fetch_3mo_returns_parallel(get_candles_fn)
 
         if not returns:
             self._log.warning("Geen ETF-data beschikbaar — tick overgeslagen")
@@ -217,16 +213,58 @@ class SectorScoutAnt:
         """Bereken 3-maands prijsreturn. Retourneert None bij onvoldoende data."""
         try:
             candles = get_candles_fn(symbol, period=_MOMENTUM_PERIOD, interval="1d")
-            if len(candles) < _MIN_BARS:
-                return None
-            first_close = candles[0].close
-            last_close  = candles[-1].close
-            if first_close <= 0:
-                return None
-            return (last_close - first_close) / first_close
+            return self._return_from_candles(candles)
         except Exception:
             self._log.exception("Fout bij berekenen return voor %s", symbol)
             return None
+
+    def _fetch_3mo_returns_parallel(
+        self,
+        get_candles_fn,
+        symbols: list[str] | tuple[str, ...] | None = None,
+    ) -> dict[str, float]:
+        """Fetch candles parallel en bereken 3-maands returns per symbool."""
+        target_symbols = list(symbols or _SPDR_ETFS.keys())
+        t0 = time.monotonic()
+        returns: dict[str, float] = {}
+        if not target_symbols:
+            return returns
+
+        workers = min(_MAX_CANDLE_WORKERS, len(target_symbols))
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="sector-candles") as executor:
+            futures = {
+                executor.submit(self._fetch_symbol_candles, symbol, get_candles_fn): symbol
+                for symbol in target_symbols
+            }
+            for future in as_completed(futures):
+                symbol, candles = future.result()
+                ret = self._return_from_candles(candles)
+                if ret is not None:
+                    returns[symbol] = ret
+                else:
+                    self._log.warning("3-maands return niet beschikbaar voor %s — overgeslagen", symbol)
+
+        elapsed = time.monotonic() - t0
+        self._log.info("Candle fetch klaar | symbols=%d tijd=%.1fs", len(target_symbols), elapsed)
+        return returns
+
+    def _fetch_symbol_candles(self, symbol: str, get_candles_fn) -> tuple[str, list]:
+        try:
+            candles = get_candles_fn(symbol, period=_MOMENTUM_PERIOD, interval="1d")
+            return symbol, list(candles or [])
+        except Exception as exc:
+            self._log.warning("Candle fetch mislukt voor %s: %s", symbol, exc)
+            return symbol, []
+
+    @staticmethod
+    def _return_from_candles(candles: list) -> float | None:
+        if len(candles) < _MIN_BARS:
+            return None
+        first_close = candles[0].close
+        last_close = candles[-1].close
+        if first_close <= 0:
+            return None
+        return (last_close - first_close) / first_close
 
     def _build_signals(self, ranking: list[tuple[str, float]]) -> list[dict]:
         """Bouw signaal-dicts op basis van de ranking (voor logging en tests)."""

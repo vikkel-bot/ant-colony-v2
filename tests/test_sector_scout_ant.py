@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -161,6 +162,39 @@ class TestGet3moReturn:
 
         result = ant._get_3mo_return("XLK", boom)
         assert result is None
+
+
+class TestParallelCandleFetch:
+    def test_parallel_fetch_of_10_symbols_finishes_under_15s(self) -> None:
+        ant = make_ant()
+        symbols = [f"T{i}" for i in range(10)]
+
+        def get_candles(symbol, period="3mo", interval="1d"):
+            time.sleep(0.2)
+            return [make_candle(symbol, 100.0), make_candle(symbol, 110.0)]
+
+        started = time.monotonic()
+        returns = ant._fetch_3mo_returns_parallel(get_candles, symbols=symbols)
+        elapsed = time.monotonic() - started
+
+        assert set(returns) == set(symbols)
+        assert elapsed < 15.0
+        assert elapsed < 1.5
+
+    def test_failing_symbol_does_not_block_other_symbols(self, caplog) -> None:
+        ant = make_ant()
+        symbols = ["OK1", "BAD", "OK2"]
+
+        def get_candles(symbol, period="3mo", interval="1d"):
+            if symbol == "BAD":
+                raise RuntimeError("provider timeout")
+            return [make_candle(symbol, 100.0), make_candle(symbol, 105.0)]
+
+        with caplog.at_level(logging.WARNING, logger=f"ant.sector_scout.{ant.ant_id[:8]}"):
+            returns = ant._fetch_3mo_returns_parallel(get_candles, symbols=symbols)
+
+        assert set(returns) == {"OK1", "OK2"}
+        assert "Candle fetch mislukt voor BAD" in caplog.text
 
 
 # ---------------------------------------------------------------------------

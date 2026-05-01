@@ -84,6 +84,7 @@ _INTERVAL_TO_BAR_SIZE: dict[str, str] = {
 
 _DEFAULT_EXCHANGE = "SMART"
 _DEFAULT_CURRENCY = "USD"
+_CANDLE_LOCK_WAIT_SECONDS = 0.25
 
 
 def _is_connection_refused(exc: BaseException) -> bool:
@@ -433,47 +434,47 @@ class IBKRAdapter:
         try:
             self._ensure_thread_event_loop()
 
-            with self._ib_lock:
-                if not self._ensure_connected():
-                    return []
-
-                from ib_insync import Stock
-
-                contract  = Stock(symbol, exchange, currency)
-                duration  = _PERIOD_TO_DURATION.get(period, "3 M")
-                bar_size  = _INTERVAL_TO_BAR_SIZE.get(interval, "1 day")
-
+            bars = []
+            fallback_reason: str | None = None
+            lock_acquired = self._ib_lock.acquire(timeout=_CANDLE_LOCK_WAIT_SECONDS)
+            if not lock_acquired:
+                fallback_reason = "omdat IBKR candle lock bezet is"
+            else:
                 try:
-                    bars = self._ib.reqHistoricalData(
-                        contract,
-                        endDateTime="",
-                        durationStr=duration,
-                        barSizeSetting=bar_size,
-                        whatToShow="MIDPOINT",
-                        useRTH=True,
-                        formatDate=1,
-                        timeout=8,  # ib_insync default is 60s; keep equity ticks responsive.
-                    )
-                except Exception as exc:
-                    if not _is_historical_data_fallback_error(exc):
-                        raise
-                    self._log.info(
-                        "yfinance fallback voor %s na IBKR timeout/fout",
-                        symbol,
-                    )
-                    fallback_bars = self._get_yfinance_candles(symbol, period=period, interval=interval)
-                    if fallback_bars:
-                        self._log.info(
-                            "yfinance fallback geslaagd voor %s — %d bars",
-                            symbol,
-                            len(fallback_bars),
+                    if not self._ensure_connected():
+                        return []
+
+                    from ib_insync import Stock
+
+                    contract  = Stock(symbol, exchange, currency)
+                    duration  = _PERIOD_TO_DURATION.get(period, "3 M")
+                    bar_size  = _INTERVAL_TO_BAR_SIZE.get(interval, "1 day")
+
+                    try:
+                        bars = self._ib.reqHistoricalData(
+                            contract,
+                            endDateTime="",
+                            durationStr=duration,
+                            barSizeSetting=bar_size,
+                            whatToShow="MIDPOINT",
+                            useRTH=True,
+                            formatDate=1,
+                            timeout=8,  # ib_insync default is 60s; keep equity ticks responsive.
                         )
-                    else:
-                        self._log.warning(
-                            "yfinance fallback ook mislukt voor %s — geen candles",
-                            symbol,
-                        )
-                    return fallback_bars
+                    except Exception as exc:
+                        if not _is_historical_data_fallback_error(exc):
+                            raise
+                        fallback_reason = "na IBKR timeout/fout"
+                finally:
+                    self._ib_lock.release()
+
+            if fallback_reason:
+                return self._get_yfinance_fallback_candles(
+                    symbol,
+                    period=period,
+                    interval=interval,
+                    reason=fallback_reason,
+                )
 
             result: list[MarketData] = []
             for bar in bars:
@@ -706,6 +707,28 @@ class IBKRAdapter:
         except Exception:
             self._log.exception("yfinance fallback mislukt voor %s", symbol)
             return []
+
+    def _get_yfinance_fallback_candles(
+        self,
+        symbol: str,
+        period: str,
+        interval: str,
+        reason: str,
+    ) -> list[MarketData]:
+        self._log.info("yfinance fallback voor %s %s", symbol, reason)
+        fallback_bars = self._get_yfinance_candles(symbol, period=period, interval=interval)
+        if fallback_bars:
+            self._log.info(
+                "yfinance fallback geslaagd voor %s — %d bars",
+                symbol,
+                len(fallback_bars),
+            )
+        else:
+            self._log.warning(
+                "yfinance fallback ook mislukt voor %s — geen candles",
+                symbol,
+            )
+        return fallback_bars
 
     def _ensure_thread_event_loop(self) -> asyncio.AbstractEventLoop:
         """
