@@ -10,6 +10,7 @@ lazy-import inside de adapter de mock module ziet.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import sys
 import threading
@@ -350,6 +351,16 @@ class TestGetCandles:
         _, kwargs = ib.reqHistoricalData.call_args
         assert kwargs["durationStr"] == "3 M"
 
+    def test_historical_request_uses_short_timeout_and_midpoint(self) -> None:
+        ib = MagicMock()
+        ib.isConnected.return_value = True
+        ib.reqHistoricalData.return_value = []
+        with patched_ib(ib):
+            _connected_adapter(ib).get_candles("QQQ")
+        _, kwargs = ib.reqHistoricalData.call_args
+        assert kwargs["timeout"] == 8
+        assert kwargs["whatToShow"] == "MIDPOINT"
+
     def test_exception_returns_empty_list(self) -> None:
         ib = MagicMock()
         ib.isConnected.return_value = True
@@ -358,7 +369,7 @@ class TestGetCandles:
             result = _connected_adapter(ib).get_candles("AAPL")
         assert result == []
 
-    def test_timeout_falls_back_to_yfinance(self) -> None:
+    def test_timeout_falls_back_to_yfinance(self, caplog) -> None:
         ib = MagicMock()
         ib.isConnected.return_value = True
         ib.reqHistoricalData.side_effect = TimeoutError("historical data request timed out")
@@ -380,9 +391,27 @@ class TestGetCandles:
                 "ant_colony.biome.adapters.yahoo_finance_adapter.YahooFinanceAdapter.get_candles",
                 return_value=fallback,
             ) as yf_get:
+                caplog.set_level(logging.INFO, logger="adapter.ibkr.paper")
                 result = _connected_adapter(ib).get_candles("XLK", period="3mo", interval="1d")
         assert result == fallback
         yf_get.assert_called_once_with("XLK", period="3mo", interval="1d")
+        assert "yfinance fallback voor XLK na IBKR timeout/fout" in caplog.text
+        assert "yfinance fallback geslaagd voor XLK" in caplog.text
+
+    def test_empty_yfinance_fallback_logs_warning(self, caplog) -> None:
+        ib = MagicMock()
+        ib.isConnected.return_value = True
+        ib.reqHistoricalData.side_effect = TimeoutError("historical data request timed out")
+        with patched_ib(ib):
+            with patch(
+                "ant_colony.biome.adapters.yahoo_finance_adapter.YahooFinanceAdapter.get_candles",
+                return_value=[],
+            ):
+                caplog.set_level(logging.INFO, logger="adapter.ibkr.paper")
+                result = _connected_adapter(ib).get_candles("XLE", period="3mo", interval="1d")
+        assert result == []
+        assert "yfinance fallback voor XLE na IBKR timeout/fout" in caplog.text
+        assert "yfinance fallback ook mislukt voor XLE" in caplog.text
 
     def test_exchange_and_currency_passed_to_stock(self) -> None:
         ib = MagicMock()

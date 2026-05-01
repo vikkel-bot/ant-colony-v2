@@ -242,6 +242,29 @@ class TestTick:
         result = ant._tick()
         assert result == []
 
+    def test_tick_processes_yfinance_fallback_bars(self) -> None:
+        adapter = MagicMock()
+        adapter.is_available.return_value = True
+
+        def get_candles(symbol, period="3mo", interval="1d"):
+            if symbol != "XLK":
+                return []
+            return [
+                make_candle("XLK", 100.0),
+                make_candle("XLK", 112.0),
+            ]
+
+        adapter.get_candles.side_effect = get_candles
+        adapter.get_market_data.return_value = make_candle("XLK", 112.0)
+        ant = make_ant(adapter=adapter)
+
+        signals = ant._tick()
+
+        assert len(signals) == 1
+        assert signals[0]["symbol"] == "XLK"
+        assert signals[0]["return_3mo"] == pytest.approx(0.12)
+        assert signals[0]["signal"] == "LONG"
+
     def test_tick_no_adapter_returns_empty(self) -> None:
         registry = MagicMock(spec=BiomeRegistry)
         registry.get.return_value = None

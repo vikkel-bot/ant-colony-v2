@@ -449,19 +449,31 @@ class IBKRAdapter:
                         endDateTime="",
                         durationStr=duration,
                         barSizeSetting=bar_size,
-                        whatToShow="TRADES",
+                        whatToShow="MIDPOINT",
                         useRTH=True,
                         formatDate=1,
+                        timeout=8,  # ib_insync default is 60s; keep equity ticks responsive.
                     )
                 except Exception as exc:
                     if not _is_historical_data_fallback_error(exc):
                         raise
-                    self._log.warning(
-                        "IBKR historical data niet beschikbaar voor %s (%s) — fallback naar yfinance",
+                    self._log.info(
+                        "yfinance fallback voor %s na IBKR timeout/fout",
                         symbol,
-                        exc,
                     )
-                    return self._get_yfinance_candles(symbol, period=period, interval=interval)
+                    fallback_bars = self._get_yfinance_candles(symbol, period=period, interval=interval)
+                    if fallback_bars:
+                        self._log.info(
+                            "yfinance fallback geslaagd voor %s — %d bars",
+                            symbol,
+                            len(fallback_bars),
+                        )
+                    else:
+                        self._log.warning(
+                            "yfinance fallback ook mislukt voor %s — geen candles",
+                            symbol,
+                        )
+                    return fallback_bars
 
             result: list[MarketData] = []
             for bar in bars:
