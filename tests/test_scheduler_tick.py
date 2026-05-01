@@ -108,6 +108,36 @@ class TestTick:
         assert sequences == sorted(sequences)
         assert sequences[-1] >= 2
 
+    def test_start_continues_after_tick_exception(self, tmp_path, monkeypatch):
+        s = make_scheduler(tmp_path)
+        s._watchdog_threshold_seconds = 0
+        calls = {"count": 0}
+
+        def flaky_tick():
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise RuntimeError("transient tick failure")
+            s._status = ColonyStatus.HALTED
+
+        monkeypatch.setattr(s, "tick", flaky_tick)
+        monkeypatch.setattr("ant_colony.colony.scheduler.colony_scheduler.time.sleep", lambda *_: None)
+
+        s.start()
+
+        assert calls["count"] == 2
+
+    def test_watchdog_recovers_stale_tick_cycle(self, tmp_path):
+        s = make_scheduler(tmp_path)
+        s._watchdog_threshold_seconds = 300
+        s._last_tick_completed_at = datetime.now(tz=timezone.utc) - timedelta(seconds=400)
+
+        recovered = s._watchdog_recover_if_stale()
+
+        assert recovered is True
+        assert s._tick_sequence == 1
+        records = read_log(tmp_path / "colony" / "scheduler.jsonl")
+        assert any(r.get("event_type") == "scheduler_watchdog_stale" for r in records)
+
 
 # ---------------------------------------------------------------------------
 # Agent registration and heartbeat tracking

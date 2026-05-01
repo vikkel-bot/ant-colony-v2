@@ -1603,6 +1603,7 @@ def main() -> None:
         if _watchtower_enabled:
             from ant_colony.ants.watchtower_ant import WatchtowerAnt
             from ant_colony.clients.watchtower_client import WatchtowerClient
+            from ant_colony.colony.scheduler.colony_scheduler import AgentRecord
             from ant_colony.schemas.mission import (
                 MarketScope as _WTMarketScope,
                 Mission as _WTMission,
@@ -1648,14 +1649,22 @@ def main() -> None:
                     logs_root=logs_root,
                     client=_wt_client,
                 )
+                scheduler.register_agent(AgentRecord(
+                    ant_id=_wt_ant_id,
+                    mission_id=_wt_mission.mission_id,
+                    node_id=args.node_id,
+                    ant_type="watchtower_ant",
+                    ttl=_wt_mission.ttl,
+                    heartbeat_interval=_wt_mission.heartbeat_interval,
+                ))
                 threading.Thread(
                     target=_wt_ant.run,
                     name=f"watchtower-{_wt_ant_id[:16]}",
                     daemon=True,
                 ).start()
                 log.info(
-                    "WatchtowerAnt gestart | ant_id=%s  url=%s",
-                    _wt_ant_id, _wt_client.base_url,
+                    "WatchtowerAnt gestart | ant_id=%s  url=%s  poll_interval=%ss",
+                    _wt_ant_id, _wt_client.base_url, _wt_mission.heartbeat_interval,
                 )
             else:
                 log.warning(

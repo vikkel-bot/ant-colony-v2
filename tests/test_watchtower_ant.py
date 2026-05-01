@@ -269,6 +269,23 @@ class TestOffline:
         assert rec["received"] == 0
         assert rec["passed_filter"] == 0
 
+    def test_tick_sends_scheduler_heartbeat(self, tmp_path):
+        client = _make_client(healthy=True, signals=[])
+
+        def mock_get(limit=50):
+            client.last_get_succeeded = True
+            return []
+
+        client.get_signals.side_effect = mock_get
+        ant = _make_ant(tmp_path, client)
+
+        ant._tick()
+
+        ant.scheduler.record_heartbeat.assert_called_once()
+        heartbeat = ant.scheduler.record_heartbeat.call_args.args[0]
+        assert heartbeat.ant_id == ant.ant_id
+        assert heartbeat.last_action == "tick:received=0 passed=0"
+
 
 # ---------------------------------------------------------------------------
 # JSONL-schrijven
@@ -302,6 +319,7 @@ class TestJSONLWriting:
         rec = json.loads(log_path.read_text(encoding="utf-8").strip())
         assert "timestamp" in rec
         assert "received" in rec
+        assert "poll_interval" in rec
         assert "passed_filter" in rec
         assert "signals" in rec
         assert isinstance(rec["signals"], list)

@@ -28,6 +28,7 @@ from pathlib import Path
 
 from ant_colony.clients.watchtower_client import WatchtowerClient
 from ant_colony.colony.scheduler.colony_scheduler import ColonyScheduler
+from ant_colony.schemas.heartbeat import Heartbeat
 from ant_colony.schemas.mission import Mission
 
 # ---------------------------------------------------------------------------
@@ -103,6 +104,7 @@ class WatchtowerAnt:
                 "Watchtower offline, degrading gracefully | url=%s",
                 self._client.base_url,
             )
+            self._send_heartbeat(now, "tick:offline")
             return
 
         received = len(signals)
@@ -132,12 +134,13 @@ class WatchtowerAnt:
                 filtered.append(signal)
 
         self._log.info(
-            "Watchtower poll | ontvangen=%d  door_filter=%d",
-            received, len(filtered),
+            "Watchtower poll | interval=%ds  ontvangen=%d  door_filter=%d  afgewezen=%d",
+            _POLL_INTERVAL, received, len(filtered), len(rejections),
         )
 
         # altijd schrijven — ook bij 0 gefilterd (voor dashboard stats)
         self._write_snapshot(now, received, filtered, rejections)
+        self._send_heartbeat(now, f"tick:received={received} passed={len(filtered)}")
 
     def _write_snapshot(
         self,
@@ -153,6 +156,7 @@ class WatchtowerAnt:
         self._out_dir.mkdir(parents=True, exist_ok=True)
         record = {
             "timestamp":     now.strftime("%Y-%m-%dT%H:%M:%S"),
+            "poll_interval": _POLL_INTERVAL,
             "received":      total_received,
             "passed_filter": len(filtered),
             "signals":       filtered,
@@ -164,3 +168,18 @@ class WatchtowerAnt:
                 fh.write(json.dumps(record, ensure_ascii=False) + "\n")
         except OSError:
             self._log.exception("Kon watchtower snapshot niet schrijven: %s", log_path)
+
+    def _send_heartbeat(self, now: datetime, last_action: str) -> None:
+        try:
+            self.scheduler.record_heartbeat(
+                Heartbeat(
+                    ant_id=self.ant_id,
+                    mission_id=self.mission.mission_id,
+                    node_id=self.mission.allowed_node,
+                    timestamp=now,
+                    budget_used=0.0,
+                    last_action=last_action,
+                )
+            )
+        except Exception:
+            self._log.exception("WatchtowerAnt heartbeat mislukt — poll-loop gaat door")
