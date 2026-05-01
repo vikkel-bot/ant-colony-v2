@@ -61,6 +61,27 @@ class TestGetSignals:
         assert result == signals
         assert client.last_get_succeeded is True
 
+    def test_returns_signals_from_packet_dict_when_online(self):
+        signals = [
+            {
+                "signal_id": "sig-002",
+                "asset": "AAPL",
+                "direction": "long",
+                "entry_score": 0.74,
+                "confidence": 0.68,
+            }
+        ]
+        packet = {
+            "signals": signals,
+            "count": 1,
+            "generated_at": "2026-05-01T10:00:00+00:00",
+        }
+        client = _make_client()
+        with patch("httpx.get", return_value=_mock_response(200, packet)):
+            result = client.get_signals(limit=10)
+        assert result == signals
+        assert client.last_get_succeeded is True
+
     def test_returns_empty_when_offline(self):
         client = _make_client()
         with patch("httpx.get", side_effect=httpx.ConnectError("refused")):

@@ -63,6 +63,9 @@ class WatchtowerClient:
             data = resp.json()
             if isinstance(data, list):
                 return data
+            if isinstance(data, dict) and isinstance(data.get("signals"), list):
+                return data["signals"]
+            _log.warning("Onverwacht signaalformaat van Watchtower")
             return []
         except Exception:
             self.last_get_succeeded = False
