@@ -4,10 +4,11 @@ ant_colony/ants/paper_ant_equities.py
 EquitiesPaperAnt — paper trading voor equities met trailing stop en handelsdag-TTL.
 
 Verantwoordelijkheden:
-  1. Leest signalen uit drie bronnen:
+  1. Leest signalen uit vier bronnen:
        - ANT_LOGS/scouts/*.jsonl          (SectorScoutAnt: biome=equities)
        - ANT_LOGS/equities/breakout/      (BreakoutAnt: breakout_signal)
        - ANT_LOGS/equities/dividend/      (DividendScoutAnt: dividend_candidate)
+       - ANT_LOGS/watchtower/candidates.jsonl (WatchtowerAnt: watchtower_candidate)
   2. Opent LONG paper posities (max 1 per symbool, max 10 tegelijk).
      Kapitaal per trade: 10% van beschikbaar kapitaal.
   3. Exit-logica (P3: exit vóór entry, elke tick):
@@ -72,6 +73,10 @@ _TTL_TRADING_DAYS        = 10
 _TTL_TRADING_SECONDS     = _TTL_TRADING_DAYS * _TRADING_SECONDS_PER_DAY  # 234000 s
 
 _CONFIDENCE_THRESHOLD    = 0.6
+_WATCHTOWER_POSITION_SCALE = min(
+    1.0,
+    max(0.0, float(os.getenv("WATCHTOWER_POSITION_SCALE", "0.5"))),
+)
 
 
 class EquitiesPaperAnt:
@@ -114,6 +119,7 @@ class EquitiesPaperAnt:
         self._seen_scout_ids:    set[str] = set()
         self._seen_breakout_ids: set[str] = set()
         self._seen_dividend_ids: set[str] = set()
+        self._seen_watchtower_ids: set[str] = set()
 
         # Open posities: tracking voor dedup-guard (naast ledger)
         self._open_symbols: set[str] = set()
@@ -200,6 +206,7 @@ class EquitiesPaperAnt:
             self._process_scout_signals()
             self._process_breakout_signals()
             self._process_dividend_candidates()
+            self._process_watchtower_candidates()
 
         self._last_action = "tick"
 
@@ -434,11 +441,66 @@ class EquitiesPaperAnt:
             except OSError:
                 self._log.warning("Kan dividend-log niet lezen: %s", path)
 
+    def _process_watchtower_candidates(self) -> None:
+        """Verwerk door WatchtowerAnt geaccepteerde equity-candidates."""
+        if self.logs_root is None:
+            return
+        candidate_path = self.logs_root / "watchtower" / "candidates.jsonl"
+        if not candidate_path.exists():
+            return
+
+        try:
+            lines = candidate_path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            self._log.warning("Kan Watchtower candidate-log niet lezen: %s", candidate_path)
+            return
+
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            payload = record.get("payload") if isinstance(record, dict) else None
+            if not isinstance(payload, dict):
+                payload = record if isinstance(record, dict) else {}
+            if payload.get("action") != "watchtower_candidate":
+                continue
+
+            sig_id = str(payload.get("signal_id") or "")
+            if not sig_id or sig_id in self._seen_watchtower_ids:
+                continue
+            self._seen_watchtower_ids.add(sig_id)
+
+            direction = str(payload.get("direction") or "").lower()
+            if direction != "long":
+                continue
+
+            symbol = str(payload.get("symbol") or payload.get("asset") or "").upper()
+            if not symbol or symbol in self._open_symbols:
+                continue
+
+            self._try_open_position(
+                symbol,
+                source="watchtower",
+                watchtower_signal_id=sig_id,
+                position_scale=_WATCHTOWER_POSITION_SCALE,
+            )
+
     # ------------------------------------------------------------------
     # Positie openen
     # ------------------------------------------------------------------
 
-    def _try_open_position(self, symbol: str, *, source: str) -> None:
+    def _try_open_position(
+        self,
+        symbol: str,
+        *,
+        source: str,
+        watchtower_signal_id: str | None = None,
+        position_scale: float = 1.0,
+    ) -> None:
         """Probeer een LONG positie te openen voor het gegeven symbool."""
         if symbol in self._open_symbols:
             return
@@ -457,6 +519,7 @@ class EquitiesPaperAnt:
         capital_available = self._ledger.capital_available
         capital_fraction  = _TRADE_CAPITAL_FRACTION
         hard_sl_pct       = _HARD_SL_PCT
+        position_scale = min(1.0, max(0.0, float(position_scale or 0.0)))
 
         # Market signal: aanpassing op positiegrootte en harde SL (trailing stop ongewijzigd)
         mkt = read_latest_market_signal(self.logs_root) if self.logs_root else None
@@ -471,6 +534,7 @@ class EquitiesPaperAnt:
                     float(mkt.get("sl_mult") or 1.0),
                 )
 
+        capital_fraction *= position_scale
         capital_per_trade = capital_available * capital_fraction
         if capital_per_trade <= 0:
             self._log.debug("Geen kapitaal beschikbaar — %s overgeslagen", symbol)
@@ -496,6 +560,7 @@ class EquitiesPaperAnt:
                 current_price=price,
                 peak_price=price,
                 opened_at=datetime.now(tz=timezone.utc),
+                watchtower_signal_id=watchtower_signal_id,
             )
         except Exception:
             self._log.exception("Kan PaperPosition niet aanmaken voor %s", symbol)
@@ -505,7 +570,7 @@ class EquitiesPaperAnt:
         self._peak_prices[position.position_id] = price
         self._trading_seconds[position.position_id] = 0.0
         self._ledger.record_opened(position)
-        self._emit_trade_opened(position, source=source)
+        self._emit_trade_opened(position, source=source, position_scale=position_scale)
         self._last_action = f"trade_opened:{symbol}"
 
         self._log.info(
@@ -657,6 +722,7 @@ class EquitiesPaperAnt:
                 current_price=entry,
                 peak_price=entry,
                 opened_at=opened_at,
+                watchtower_signal_id=payload.get("watchtower_signal_id"),
             )
         except Exception:
             self._log.warning(
@@ -668,7 +734,13 @@ class EquitiesPaperAnt:
     # Log events
     # ------------------------------------------------------------------
 
-    def _emit_trade_opened(self, position: PaperPosition, *, source: str) -> None:
+    def _emit_trade_opened(
+        self,
+        position: PaperPosition,
+        *,
+        source: str,
+        position_scale: float = 1.0,
+    ) -> None:
         """Log trade_opened event."""
         trailing_stop_price = position.entry_price * (1.0 - _TRAILING_STOP_PCT)
         self._write_log({
@@ -686,6 +758,8 @@ class EquitiesPaperAnt:
             "hard_sl_pct":          _HARD_SL_PCT,
             "trailing_stop_pct":    _TRAILING_STOP_PCT,
             "source":               source,
+            "position_scale":       position_scale,
+            "watchtower_signal_id": position.watchtower_signal_id,
         })
 
     def _emit_trade_closed(self, position: PaperPosition, exit_type: str) -> None:
@@ -724,13 +798,17 @@ class EquitiesPaperAnt:
             "POSITIE GESLOTEN | %s via %s  pnl_gross=%.4f fee=%.4f pnl_net=%.4f (%.2f%%)",
             position.symbol, exit_type, pnl_gross, fee_total, pnl_net, pnl_pct,
         )
-        self._send_watchtower_feedback(position, exit_type, pnl_pct)
+        self._send_watchtower_feedback(position, exit_type, pnl_pct, pnl_net)
 
     def _send_watchtower_feedback(
-        self, position: PaperPosition, exit_type: str, pnl_pct: float
+        self,
+        position: PaperPosition,
+        exit_type: str,
+        pnl_pct: float,
+        pnl_eur: float,
     ) -> None:
         """Fire-and-forget feedback naar Watchtower na trade close."""
-        if self._watchtower_client is None:
+        if self._watchtower_client is None or not position.watchtower_signal_id:
             return
 
         _map = {
@@ -747,8 +825,25 @@ class EquitiesPaperAnt:
         else:
             duration_hours = 0.0
 
+        if exit_type == "ttl_trading_days":
+            result = "timeout"
+        elif pnl_eur > 0:
+            result = "win"
+        else:
+            result = "loss"
+
+        risk_per_share = max(0.0, position.entry_price - position.stop_loss_price)
+        pnl_per_share = float(position.exit_price or position.entry_price) - position.entry_price
+        pnl_r = round(pnl_per_share / risk_per_share, 6) if risk_per_share > 0 else 0.0
+        closed_at = position.closed_at or datetime.now(timezone.utc)
+
         outcome = {
             "signal_id":    position.watchtower_signal_id,
+            "outcome":      result,
+            "pnl_r":        pnl_r,
+            "pnl_eur":      float(pnl_eur),
+            "holding_hours": duration_hours,
+            "closed_at":    closed_at.isoformat(),
             "asset":        position.symbol,
             "direction":    position.side.value.upper(),
             "entry_price":  float(position.entry_price),
@@ -758,9 +853,18 @@ class EquitiesPaperAnt:
             "duration_hours": duration_hours,
             "timestamp":    datetime.now(timezone.utc).isoformat(),
         }
+
+        def _post_feedback() -> None:
+            try:
+                self._watchtower_client.post_outcome(outcome)
+            except Exception:
+                self._log.warning(
+                    "Watchtower feedback mislukt — positie sluiting blijft geldig | signal_id=%s",
+                    position.watchtower_signal_id,
+                )
+
         threading.Thread(
-            target=self._watchtower_client.post_outcome,
-            args=(outcome,),
+            target=_post_feedback,
             daemon=True,
             name=f"wt-fb-eq-{position.position_id[:8]}",
         ).start()

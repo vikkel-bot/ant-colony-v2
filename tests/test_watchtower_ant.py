@@ -8,6 +8,7 @@ Colony moet altijd doordraaien als Watchtower offline is.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -360,6 +361,113 @@ class TestJSONLWriting:
             client=client,
         )
         ant._tick()   # mag niet crashen
+
+
+# ---------------------------------------------------------------------------
+# Watchtower → Queen candidate consumer
+# ---------------------------------------------------------------------------
+
+class TestWatchtowerCandidateConsumer:
+    def _signal(
+        self,
+        *,
+        signal_id: str = "wt-001",
+        asset: str = "AAPL",
+        direction: str = "long",
+        entry_score: float = 0.72,
+        confidence: float = 0.66,
+    ) -> dict:
+        ts = datetime.now(tz=timezone.utc).isoformat()
+        return {
+            "signal_id": signal_id,
+            "asset": asset,
+            "direction": direction,
+            "entry_score": entry_score,
+            "confidence": confidence,
+            "risk_flags": [],
+            "timestamp": ts,
+            "created_at": ts,
+            "reason": "fresh positive Watchtower signal",
+        }
+
+    def _read_snapshot(self, tmp_path: Path) -> dict:
+        return json.loads((tmp_path / "watchtower" / "signals.jsonl").read_text())
+
+    def _read_candidates(self, tmp_path: Path) -> list[dict]:
+        path = tmp_path / "watchtower" / "candidates.jsonl"
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+    def test_high_quality_positive_edge_signal_is_queued(self, tmp_path):
+        client = _make_client(signals=[self._signal(asset="AAPL")])
+        ant = _make_ant(tmp_path, client)
+
+        ant._tick()
+
+        candidates = self._read_candidates(tmp_path)
+        payload = candidates[0]["payload"]
+        assert payload["action"] == "watchtower_candidate"
+        assert payload["asset"] == "AAPL"
+        assert payload["direction"] == "long"
+        assert payload["signal_id"] == "wt-001"
+        rec = self._read_snapshot(tmp_path)
+        assert rec["candidates_accepted"] == 1
+        assert rec["candidate_rejections"] == []
+
+    def test_below_queen_threshold_is_filtered(self, tmp_path):
+        client = _make_client(signals=[
+            self._signal(asset="AAPL", entry_score=0.64, confidence=0.70),
+        ])
+        ant = _make_ant(tmp_path, client)
+
+        ant._tick()
+
+        rec = self._read_snapshot(tmp_path)
+        assert rec["candidates_accepted"] == 0
+        assert rec["candidate_rejections"][0]["rejection_reason"] == "entry_score_below_queen_threshold"
+        assert not (tmp_path / "watchtower" / "candidates.jsonl").exists()
+
+    def test_crypto_signal_is_always_rejected(self, tmp_path):
+        client = _make_client(signals=[
+            self._signal(asset="BTC-EUR", entry_score=0.95, confidence=0.95),
+        ])
+        ant = _make_ant(tmp_path, client)
+
+        ant._tick()
+
+        rec = self._read_snapshot(tmp_path)
+        assert rec["candidates_accepted"] == 0
+        assert rec["candidate_rejections"][0]["rejection_reason"] == "crypto_confirmed_negative"
+
+    def test_daily_limit_blocks_after_three_entries(self, tmp_path):
+        client = _make_client(signals=[
+            self._signal(signal_id="s-jnj", asset="JNJ"),
+            self._signal(signal_id="s-gld", asset="GLD"),
+            self._signal(signal_id="s-xlk", asset="XLK"),
+            self._signal(signal_id="s-aapl", asset="AAPL"),
+        ])
+        ant = _make_ant(tmp_path, client)
+
+        ant._tick()
+
+        candidates = self._read_candidates(tmp_path)
+        assert len(candidates) == 3
+        rec = self._read_snapshot(tmp_path)
+        reasons = [r["rejection_reason"] for r in rec["candidate_rejections"]]
+        assert "daily_limit_total" in reasons
+
+    def test_duplicate_asset_within_24h_is_skipped(self, tmp_path):
+        client = _make_client(signals=[
+            self._signal(signal_id="s-aapl-1", asset="AAPL"),
+            self._signal(signal_id="s-aapl-2", asset="AAPL"),
+        ])
+        ant = _make_ant(tmp_path, client)
+
+        ant._tick()
+
+        candidates = self._read_candidates(tmp_path)
+        assert len(candidates) == 1
+        rec = self._read_snapshot(tmp_path)
+        assert rec["candidate_rejections"][0]["rejection_reason"] == "daily_limit_asset_24h"
 
 
 # ---------------------------------------------------------------------------

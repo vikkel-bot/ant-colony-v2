@@ -471,3 +471,43 @@ class TestWatchtowerReceivedEndpoint:
         assert d["summary"]["accepted_24h"] == 1
         assert d["summary"]["rejected_24h"] == 1
         assert d["summary"]["rejection_reasons"]["score"] == 1
+
+    def test_queen_acceptance_status_from_candidate_log(self, tmp_path: Path):
+        ts = _now_iso()
+        _write_jsonl(tmp_path / "watchtower" / "candidates.jsonl", [{
+            "timestamp": ts,
+            "payload": {
+                "action": "watchtower_candidate",
+                "asset": "AAPL",
+                "direction": "long",
+                "entry_score": 0.72,
+                "confidence": 0.66,
+                "signal_id": "sig-aapl",
+                "created_at": ts,
+            },
+        }])
+        _write_jsonl(tmp_path / "watchtower" / "signals.jsonl", [{
+            "timestamp": ts,
+            "received": 2,
+            "passed_filter": 2,
+            "candidates_accepted": 1,
+            "signals": [],
+            "candidate_rejections": [{
+                "id": "sig-btc",
+                "asset": "BTC-EUR",
+                "direction": "long",
+                "timestamp": ts,
+                "entry_score": 0.91,
+                "confidence": 0.90,
+                "rejection_reason": "crypto_confirmed_negative",
+            }],
+        }])
+
+        d = _client(ColonyContext(logs_root=tmp_path)).get("/api/watchtower/signals/received").json()
+        by_asset = {s["asset"]: s for s in d["signals"]}
+        assert by_asset["AAPL"]["queen_accepted"] is True
+        assert by_asset["BTC-EUR"]["queen_accepted"] is False
+        assert d["summary"]["received_24h"] == 2
+        assert d["summary"]["accepted_24h"] == 1
+        assert d["summary"]["rejected_24h"] == 1
+        assert d["summary"]["last_signal"]["asset"] in {"AAPL", "BTC-EUR"}

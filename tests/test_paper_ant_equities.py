@@ -530,6 +530,28 @@ class TestSignalProcessing:
         }
         (d / "dividend.jsonl").open("a", encoding="utf-8").write(json.dumps(record) + "\n")
 
+    def _write_watchtower_candidate(self, logs_root: Path, *, symbol: str, signal_id: str) -> None:
+        d = logs_root / "watchtower"
+        d.mkdir(parents=True, exist_ok=True)
+        now = datetime.now(tz=timezone.utc).isoformat()
+        record = {
+            "timestamp": now,
+            "source": "watchtower-ant",
+            "payload": {
+                "action": "watchtower_candidate",
+                "asset": symbol,
+                "symbol": symbol,
+                "direction": "long",
+                "entry_score": 0.72,
+                "confidence": 0.66,
+                "signal_id": signal_id,
+                "source": "watchtower",
+                "created_at": now,
+                "reason": "accepted Watchtower candidate",
+            },
+        }
+        (d / "candidates.jsonl").open("a", encoding="utf-8").write(json.dumps(record) + "\n")
+
     def _mock_price(self, ant: EquitiesPaperAnt, price: float) -> None:
         adapter = MagicMock()
         adapter.is_available.return_value = True
@@ -613,3 +635,73 @@ class TestSignalProcessing:
         (scout_dir / "crypto_scout.jsonl").open("a").write(json.dumps(record) + "\n")
         ant._process_scout_signals()
         assert "BTC-EUR" not in ant._open_symbols
+
+    def test_watchtower_candidate_opens_scaled_position(self, tmp_path):
+        ant = _make_ant(tmp_path)
+        self._mock_price(ant, 100.0)
+        self._write_watchtower_candidate(tmp_path, symbol="AAPL", signal_id="wt-aapl-1")
+
+        ant._process_watchtower_candidates()
+
+        assert "AAPL" in ant._open_symbols
+        pos = ant._ledger.open_positions[0]
+        assert pos.watchtower_signal_id == "wt-aapl-1"
+        # 500 capital * 10% normal trade fraction * 0.5 Watchtower scale = 25 EUR
+        assert pos.quantity == pytest.approx(0.25)
+
+    def test_watchtower_candidate_duplicate_not_processed_twice(self, tmp_path):
+        ant = _make_ant(tmp_path)
+        self._mock_price(ant, 100.0)
+        self._write_watchtower_candidate(tmp_path, symbol="AAPL", signal_id="wt-dup")
+
+        ant._process_watchtower_candidates()
+        ant._process_watchtower_candidates()
+
+        assert len(ant._ledger.open_positions) == 1
+
+
+class TestWatchtowerFeedback:
+    def test_feedback_sent_after_watchtower_position_close(self, tmp_path):
+        ant = _make_ant(tmp_path)
+        client = MagicMock()
+        ant._watchtower_client = client
+        opened_at = datetime.now(tz=timezone.utc) - timedelta(hours=3)
+        pos = PaperPosition(
+            position_id=uuid.uuid4().hex,
+            symbol="AAPL",
+            biome="equities",
+            mission_id=ant.mission.mission_id,
+            ant_id=ant.ant_id,
+            side=PositionSide.LONG,
+            entry_price=100.0,
+            quantity=1.0,
+            stop_loss_price=93.0,
+            take_profit_price=200.0,
+            ttl=ant.mission.ttl,
+            current_price=105.0,
+            peak_price=105.0,
+            opened_at=opened_at,
+            closed_at=datetime.now(tz=timezone.utc),
+            exit_price=105.0,
+            exit_reason="ttl_trading_days",
+            watchtower_signal_id="wt-feedback-1",
+        )
+
+        class ImmediateThread:
+            def __init__(self, target, args=(), kwargs=None, **_):
+                self._target = target
+                self._args = args
+                self._kwargs = kwargs or {}
+
+            def start(self):
+                self._target(*self._args, **self._kwargs)
+
+        with patch("ant_colony.ants.paper_ant_equities.threading.Thread", ImmediateThread):
+            ant._send_watchtower_feedback(pos, "ttl_trading_days", pnl_pct=5.0, pnl_eur=5.0)
+
+        client.post_outcome.assert_called_once()
+        outcome = client.post_outcome.call_args.args[0]
+        assert outcome["signal_id"] == "wt-feedback-1"
+        assert outcome["outcome"] == "timeout"
+        assert outcome["pnl_eur"] == 5.0
+        assert outcome["holding_hours"] >= 2.9

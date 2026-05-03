@@ -173,7 +173,7 @@ class WatchtowerClient:
 
     def post_outcome(self, outcome: dict) -> bool:
         """
-        POST /outcomes/evaluate
+        POST /colony/feedback
 
         Fire-and-forget feedback. Nooit blocken op het resultaat.
 
@@ -182,7 +182,7 @@ class WatchtowerClient:
         """
         try:
             resp = httpx.post(
-                f"{self.base_url}/outcomes/evaluate",
+                f"{self.base_url}/colony/feedback",
                 json=outcome,
                 timeout=self.timeout,
             )

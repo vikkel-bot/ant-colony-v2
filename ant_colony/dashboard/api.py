@@ -3758,7 +3758,7 @@ def _watchtower_signal_row(
 
 def _iter_watchtower_rejections(record: dict[str, Any]) -> list[dict[str, Any]]:
     rejected: list[dict[str, Any]] = []
-    for key in ("rejections", "rejected_signals", "skipped_signals", "skipped"):
+    for key in ("rejections", "candidate_rejections", "rejected_signals", "skipped_signals", "skipped"):
         value = record.get(key)
         if isinstance(value, list):
             rejected.extend([v for v in value if isinstance(v, dict)])
@@ -3767,15 +3767,63 @@ def _iter_watchtower_rejections(record: dict[str, Any]) -> list[dict[str, Any]]:
     return rejected
 
 
+def _read_watchtower_candidate_rows(
+    logs_root: Path,
+    cutoff: datetime,
+) -> tuple[list[dict[str, Any]], int]:
+    candidate_path = logs_root / "watchtower" / "candidates.jsonl"
+    if not candidate_path.exists():
+        return [], 0
+
+    rows: list[dict[str, Any]] = []
+    try:
+        with candidate_path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                rec_ts = _parse_ts(rec.get("timestamp"))
+                payload = rec.get("payload") if isinstance(rec, dict) else None
+                if not isinstance(payload, dict):
+                    payload = rec if isinstance(rec, dict) else {}
+                row = _watchtower_signal_row(payload, fallback_ts=rec_ts, accepted=True)
+                if row is None:
+                    continue
+                ts = _parse_ts(row["timestamp"])
+                if ts is not None and ts >= cutoff:
+                    rows.append(row)
+    except OSError:
+        return [], 0
+
+    return rows, len(rows)
+
+
 def _read_watchtower_received_signals(logs_root: Path, limit: int = 50) -> dict[str, Any]:
     signal_path = logs_root / "watchtower" / "signals.jsonl"
     summary = _empty_watchtower_received_summary()
-    if not signal_path.exists():
-        return {"signals": [], "summary": summary}
 
     now = datetime.now(tz=timezone.utc)
     cutoff = now - timedelta(hours=24)
-    rows: list[dict[str, Any]] = []
+    rows, candidate_accepts = _read_watchtower_candidate_rows(logs_root, cutoff)
+    summary["accepted_24h"] += candidate_accepts
+
+    if not signal_path.exists():
+        if rows:
+            rows.sort(
+                key=lambda r: _parse_ts(r.get("timestamp")) or datetime.min.replace(tzinfo=timezone.utc),
+                reverse=True,
+            )
+            latest = rows[0]
+            summary["last_signal"] = {
+                "timestamp": latest["timestamp"],
+                "asset": latest["asset"],
+                "queen_accepted": latest["queen_accepted"],
+            }
+        return {"signals": rows[: max(1, min(limit, 200))], "summary": summary}
 
     try:
         with signal_path.open("r", encoding="utf-8") as fh:
@@ -3789,30 +3837,48 @@ def _read_watchtower_received_signals(logs_root: Path, limit: int = 50) -> dict[
                     continue
                 rec_ts = _parse_ts(rec.get("timestamp"))
                 signals = [s for s in (rec.get("signals") or []) if isinstance(s, dict)]
-                rejections = _iter_watchtower_rejections(rec)
+                candidate_rejections = [
+                    s for s in (rec.get("candidate_rejections") or []) if isinstance(s, dict)
+                ]
+                legacy_rejections = _iter_watchtower_rejections(rec)
+                has_candidate_flow = (
+                    "candidate_rejections" in rec or "candidates_accepted" in rec
+                )
+                rejections = candidate_rejections if has_candidate_flow else legacy_rejections
 
                 if rec_ts is not None and rec_ts >= cutoff:
                     received = _float_or_none(rec.get("received"))
-                    accepted = _float_or_none(rec.get("passed_filter"))
                     if received is None:
                         received = float(len(signals) + len(rejections))
-                    if accepted is None:
-                        accepted = float(len(signals))
                     summary["received_24h"] += int(received)
-                    summary["accepted_24h"] += int(accepted)
 
-                    rejected_count = max(0, int(received) - int(accepted))
+                    if has_candidate_flow:
+                        if candidate_accepts == 0:
+                            summary["accepted_24h"] += int(rec.get("candidates_accepted") or 0)
+                        rejected_count = len(candidate_rejections)
+                        if rejected_count == 0:
+                            rejected_count = max(
+                                0,
+                                int(received) - int(rec.get("candidates_accepted") or 0),
+                            )
+                    else:
+                        accepted = _float_or_none(rec.get("passed_filter"))
+                        if accepted is None:
+                            accepted = float(len(signals))
+                        summary["accepted_24h"] += int(accepted)
+                        rejected_count = max(0, int(received) - int(accepted))
                     summary["rejected_24h"] += rejected_count
                     if not rejections and rejected_count > 0:
                         summary["rejection_reasons"]["other"] += rejected_count
 
-                for sig in signals:
-                    row = _watchtower_signal_row(sig, fallback_ts=rec_ts, accepted=True)
-                    if row is None:
-                        continue
-                    ts = _parse_ts(row["timestamp"])
-                    if ts is not None and ts >= cutoff:
-                        rows.append(row)
+                if not has_candidate_flow:
+                    for sig in signals:
+                        row = _watchtower_signal_row(sig, fallback_ts=rec_ts, accepted=True)
+                        if row is None:
+                            continue
+                        ts = _parse_ts(row["timestamp"])
+                        if ts is not None and ts >= cutoff:
+                            rows.append(row)
 
                 for rej in rejections:
                     row = _watchtower_signal_row(rej, fallback_ts=rec_ts, accepted=False)

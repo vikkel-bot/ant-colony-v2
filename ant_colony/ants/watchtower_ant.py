@@ -7,11 +7,12 @@ Verantwoordelijkheden:
   1. Poll Watchtower elke WATCHTOWER_POLL_INTERVAL seconden (standaard 300s).
   2. Filter signalen: entry_score >= min, confidence >= min, geen HIGH_RISK.
   3. Schrijf gefilterde signalen naar ANT_LOGS/watchtower/signals.jsonl.
-  4. Log hoeveel signalen ontvangen en hoeveel door filter gekomen.
-  5. Log "Watchtower offline, degrading gracefully" elke poll als offline.
+  4. Route high-confidence POSITIVE_EDGE equity-signalen naar candidates.jsonl.
+  5. Log hoeveel signalen ontvangen, gefilterd en naar Queen/Paper doorgestuurd zijn.
+  6. Log "Watchtower offline, degrading gracefully" elke poll als offline.
 
 Regels:
-  - Geen live orders, geen paper posities (pure observatie).
+  - Geen live orders; alleen candidate-intake voor de bestaande paper pipeline.
   - Gooit nooit een exception naar buiten.
   - Als Watchtower offline: colony draait gewoon door.
   - Één JSONL-regel per poll (append-only).
@@ -19,6 +20,7 @@ Regels:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
 import logging
 import os
@@ -38,6 +40,41 @@ from ant_colony.schemas.mission import Mission
 _POLL_INTERVAL  = int(os.getenv("WATCHTOWER_POLL_INTERVAL", "300"))
 _MIN_ENTRY_SCORE = float(os.getenv("WATCHTOWER_MIN_ENTRY_SCORE", "0.6"))
 _MIN_CONFIDENCE  = float(os.getenv("WATCHTOWER_MIN_CONFIDENCE", "0.5"))
+
+POSITIVE_EDGE_ASSETS = frozenset({"JNJ", "GLD", "XLK", "AAPL", "XLY", "QQQ", "XLF", "XLI"})
+_QUEEN_MIN_ENTRY_SCORE = 0.65
+_QUEEN_MIN_CONFIDENCE = 0.60
+_MAX_SIGNAL_AGE_SECONDS = 2 * 3600
+_MAX_DAILY_WATCHTOWER_ENTRIES = 3
+_MAX_ASSET_ENTRY_INTERVAL_SECONDS = 24 * 3600
+
+
+@dataclass(frozen=True)
+class WatchtowerCandidate:
+    """Kandidaat die WatchtowerAnt overdraagt aan EquitiesPaperAnt."""
+
+    asset: str
+    direction: str
+    entry_score: float
+    confidence: float
+    signal_id: str
+    source: str
+    created_at: datetime
+    reason: str
+
+    def to_payload(self) -> dict:
+        return {
+            "action": "watchtower_candidate",
+            "asset": self.asset,
+            "symbol": self.asset,
+            "direction": self.direction,
+            "entry_score": self.entry_score,
+            "confidence": self.confidence,
+            "signal_id": self.signal_id,
+            "source": self.source,
+            "created_at": self.created_at.isoformat(),
+            "reason": self.reason,
+        }
 
 
 class WatchtowerAnt:
@@ -112,9 +149,9 @@ class WatchtowerAnt:
         rejections: list[dict] = []
         for signal in signals:
             reasons: list[str] = []
-            if signal.get("entry_score", 0.0) < _MIN_ENTRY_SCORE:
+            if _safe_float(signal.get("entry_score")) < _MIN_ENTRY_SCORE:
                 reasons.append("score too low")
-            if signal.get("confidence", 0.0) < _MIN_CONFIDENCE:
+            if _safe_float(signal.get("confidence")) < _MIN_CONFIDENCE:
                 reasons.append("confidence too low")
             if "HIGH_RISK" in signal.get("risk_flags", []):
                 reasons.append("risk_flag HIGH_RISK")
@@ -138,9 +175,236 @@ class WatchtowerAnt:
             _POLL_INTERVAL, received, len(filtered), len(rejections),
         )
 
+        candidates, candidate_rejections = self._route_candidates(now, signals)
+
         # altijd schrijven — ook bij 0 gefilterd (voor dashboard stats)
-        self._write_snapshot(now, received, filtered, rejections)
+        self._write_snapshot(
+            now,
+            received,
+            filtered,
+            rejections,
+            candidates_accepted=len(candidates),
+            candidate_rejections=candidate_rejections,
+        )
         self._send_heartbeat(now, f"tick:received={received} passed={len(filtered)}")
+
+    def _route_candidates(
+        self,
+        now: datetime,
+        signals: list[dict],
+    ) -> tuple[list[WatchtowerCandidate], list[dict]]:
+        """Filter Watchtower-signalen naar paper-candidates voor de equities-pipeline."""
+        candidates: list[WatchtowerCandidate] = []
+        rejections: list[dict] = []
+        open_symbols = self._read_open_equity_symbols()
+        daily_limits = self._load_daily_limits(now)
+        limits_changed = False
+
+        for signal in signals:
+            candidate, reason = self._build_candidate(signal, now, open_symbols, daily_limits)
+            if candidate is None:
+                rejection = self._candidate_rejection_record(signal, reason)
+                rejections.append(rejection)
+                self._log.info(
+                    "Watchtower signaal gefilterd | asset=%s reden=%s",
+                    rejection.get("asset") or "UNKNOWN",
+                    reason,
+                )
+                continue
+
+            candidates.append(candidate)
+            self._record_daily_accept(candidate.asset, now, daily_limits)
+            limits_changed = True
+            self._log.info(
+                "Watchtower kandidaat doorgestuurd | asset=%s score=%.3f conf=%.3f",
+                candidate.asset,
+                candidate.entry_score,
+                candidate.confidence,
+            )
+
+        if candidates:
+            self._write_candidates(now, candidates)
+        if limits_changed:
+            self._save_daily_limits(daily_limits)
+
+        return candidates, rejections
+
+    def _build_candidate(
+        self,
+        signal: dict,
+        now: datetime,
+        open_symbols: set[str],
+        daily_limits: dict,
+    ) -> tuple[WatchtowerCandidate | None, str]:
+        asset = str(signal.get("asset") or signal.get("symbol") or "").upper().strip()
+        if not asset:
+            return None, "missing_asset"
+        if asset not in POSITIVE_EDGE_ASSETS:
+            if "-" in asset or asset.endswith("EUR") or asset in {"BTC", "ETH", "SOL"}:
+                return None, "crypto_confirmed_negative"
+            return None, "asset_not_positive_edge"
+
+        direction = str(signal.get("direction") or "").lower().strip()
+        if direction != "long":
+            return None, "direction_not_long"
+
+        entry_score = _safe_float(signal.get("entry_score"))
+        if entry_score < _QUEEN_MIN_ENTRY_SCORE:
+            return None, "entry_score_below_queen_threshold"
+
+        confidence = _safe_float(signal.get("confidence"))
+        if confidence < _QUEEN_MIN_CONFIDENCE:
+            return None, "confidence_below_queen_threshold"
+
+        signal_id = str(signal.get("signal_id") or signal.get("id") or "").strip()
+        if not signal_id:
+            return None, "missing_signal_id"
+
+        created_at = _parse_signal_datetime(
+            signal.get("created_at") or signal.get("timestamp") or signal.get("emitted_at")
+        )
+        if created_at is None:
+            return None, "missing_created_at"
+        if (now - created_at).total_seconds() > _MAX_SIGNAL_AGE_SECONDS:
+            return None, "signal_expired"
+        if created_at > now.replace(microsecond=999999):
+            return None, "signal_from_future"
+
+        if asset in open_symbols:
+            return None, "open_position_exists"
+
+        rate_reason = self._daily_limit_rejection(asset, now, daily_limits)
+        if rate_reason:
+            return None, rate_reason
+
+        return WatchtowerCandidate(
+            asset=asset,
+            direction="long",
+            entry_score=entry_score,
+            confidence=confidence,
+            signal_id=signal_id,
+            source="watchtower",
+            created_at=created_at,
+            reason=str(signal.get("reason") or ""),
+        ), ""
+
+    def _candidate_rejection_record(self, signal: dict, reason: str) -> dict:
+        return {
+            "signal_id": signal.get("signal_id") or signal.get("id"),
+            "asset": signal.get("asset") or signal.get("symbol"),
+            "direction": signal.get("direction"),
+            "timestamp": signal.get("timestamp") or signal.get("created_at"),
+            "entry_score": signal.get("entry_score"),
+            "confidence": signal.get("confidence"),
+            "risk_flags": signal.get("risk_flags", []),
+            "rejection_reason": reason,
+        }
+
+    def _write_candidates(self, now: datetime, candidates: list[WatchtowerCandidate]) -> None:
+        if self._out_dir is None:
+            return
+        self._out_dir.mkdir(parents=True, exist_ok=True)
+        log_path = self._out_dir / "candidates.jsonl"
+        try:
+            with log_path.open("a", encoding="utf-8") as fh:
+                for candidate in candidates:
+                    record = {
+                        "timestamp": now.isoformat(),
+                        "source": self.ant_id,
+                        "payload": candidate.to_payload(),
+                    }
+                    fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except OSError:
+            self._log.exception("Kon watchtower candidates niet schrijven: %s", log_path)
+
+    def _read_open_equity_symbols(self) -> set[str]:
+        if self.logs_root is None:
+            return set()
+        paper_dir = Path(self.logs_root) / "paper"
+        if not paper_dir.exists():
+            return set()
+
+        opened: dict[str, str] = {}
+        closed: set[str] = set()
+        for path in sorted(paper_dir.glob("*.jsonl")):
+            try:
+                for line in path.read_text(encoding="utf-8").splitlines():
+                    if not line.strip():
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    payload = record.get("payload") or {}
+                    action = payload.get("action")
+                    pos_id = str(payload.get("position_id") or "")
+                    if action == "trade_opened" and str(payload.get("biome") or "") == "equities":
+                        symbol = str(payload.get("symbol") or "").upper().strip()
+                        if symbol:
+                            opened[pos_id or f"symbol:{symbol}"] = symbol
+                    elif action == "trade_closed" and pos_id:
+                        closed.add(pos_id)
+            except OSError:
+                continue
+
+        return {symbol for pos_id, symbol in opened.items() if pos_id not in closed}
+
+    def _daily_limits_path(self) -> Path | None:
+        if self._out_dir is None:
+            return None
+        return self._out_dir / "daily_limits.json"
+
+    def _load_daily_limits(self, now: datetime) -> dict:
+        today = now.date().isoformat()
+        default = {"date": today, "total": 0, "assets": {}}
+        path = self._daily_limits_path()
+        if path is None or not path.exists():
+            return default
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return default
+        if not isinstance(data, dict):
+            return default
+        assets = data.get("assets")
+        if not isinstance(assets, dict):
+            assets = {}
+        if data.get("date") != today:
+            return {"date": today, "total": 0, "assets": assets}
+        return {
+            "date": today,
+            "total": int(data.get("total") or 0),
+            "assets": assets,
+        }
+
+    def _save_daily_limits(self, data: dict) -> None:
+        path = self._daily_limits_path()
+        if path is None:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        except OSError:
+            self._log.exception("Kon watchtower daily limits niet schrijven: %s", path)
+
+    def _daily_limit_rejection(self, asset: str, now: datetime, data: dict) -> str | None:
+        if int(data.get("total") or 0) >= _MAX_DAILY_WATCHTOWER_ENTRIES:
+            return "daily_limit_total"
+        asset_info = (data.get("assets") or {}).get(asset) or {}
+        last_accepted = _parse_signal_datetime(asset_info.get("last_accepted_at"))
+        if last_accepted is not None:
+            age = (now - last_accepted).total_seconds()
+            if 0 <= age < _MAX_ASSET_ENTRY_INTERVAL_SECONDS:
+                return "daily_limit_asset_24h"
+        return None
+
+    def _record_daily_accept(self, asset: str, now: datetime, data: dict) -> None:
+        assets = data.setdefault("assets", {})
+        info = dict(assets.get(asset) or {})
+        info["count"] = int(info.get("count") or 0) + 1
+        info["last_accepted_at"] = now.isoformat()
+        assets[asset] = info
+        data["total"] = int(data.get("total") or 0) + 1
 
     def _write_snapshot(
         self,
@@ -148,6 +412,9 @@ class WatchtowerAnt:
         total_received: int,
         filtered: list[dict],
         rejections: list[dict] | None = None,
+        *,
+        candidates_accepted: int = 0,
+        candidate_rejections: list[dict] | None = None,
     ) -> None:
         """Schrijf poll-resultaat naar ANT_LOGS/watchtower/signals.jsonl."""
         if self._out_dir is None:
@@ -161,6 +428,8 @@ class WatchtowerAnt:
             "passed_filter": len(filtered),
             "signals":       filtered,
             "rejections":    rejections or [],
+            "candidates_accepted": candidates_accepted,
+            "candidate_rejections": candidate_rejections or [],
         }
         log_path = self._out_dir / "signals.jsonl"
         try:
@@ -183,3 +452,25 @@ class WatchtowerAnt:
             )
         except Exception:
             self._log.exception("WatchtowerAnt heartbeat mislukt — poll-loop gaat door")
+
+
+def _safe_float(value: object) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _parse_signal_datetime(value: object) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        text = str(value).strip()
+        if not text:
+            return None
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return None

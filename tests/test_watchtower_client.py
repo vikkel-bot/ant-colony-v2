@@ -302,7 +302,7 @@ class TestPostOutcome:
         with patch("httpx.post", side_effect=fake_post):
             client.post_outcome(self._outcome)
 
-        assert captured["url"] == "http://localhost:9999/outcomes/evaluate"
+        assert captured["url"] == "http://localhost:9999/colony/feedback"
         assert captured["json"]["asset"] == "BTC-EUR"
 
     def test_accepts_none_signal_id(self):
