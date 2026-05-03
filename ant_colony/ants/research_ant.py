@@ -26,10 +26,13 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from time import monotonic
 
 from ant_colony.ants._heartbeat import HeartbeatThread
 from ant_colony.biome.biome_adapter import MarketData
@@ -53,6 +56,7 @@ _WIN_RATE_THRESHOLD = 0.45
 _TP_PCT             = 0.06  # 6 % take-profit voor backtests
 _SL_PCT             = 0.03  # 3 % stop-loss voor backtests
 _MAX_BARS_HELD      = 10
+_RESEARCH_WATCHDOG_SECONDS = float(os.getenv("RESEARCH_ANT_WATCHDOG_SECONDS", "600"))
 
 # BacktestConfig profielen per keyword-categorie (tp_pct, sl_pct, max_bars_held)
 _KEYWORD_PROFILES: dict[str, tuple[float, float, int]] = {
@@ -98,6 +102,9 @@ class ResearchAnt:
         self._budget_used: float = 0.0
         self._last_action: str = "init"
         self._log_seq: int = 0
+        self._last_tick_started_monotonic: float | None = None
+        self._last_tick_completed_monotonic: float = monotonic()
+        self._watchdog_restarts: int = 0
 
         # Deduplicatie: sla de laatste geëmitteerde candidate_id op per (symbol, signal_type).
         # Voorkomt dat dezelfde kandidaat meerdere ticks achtereen gelogd wordt.
@@ -146,7 +153,7 @@ class ResearchAnt:
                     self._status = AntStatus.COMPLETED
                     break
 
-                self._tick()
+                self._run_tick_with_watchdog()
 
                 time.sleep(1.0)
 
@@ -166,6 +173,60 @@ class ResearchAnt:
     # ------------------------------------------------------------------
     # Tick
     # ------------------------------------------------------------------
+
+    def _run_tick_with_watchdog(self) -> None:
+        """
+        Voer één research tick uit met een harde liveness watchdog.
+
+        De meest waarschijnlijke stall zit in externe resources binnen _tick()
+        (adapter.get_candles, filesystem scans of backtest calls). Python kan
+        zo'n geblokkeerde call niet veilig killen, dus bij timeout laten we de
+        worker als daemon achter en starten we de volgende research-cyclus.
+        """
+        timeout = max(0.0, float(_RESEARCH_WATCHDOG_SECONDS))
+        if timeout <= 0:
+            self._tick()
+            self._last_tick_completed_monotonic = monotonic()
+            return
+
+        completed = threading.Event()
+        errors: list[BaseException] = []
+        started = monotonic()
+        self._last_tick_started_monotonic = started
+
+        def worker() -> None:
+            try:
+                self._tick()
+            except BaseException as exc:  # pragma: no cover - opnieuw gegooid in hoofdthread
+                errors.append(exc)
+            finally:
+                completed.set()
+
+        tick_thread = threading.Thread(
+            target=worker,
+            name=f"research-cycle-{self.ant_id[:8]}",
+            daemon=True,
+        )
+        tick_thread.start()
+
+        if not completed.wait(timeout=timeout):
+            age = monotonic() - started
+            self._watchdog_restarts += 1
+            self._last_action = "tick_watchdog_restart"
+            self._log.error(
+                "ResearchAnt watchdog: geen tick voltooid in %.1fs (> %.1fs) — "
+                "research cyclus wordt opnieuw gestart | restarts=%d",
+                age,
+                timeout,
+                self._watchdog_restarts,
+            )
+            self._send_heartbeat()
+            return
+
+        if errors:
+            raise errors[0]
+
+        self._last_tick_completed_monotonic = monotonic()
 
     def _tick(self) -> None:
         """Één analysecyclus: candles ophalen en drie strategieën controleren per symbool."""

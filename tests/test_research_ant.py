@@ -29,7 +29,9 @@ Scenarios:
 from __future__ import annotations
 
 import json
+import logging
 import math
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -721,6 +723,39 @@ class TestTTLExpiry:
     def test_status_is_idle_before_run(self, tmp_path):
         ant = make_ant(tmp_path)
         assert ant._status == AntStatus.IDLE
+
+    def test_watchdog_restarts_when_tick_stalls(self, tmp_path, monkeypatch, caplog):
+        """Als een research tick vastloopt, moet de run-loop een nieuwe cyclus starten."""
+        scheduler = MagicMock()
+        mission = make_mission(ttl=30, heartbeat_interval=1)
+        ant = make_ant(
+            tmp_path,
+            mission=mission,
+            scheduler=scheduler,
+            registry=make_registry(candles=[]),
+        )
+        calls = {"count": 0}
+        release_stale_tick = threading.Event()
+
+        def fake_tick() -> None:
+            calls["count"] += 1
+            if calls["count"] == 1:
+                release_stale_tick.wait(0.2)
+                return
+            ant._status = AntStatus.COMPLETED
+
+        monkeypatch.setattr("ant_colony.ants.research_ant._RESEARCH_WATCHDOG_SECONDS", 0.02)
+        monkeypatch.setattr("ant_colony.ants.research_ant.time.sleep", lambda *_args: None)
+        ant._tick = fake_tick  # type: ignore[method-assign]
+
+        with caplog.at_level(logging.ERROR, logger=f"ant.research.{ant.ant_id[:8]}"):
+            status = ant.run()
+
+        assert status == AntStatus.COMPLETED
+        assert calls["count"] >= 2
+        assert ant._watchdog_restarts == 1
+        assert ant._last_action == "tick_watchdog_restart"
+        assert any("ResearchAnt watchdog" in record.message for record in caplog.records)
 
 
 # ---------------------------------------------------------------------------
