@@ -38,9 +38,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import subprocess
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from ant_colony.biome.biome_adapter import AccountState, LivePosition, MarketData
@@ -85,6 +88,8 @@ _INTERVAL_TO_BAR_SIZE: dict[str, str] = {
 _DEFAULT_EXCHANGE = "SMART"
 _DEFAULT_CURRENCY = "USD"
 _CANDLE_LOCK_WAIT_SECONDS = 0.25
+_RECONNECT_MAX_ATTEMPTS = 10
+_RECONNECT_WAIT_SECONDS = 60
 
 
 def _is_connection_refused(exc: BaseException) -> bool:
@@ -106,7 +111,7 @@ def _is_connection_refused(exc: BaseException) -> bool:
 
 def _is_historical_data_fallback_error(exc: BaseException) -> bool:
     """Herken IBKR historical-data fouten waarbij yfinance een veilige fallback is."""
-    if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
+    if isinstance(exc, (TimeoutError, asyncio.TimeoutError, PermissionError)):
         return True
     text = str(exc).lower()
     return (
@@ -117,6 +122,22 @@ def _is_historical_data_fallback_error(exc: BaseException) -> bool:
         or "no market data permissions" in text
         or "requested market data is not subscribed" in text
         or "error 162" in text
+    )
+
+
+def _is_connection_lost_error(exc: BaseException) -> bool:
+    """Herken verbroken IBKR/TWS socket-sessies die een reconnect verdienen."""
+    if _is_connection_refused(exc):
+        return True
+    text = str(exc).lower()
+    return (
+        "not connected" in text
+        or "disconnected" in text
+        or "connection reset" in text
+        or "connection aborted" in text
+        or "broken pipe" in text
+        or "socket disconnected" in text
+        or "peer closed" in text
     )
 
 
@@ -158,6 +179,9 @@ class IBKRAdapter:
         self._client_id  = client_id or int(os.getenv("IBKR_CLIENT_ID", "1"))
         self._ib: Any    = None  # ib_insync.IB instance, lazy init
         self._ib_lock    = threading.RLock()
+        self._reconnect_lock = threading.Lock()
+        self._reconnect_thread: threading.Thread | None = None
+        self._last_connect_error: BaseException | None = None
         self._log        = logging.getLogger(
             f"adapter.ibkr.{'paper' if paper else 'live'}"
         )
@@ -349,46 +373,51 @@ class IBKRAdapter:
 
             from ib_insync import IB
 
-            host_      = host      or self._host
-            port_      = port      or self._port
-            client_id_ = client_id or self._client_id
+            with self._ib_lock:
+                host_      = host      or self._host
+                port_      = port      or self._port
+                client_id_ = client_id or self._client_id
 
-            if self._ib is not None:
-                try:
-                    if self._ib.isConnected():
-                        return True
-                except Exception:
-                    pass
-                try:
-                    self._ib.disconnect()
-                except Exception:
-                    pass
-                self._ib = None
+                if self._ib is not None:
+                    try:
+                        if self._ib.isConnected():
+                            self._last_connect_error = None
+                            return True
+                    except Exception:
+                        pass
+                    try:
+                        self._ib.disconnect()
+                    except Exception:
+                        pass
+                    self._ib = None
 
-            ib = IB()
-            try:
-                ib.connect(host_, port_, clientId=client_id_, timeout=10, readonly=False)
-            except Exception as exc:
-                if not _is_connection_refused(exc):
-                    raise
-                self._log.warning(
-                    "IBKR niet bereikbaar | %s:%d clientId=%d paper=%s | %s",
-                    host_, port_, client_id_, self._paper_mode, exc,
+                ib = IB()
+                try:
+                    ib.connect(host_, port_, clientId=client_id_, timeout=10, readonly=False)
+                except Exception as exc:
+                    self._last_connect_error = exc
+                    if not _is_connection_refused(exc):
+                        raise
+                    self._log.warning(
+                        "IBKR niet bereikbaar | %s:%d clientId=%d paper=%s | %s",
+                        host_, port_, client_id_, self._paper_mode, exc,
+                    )
+                    try:
+                        ib.disconnect()
+                    except Exception:
+                        pass
+                    self._ib = None
+                    return False
+                self._ib = ib
+                self._last_connect_error = None
+                self._log.info(
+                    "IBKR verbonden | %s:%d clientId=%d paper=%s",
+                    host_, port_, client_id_, self._paper_mode,
                 )
-                try:
-                    ib.disconnect()
-                except Exception:
-                    pass
-                self._ib = None
-                return False
-            self._ib = ib
-            self._log.info(
-                "IBKR verbonden | %s:%d clientId=%d paper=%s",
-                host_, port_, client_id_, self._paper_mode,
-            )
-            return True
+                return True
 
-        except Exception:
+        except Exception as exc:
+            self._last_connect_error = exc
             self._log.exception(
                 "IBKR verbinding mislukt | %s:%d", host or self._host, port or self._port
             )
@@ -442,7 +471,17 @@ class IBKRAdapter:
             else:
                 try:
                     if not self._ensure_connected():
-                        return []
+                        if self._last_connect_error is not None and _is_connection_lost_error(
+                            self._last_connect_error
+                        ):
+                            self._start_reconnect_loop()
+                        fallback_reason = "omdat IBKR niet verbonden is"
+                        return self._get_yfinance_fallback_candles(
+                            symbol,
+                            period=period,
+                            interval=interval,
+                            reason=fallback_reason,
+                        )
 
                     from ib_insync import Stock
 
@@ -462,9 +501,14 @@ class IBKRAdapter:
                             timeout=8,  # ib_insync default is 60s; keep equity ticks responsive.
                         )
                     except Exception as exc:
-                        if not _is_historical_data_fallback_error(exc):
+                        if _is_connection_lost_error(exc):
+                            self._ib = None
+                            self._start_reconnect_loop()
+                            fallback_reason = "omdat IBKR verbinding verbroken is"
+                        elif not _is_historical_data_fallback_error(exc):
                             raise
-                        fallback_reason = "na IBKR timeout/fout"
+                        else:
+                            fallback_reason = "na IBKR timeout/fout"
                 finally:
                     self._ib_lock.release()
 
@@ -688,6 +732,74 @@ class IBKRAdapter:
             self._ib = None  # sessie verloren, opnieuw verbinden
 
         return self.connect()
+
+    def _start_reconnect_loop(self) -> None:
+        """Start één non-blocking IBKR reconnect thread als die nog niet draait."""
+        with self._reconnect_lock:
+            if self._reconnect_thread is not None and self._reconnect_thread.is_alive():
+                return
+            self._reconnect_thread = threading.Thread(
+                target=self._reconnect_loop,
+                name="ibkr-reconnect",
+                daemon=True,
+            )
+            self._reconnect_thread.start()
+
+    def _reconnect_loop(
+        self,
+        max_attempts: int = _RECONNECT_MAX_ATTEMPTS,
+        wait_seconds: int = _RECONNECT_WAIT_SECONDS,
+    ) -> bool:
+        """
+        Probeer IBKR op de achtergrond opnieuw te verbinden.
+
+        De loop blokkeert bewust alleen zijn eigen daemon thread. Callers blijven
+        ondertussen yfinance fallback gebruiken, zodat equity ticks niet stallen.
+        """
+        self._launch_ibgateway_restart_script()
+        for attempt in range(1, max_attempts + 1):
+            self._log.warning("IBKR reconnect poging %d/%d", attempt, max_attempts)
+            try:
+                success = self.connect()
+                if success:
+                    self._log.info("IBKR reconnect geslaagd")
+                    return True
+            except Exception as exc:
+                self._log.warning("IBKR reconnect mislukt: %s", exc)
+            time.sleep(wait_seconds)
+        self._log.error("IBKR reconnect mislukt na alle pogingen — yfinance fallback actief")
+        return False
+
+    def _launch_ibgateway_restart_script(self) -> None:
+        """Start het PowerShell backup-script best-effort; fouten blijven non-fatal."""
+        if os.name != "nt":
+            return
+        repo_root = Path(__file__).resolve().parents[3]
+        script_path = repo_root / "scripts" / "restart_ibgateway.ps1"
+        if not script_path.exists():
+            self._log.debug("IB Gateway restart-script niet gevonden: %s", script_path)
+            return
+        try:
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            subprocess.Popen(
+                [
+                    "powershell.exe",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(script_path),
+                    "-HostName",
+                    self._host,
+                    "-Port",
+                    str(self._port),
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=creationflags,
+            )
+            self._log.info("IB Gateway restart-script gestart")
+        except Exception as exc:
+            self._log.warning("IB Gateway restart-script kon niet starten: %s", exc)
 
     def _get_yfinance_candles(
         self,

@@ -311,7 +311,12 @@ class TestGetCandles:
         adapter = IBKRAdapter()
         with patched_ib(MagicMock()) as mock_mod:
             mock_mod.IB.return_value.connect.side_effect = ConnectionRefusedError
-            result = adapter.get_candles("AAPL")
+            with patch.object(adapter, "_start_reconnect_loop"):
+                with patch(
+                    "ant_colony.biome.adapters.yahoo_finance_adapter.YahooFinanceAdapter.get_candles",
+                    return_value=[],
+                ):
+                    result = adapter.get_candles("AAPL")
         assert result == []
 
     def test_skips_bars_with_zero_close(self) -> None:
@@ -399,6 +404,135 @@ class TestGetCandles:
         yf_get.assert_called_once_with("XLK", period="3mo", interval="1d")
         assert "yfinance fallback voor XLK na IBKR timeout/fout" in caplog.text
         assert "yfinance fallback geslaagd voor XLK" in caplog.text
+
+    def test_connection_refused_starts_reconnect_loop_and_uses_yfinance_fallback(self) -> None:
+        adapter = IBKRAdapter()
+        fallback = [
+            MarketData(
+                symbol="AAPL",
+                timeframe="1d",
+                timestamp=datetime.now(tz=timezone.utc),
+                open=100.0,
+                high=102.0,
+                low=99.0,
+                close=101.0,
+                volume=1_000_000,
+                biome_id="equities",
+            )
+        ]
+        with patched_ib(MagicMock()) as mock_mod:
+            mock_mod.IB.return_value.connect.side_effect = ConnectionRefusedError(
+                "IB Gateway niet actief"
+            )
+            with patch.object(adapter, "_start_reconnect_loop") as reconnect:
+                with patch(
+                    "ant_colony.biome.adapters.yahoo_finance_adapter.YahooFinanceAdapter.get_candles",
+                    return_value=fallback,
+                ) as yf_get:
+                    result = adapter.get_candles("AAPL", period="3mo", interval="1d")
+
+        assert result == fallback
+        reconnect.assert_called_once()
+        yf_get.assert_called_once_with("AAPL", period="3mo", interval="1d")
+
+    def test_historical_connection_refused_starts_reconnect_loop(self) -> None:
+        ib = MagicMock()
+        ib.isConnected.return_value = True
+        ib.reqHistoricalData.side_effect = ConnectionRefusedError("socket closed")
+        fallback = [
+            MarketData(
+                symbol="QQQ",
+                timeframe="1d",
+                timestamp=datetime.now(tz=timezone.utc),
+                open=100.0,
+                high=102.0,
+                low=99.0,
+                close=101.0,
+                volume=1_000_000,
+                biome_id="equities",
+            )
+        ]
+        with patched_ib(ib):
+            adapter = _connected_adapter(ib)
+            with patch.object(adapter, "_start_reconnect_loop") as reconnect:
+                with patch(
+                    "ant_colony.biome.adapters.yahoo_finance_adapter.YahooFinanceAdapter.get_candles",
+                    return_value=fallback,
+                ):
+                    result = adapter.get_candles("QQQ", period="3mo", interval="1d")
+
+        assert result == fallback
+        reconnect.assert_called_once()
+
+    def test_timeout_fallback_does_not_start_reconnect_loop(self) -> None:
+        ib = MagicMock()
+        ib.isConnected.return_value = True
+        ib.reqHistoricalData.side_effect = TimeoutError("historical data request timed out")
+        fallback = [
+            MarketData(
+                symbol="XLE",
+                timeframe="1d",
+                timestamp=datetime.now(tz=timezone.utc),
+                open=100.0,
+                high=102.0,
+                low=99.0,
+                close=101.0,
+                volume=1_000_000,
+                biome_id="equities",
+            )
+        ]
+        with patched_ib(ib):
+            adapter = _connected_adapter(ib)
+            with patch.object(adapter, "_start_reconnect_loop") as reconnect:
+                with patch(
+                    "ant_colony.biome.adapters.yahoo_finance_adapter.YahooFinanceAdapter.get_candles",
+                    return_value=fallback,
+                ):
+                    result = adapter.get_candles("XLE", period="3mo", interval="1d")
+
+        assert result == fallback
+        reconnect.assert_not_called()
+
+    def test_permission_error_falls_back_without_reconnect(self) -> None:
+        ib = MagicMock()
+        ib.isConnected.return_value = True
+        ib.reqHistoricalData.side_effect = PermissionError("market data subscription ontbreekt")
+        fallback = [
+            MarketData(
+                symbol="XLK",
+                timeframe="1d",
+                timestamp=datetime.now(tz=timezone.utc),
+                open=100.0,
+                high=102.0,
+                low=99.0,
+                close=101.0,
+                volume=1_000_000,
+                biome_id="equities",
+            )
+        ]
+        with patched_ib(ib):
+            adapter = _connected_adapter(ib)
+            with patch.object(adapter, "_start_reconnect_loop") as reconnect:
+                with patch(
+                    "ant_colony.biome.adapters.yahoo_finance_adapter.YahooFinanceAdapter.get_candles",
+                    return_value=fallback,
+                ):
+                    result = adapter.get_candles("XLK", period="3mo", interval="1d")
+
+        assert result == fallback
+        reconnect.assert_not_called()
+
+    def test_reconnect_loop_stops_after_max_attempts(self) -> None:
+        adapter = IBKRAdapter()
+        with patch.object(adapter, "_launch_ibgateway_restart_script") as launch_script:
+            with patch.object(adapter, "connect", return_value=False) as connect:
+                with patch("ant_colony.biome.adapters.ibkr_adapter.time.sleep") as sleep:
+                    result = adapter._reconnect_loop(max_attempts=3, wait_seconds=0)
+
+        assert result is False
+        launch_script.assert_called_once()
+        assert connect.call_count == 3
+        assert sleep.call_count == 3
 
     def test_empty_yfinance_fallback_logs_warning(self, caplog) -> None:
         ib = MagicMock()
