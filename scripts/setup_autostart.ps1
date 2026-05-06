@@ -97,9 +97,10 @@ $watchtowerStartup = New-ScheduledTaskTrigger -AtStartup
 $watchtowerStartup.Delay = "PT60S"
 $watchtowerDaily = New-ScheduledTaskTrigger -Daily -At "00:25"
 
-$watchdogTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).Date
-$watchdogTrigger.Repetition.Interval = "PT5M"
-$watchdogTrigger.Repetition.Duration = "P3650D"
+$watchdogTrigger = New-ScheduledTaskTrigger `
+    -Once `
+    -At (Get-Date) `
+    -RepetitionInterval (New-TimeSpan -Minutes 5)
 
 Register-OrReplaceTask `
     -TaskName "AntColony-Startup" `
