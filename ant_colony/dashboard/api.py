@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 import urllib.error
 import urllib.request
@@ -3248,8 +3249,8 @@ def _read_equities_paper_stats(logs_root: Path) -> dict:
 # ---------------------------------------------------------------------------
 
 _EQ_TRADING_DAY_SECONDS = 6.5 * 3600
-_EQ_TTL_TRADING_DAYS = 10.0
-_EQ_TTL_TRADING_SECONDS = _EQ_TTL_TRADING_DAYS * _EQ_TRADING_DAY_SECONDS
+_EQ_TTL_TRADING_DAYS = float(os.getenv("EQUITY_MAX_TTL_DAYS", "365"))
+_EQ_TTL_TRADING_SECONDS = _EQ_TTL_TRADING_DAYS * 24 * 3600
 _EQ_TRAILING_STOP_PCT = 0.05
 
 
@@ -3322,6 +3323,7 @@ def _exit_reason_label(reason: str | None) -> str | None:
         "trailing": "TRAILING",
         "ttl_trading_days": "TTL",
         "ttl": "TTL",
+        "exit_momentum_lost": "MOMENTUM_LOST",
     }
     return mapping.get(key, str(reason).upper())
 
@@ -3339,11 +3341,21 @@ def _calc_position_pnl(
     return round(raw, 4), round(pct, 4)
 
 
-def _ttl_days_remaining(trading_seconds: float | None) -> float | None:
+def _ttl_days_remaining(
+    trading_seconds: float | None,
+    *,
+    opened_at: datetime | None = None,
+    now: datetime | None = None,
+    ttl_seconds: float | None = None,
+) -> float | None:
+    ttl = ttl_seconds if ttl_seconds and ttl_seconds > 0 else _EQ_TTL_TRADING_SECONDS
+    if opened_at is not None and now is not None:
+        age = max(0.0, (now - opened_at).total_seconds())
+        return round(max(0.0, ttl - age) / (24 * 3600), 2)
     if trading_seconds is None:
-        return _EQ_TTL_TRADING_DAYS
-    remaining = max(0.0, _EQ_TTL_TRADING_SECONDS - trading_seconds)
-    return round(remaining / _EQ_TRADING_DAY_SECONDS, 2)
+        return round(ttl / (24 * 3600), 2)
+    remaining = max(0.0, ttl - trading_seconds)
+    return round(remaining / (24 * 3600), 2)
 
 
 def _read_equities_position_records(logs_root: Path | None) -> list[tuple[datetime | None, dict]]:
@@ -3411,6 +3423,7 @@ def _build_equities_position_row(
             pnl_pct = raw_pct
 
     trading_seconds = _float_or_none(base.get("trading_seconds"))
+    ttl_seconds = _float_or_none(base.get("ttl_seconds"))
     duration_hours = _hours_between(opened_dt, closed_dt)
     if duration_hours is None and status == "closed" and trading_seconds is not None:
         duration_hours = round(trading_seconds / 3600.0, 2)
@@ -3431,7 +3444,12 @@ def _build_equities_position_row(
         "opened_at": _dt_iso(opened_dt),
         "open_since": _open_since_label(opened_dt, now) if status == "open" else None,
         "age_hours": _hours_between(opened_dt, now) if status == "open" else None,
-        "ttl_trading_days_remaining": _ttl_days_remaining(trading_seconds) if status == "open" else 0.0,
+        "ttl_trading_days_remaining": _ttl_days_remaining(
+            trading_seconds,
+            opened_at=opened_dt,
+            now=now,
+            ttl_seconds=ttl_seconds,
+        ) if status == "open" else 0.0,
         "stop_loss_price": _round_or_none(_float_or_none(base.get("stop_loss_price")), 6),
         "take_profit_price": _round_or_none(_float_or_none(base.get("take_profit_price")), 6),
         "trailing_stop_price": _round_or_none(_float_or_none(base.get("trailing_stop_price")), 6),
@@ -3473,6 +3491,8 @@ def _read_equities_positions(
                 "current_price": payload.get("entry_price"),
                 "opened_at": rec.get("timestamp"),
                 "trading_seconds": 0.0,
+                "ttl_seconds": payload.get("ttl_seconds"),
+                "source": payload.get("source"),
             }
         elif action == "position_update" and pos_id in opened:
             opened[pos_id]["current_price"] = payload.get("current_price", opened[pos_id].get("current_price"))
@@ -3499,6 +3519,8 @@ def _read_equities_positions(
                 "realized_pnl_eur": payload.get("realized_pnl"),
                 "pnl_pct": payload.get("pnl_pct"),
                 "trading_seconds": payload.get("trading_seconds", base.get("trading_seconds")),
+                "ttl_seconds": payload.get("ttl_seconds", base.get("ttl_seconds")),
+                "source": payload.get("source", base.get("source")),
                 "opened_at": base.get("opened_at") or rec.get("timestamp"),
                 "closed_at": rec.get("timestamp") or _dt_iso(ts),
             })
@@ -3529,6 +3551,7 @@ def _read_equities_positions(
                     "opened_at": getattr(pos, "opened_at", None).isoformat()
                     if getattr(pos, "opened_at", None) is not None else None,
                     "trading_seconds": None,
+                    "ttl_seconds": getattr(pos, "ttl", None),
                 }
 
     open_rows = [

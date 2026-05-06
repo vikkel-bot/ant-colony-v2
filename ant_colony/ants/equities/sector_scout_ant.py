@@ -184,6 +184,7 @@ class SectorScoutAnt:
 
         ranking = sorted(returns.items(), key=lambda x: x[1], reverse=True)
         signals = self._build_signals(ranking)
+        self._emit_ranking_snapshot(signals)
         self._emit_top_signals(ranking, adapter)
         self._last_action = f"tick:top={ranking[0][0] if ranking else 'none'}"
 
@@ -318,6 +319,33 @@ class SectorScoutAnt:
                 symbol, _SPDR_ETFS.get(symbol, "?"),
                 rank + 1, momentum * 100, confidence,
             )
+
+    def _emit_ranking_snapshot(self, signals: list[dict]) -> None:
+        """Schrijf de volledige sector-ranking voor momentum-exits in EquitiesPaperAnt."""
+        if self.logs_root is None or not signals:
+            return
+        payload = {
+            "action": "sector_ranking",
+            "ranking_date": date.today().isoformat(),
+            "top5": [row["symbol"] for row in signals[:5]],
+            "ranking": signals,
+        }
+        event = AuditEvent(
+            event_type=AuditEventType.ACTION_EXECUTED,
+            source=self.ant_id,
+            mission_id=self.mission.mission_id,
+            node_id=self.mission.allowed_node,
+            sequence=self._log_seq,
+            payload=payload,
+        )
+
+        log_path = self.logs_root / "equities" / "sector_scout" / f"{self.ant_id}.jsonl"
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with log_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(event.model_dump(mode="json"), default=str) + "\n")
+        except OSError:
+            self._log.exception("Kon sector-ranking niet naar disk schrijven")
 
     def _get_current_price(self, symbol: str, adapter) -> float | None:
         """Haal actuele prijs op via adapter. Retourneert None bij fout."""

@@ -1,7 +1,7 @@
 """
 ant_colony/ants/paper_ant_equities.py
 
-EquitiesPaperAnt — paper trading voor equities met trailing stop en handelsdag-TTL.
+EquitiesPaperAnt — paper trading voor equities met trailing stop en dynamische exit.
 
 Verantwoordelijkheden:
   1. Leest signalen uit vier bronnen:
@@ -14,7 +14,8 @@ Verantwoordelijkheden:
   3. Exit-logica (P3: exit vóór entry, elke tick):
        a. Trailing stop: sluit als current_price < peak_price * (1 - TRAILING_STOP_PCT)
        b. Harde SL: sluit als current_price < entry_price * (1 - HARD_SL_PCT)
-       c. TTL noodrem: 10 handelsdagen (alleen tel markturen mee)
+       c. Momentum-exit: sector_scout-posities sluiten als momentum twee ticks wegvalt
+       d. TTL noodrem: 365 dagen voor equity momentum, 14 dagen voor Watchtower
   4. Bijhoudt peak_price per positie; logt position_update events zodat
      peak_price hersteld kan worden na herstart.
   5. Ledger-herstel bij herstart: scan paper/*.jsonl op trade_opened (biome=equities)
@@ -69,8 +70,26 @@ _MARKET_CLOSE_HOUR  = 22          # 22:00 AMS
 _MARKET_CLOSE_MIN   = 0
 
 _TRADING_SECONDS_PER_DAY = int(6.5 * 3600)           # 6h30 = 23400 s
-_TTL_TRADING_DAYS        = 10
-_TTL_TRADING_SECONDS     = _TTL_TRADING_DAYS * _TRADING_SECONDS_PER_DAY  # 234000 s
+
+
+def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
+    try:
+        return max(minimum, int(os.getenv(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
+_SECONDS_PER_DAY          = 24 * 3600
+_EQUITY_MAX_TTL_DAYS      = _env_int("EQUITY_MAX_TTL_DAYS", 365)
+_TTL_TRADING_DAYS         = _EQUITY_MAX_TTL_DAYS  # backward-compatible export voor tests/dashboard
+_TTL_TRADING_SECONDS      = _EQUITY_MAX_TTL_DAYS * _SECONDS_PER_DAY
+_WATCHTOWER_TTL_DAYS      = 14
+_WATCHTOWER_TTL_SECONDS   = _WATCHTOWER_TTL_DAYS * _SECONDS_PER_DAY
+_MOMENTUM_EXIT_CONSECUTIVE_TICKS = _env_int(
+    "EQUITY_MOMENTUM_EXIT_CONSECUTIVE_TICKS",
+    2,
+)
+_MOMENTUM_EXIT_TYPE       = "EXIT_MOMENTUM_LOST"
 
 _CONFIDENCE_THRESHOLD    = 0.6
 _WATCHTOWER_POSITION_SCALE = min(
@@ -130,6 +149,11 @@ class EquitiesPaperAnt:
 
         # Peak_price per positie — wordt ook hersteld vanuit logs
         self._peak_prices: dict[str, float] = {}
+
+        # Bron + momentum-exit state per positie
+        self._position_sources: dict[str, str] = {}
+        self._momentum_miss_counts: dict[str, int] = {}
+        self._momentum_exit_pending: set[str] = set()
 
         # Ledger-herstel bij herstart
         self._restore_from_logs()
@@ -230,11 +254,12 @@ class EquitiesPaperAnt:
 
     def _process_exits(self, *, advance_trading_time: bool) -> None:
         """
-        Evalueer alle open posities op trailing stop, harde SL en handelsdag-TTL.
+        Evalueer alle open posities op trailing stop, harde SL, momentum-exit en TTL.
 
         advance_trading_time: True als de markt open is — telt 1 seconde op bij
-        alle open posities zodat de handelsdag-TTL correct bijgehouden wordt.
+        alle open posities zodat handelsseconden voor dashboard/logs bijgehouden worden.
         """
+        sector_top5 = self._latest_sector_scout_top_symbols(limit=5)
         for position in list(self._ledger.open_positions):
             price = self._fetch_price(position.symbol)
             if price is None:
@@ -263,8 +288,6 @@ class EquitiesPaperAnt:
                     self._trading_seconds.get(pos_id, 0.0) + 1.0
                 )
 
-            trading_secs = self._trading_seconds.get(pos_id, 0.0)
-
             # --- Exit-condities ---
             exit_type: str | None = None
             exit_price = price
@@ -276,11 +299,109 @@ class EquitiesPaperAnt:
                 exit_type = "hard_stop_loss"
             elif price < trailing_stop_price:
                 exit_type = "trailing_stop"
-            elif trading_secs >= _TTL_TRADING_SECONDS:
+            elif pos_id in self._momentum_exit_pending:
+                exit_type = _MOMENTUM_EXIT_TYPE
+            elif self._position_age_seconds(position) >= self._position_ttl_seconds(position):
                 exit_type = "ttl_trading_days"
 
             if exit_type is not None:
                 self._close_position(position, exit_price, exit_type)
+            else:
+                self._update_momentum_exit_state(position, sector_top5)
+
+    def _position_age_seconds(self, position: PaperPosition) -> float:
+        opened_at = position.opened_at
+        if opened_at.tzinfo is None:
+            opened_at = opened_at.replace(tzinfo=timezone.utc)
+        return max(0.0, (datetime.now(tz=timezone.utc) - opened_at).total_seconds())
+
+    def _position_ttl_seconds(self, position: PaperPosition) -> int:
+        source = self._position_sources.get(position.position_id, "")
+        if source == "watchtower" or position.watchtower_signal_id:
+            return _WATCHTOWER_TTL_SECONDS
+        return _TTL_TRADING_SECONDS
+
+    def _position_ttl_seconds_for_source(
+        self,
+        source: str,
+        watchtower_signal_id: str | None = None,
+    ) -> int:
+        if source == "watchtower" or watchtower_signal_id:
+            return _WATCHTOWER_TTL_SECONDS
+        return _TTL_TRADING_SECONDS
+
+    def _update_momentum_exit_state(
+        self,
+        position: PaperPosition,
+        sector_top5: set[str] | None,
+    ) -> None:
+        pos_id = position.position_id
+        if not self._is_momentum_exit_eligible(position):
+            self._momentum_miss_counts.pop(pos_id, None)
+            self._momentum_exit_pending.discard(pos_id)
+            return
+        if sector_top5 is None:
+            return
+
+        symbol = position.symbol.upper()
+        if symbol in sector_top5:
+            self._momentum_miss_counts.pop(pos_id, None)
+            self._momentum_exit_pending.discard(pos_id)
+            return
+
+        misses = self._momentum_miss_counts.get(pos_id, 0) + 1
+        self._momentum_miss_counts[pos_id] = misses
+        if misses >= _MOMENTUM_EXIT_CONSECUTIVE_TICKS and pos_id not in self._momentum_exit_pending:
+            self._momentum_exit_pending.add(pos_id)
+            self._log.warning(
+                "Momentum-exit gemarkeerd | %s niet in sector_scout top5 ticks=%d",
+                symbol,
+                misses,
+            )
+
+    def _is_momentum_exit_eligible(self, position: PaperPosition) -> bool:
+        return self._position_sources.get(position.position_id, "sector_scout") == "sector_scout"
+
+    def _latest_sector_scout_top_symbols(self, *, limit: int = 5) -> set[str] | None:
+        """Lees de meest recente sector_scout ranking snapshot en retourneer top-N symbolen."""
+        if self.logs_root is None:
+            return None
+        ranking_dir = self.logs_root / "equities" / "sector_scout"
+        if not ranking_dir.exists():
+            return None
+
+        latest_ts: datetime | None = None
+        latest_ranking: list[dict] | None = None
+        for path in sorted(ranking_dir.glob("*.jsonl")):
+            try:
+                for line in path.read_text(encoding="utf-8").splitlines():
+                    if not line.strip():
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    payload = record.get("payload") or {}
+                    if payload.get("action") != "sector_ranking":
+                        continue
+                    ranking = payload.get("ranking") or []
+                    if not isinstance(ranking, list):
+                        continue
+                    ts = _parse_iso_datetime(record.get("timestamp"))
+                    if latest_ts is None or (ts is not None and ts >= latest_ts):
+                        latest_ts = ts or latest_ts
+                        latest_ranking = ranking
+            except OSError:
+                self._log.warning("Kan sector_scout ranking niet lezen: %s", path)
+
+        if not latest_ranking:
+            return None
+        ordered = sorted(latest_ranking, key=lambda row: int(row.get("rank") or 999))
+        return {
+            str(row.get("symbol") or "").upper()
+            for row in ordered[:limit]
+            if row.get("symbol")
+        }
 
     def _close_position(
         self, position: PaperPosition, exit_price: float, exit_type: str
@@ -289,6 +410,8 @@ class EquitiesPaperAnt:
         closed = position.model_copy(update={
             "status":     PositionStatus.CLOSED_STOP_LOSS
                           if exit_type in ("hard_stop_loss", "trailing_stop")
+                          else PositionStatus.CLOSED_MANUAL
+                          if exit_type == _MOMENTUM_EXIT_TYPE
                           else PositionStatus.CLOSED_TTL,
             "exit_price": exit_price,
             "closed_at":  datetime.now(tz=timezone.utc),
@@ -297,6 +420,9 @@ class EquitiesPaperAnt:
         self._open_symbols.discard(position.symbol)
         self._trading_seconds.pop(position.position_id, None)
         self._peak_prices.pop(position.position_id, None)
+        self._position_sources.pop(position.position_id, None)
+        self._momentum_miss_counts.pop(position.position_id, None)
+        self._momentum_exit_pending.discard(position.position_id)
         self._ledger.record_closed(closed)
         self._emit_trade_closed(closed, exit_type)
         self._last_action = f"trade_closed:{position.symbol}"
@@ -556,7 +682,7 @@ class EquitiesPaperAnt:
                 quantity=quantity,
                 stop_loss_price=sl_price,
                 take_profit_price=tp_price,
-                ttl=self.mission.ttl,
+                ttl=self._position_ttl_seconds_for_source(source, watchtower_signal_id),
                 current_price=price,
                 peak_price=price,
                 opened_at=datetime.now(tz=timezone.utc),
@@ -569,6 +695,7 @@ class EquitiesPaperAnt:
         self._open_symbols.add(symbol)
         self._peak_prices[position.position_id] = price
         self._trading_seconds[position.position_id] = 0.0
+        self._position_sources[position.position_id] = source
         self._ledger.record_opened(position)
         self._emit_trade_opened(position, source=source, position_scale=position_scale)
         self._last_action = f"trade_opened:{symbol}"
@@ -681,6 +808,10 @@ class EquitiesPaperAnt:
                 pos_id,
                 _estimate_trading_seconds_since(pos.opened_at),
             )
+            self._position_sources[pos_id] = str(
+                payload.get("source")
+                or ("watchtower" if payload.get("watchtower_signal_id") else "sector_scout")
+            )
             restored += 1
 
         if restored:
@@ -718,7 +849,10 @@ class EquitiesPaperAnt:
                 quantity=quantity,
                 stop_loss_price=sl,
                 take_profit_price=tp,
-                ttl=self.mission.ttl,
+                ttl=self._position_ttl_seconds_for_source(
+                    str(payload.get("source") or ""),
+                    payload.get("watchtower_signal_id"),
+                ),
                 current_price=entry,
                 peak_price=entry,
                 opened_at=opened_at,
@@ -759,6 +893,8 @@ class EquitiesPaperAnt:
             "trailing_stop_pct":    _TRAILING_STOP_PCT,
             "source":               source,
             "position_scale":       position_scale,
+            "ttl_seconds":          position.ttl,
+            "ttl_days":             round(position.ttl / _SECONDS_PER_DAY, 4),
             "watchtower_signal_id": position.watchtower_signal_id,
         })
 
@@ -815,6 +951,7 @@ class EquitiesPaperAnt:
             "hard_stop_loss":  "SL",
             "trailing_stop":   "TRAILING",
             "ttl_trading_days": "TTL",
+            _MOMENTUM_EXIT_TYPE: "MOMENTUM_LOST",
         }
         exit_label = _map.get(exit_type, exit_type.upper())
 
@@ -939,6 +1076,18 @@ class EquitiesPaperAnt:
 # ---------------------------------------------------------------------------
 # Hulpfunctie — buiten de klasse (ook bruikbaar in tests)
 # ---------------------------------------------------------------------------
+
+def _parse_iso_datetime(value: object) -> datetime | None:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
 
 def _estimate_trading_seconds_since(opened_at: datetime) -> float:
     """

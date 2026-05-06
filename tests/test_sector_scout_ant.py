@@ -334,6 +334,19 @@ class TestTick:
         assert len(records) == _TOP_N
         assert all(r["payload"]["action"] == "opportunity_detected" for r in records)
 
+    def test_tick_writes_sector_ranking_snapshot_for_momentum_exits(self, tmp_path: Path) -> None:
+        adapter = make_adapter(_full_returns())
+        ant = make_ant(adapter=adapter, logs_root=tmp_path)
+        signals = ant._tick()
+
+        log_path = tmp_path / "equities" / "sector_scout" / f"{ant.ant_id}.jsonl"
+        records = [json.loads(line) for line in log_path.read_text().splitlines() if line.strip()]
+        payload = records[-1]["payload"]
+
+        assert payload["action"] == "sector_ranking"
+        assert payload["top5"] == [row["symbol"] for row in signals[:5]]
+        assert len(payload["ranking"]) == len(_SPDR_ETFS)
+
     def test_log_signal_has_required_payload_fields(self, tmp_path: Path) -> None:
         adapter = make_adapter(_full_returns())
         ant = make_ant(adapter=adapter, logs_root=tmp_path)

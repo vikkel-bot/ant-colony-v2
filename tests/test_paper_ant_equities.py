@@ -22,7 +22,10 @@ from ant_colony.ants.paper_ant_equities import (
     _TRAILING_STOP_PCT,
     _TTL_TRADING_SECONDS,
     _TRADING_SECONDS_PER_DAY,
-    _TTL_TRADING_DAYS,
+    _EQUITY_MAX_TTL_DAYS,
+    _WATCHTOWER_TTL_DAYS,
+    _MOMENTUM_EXIT_CONSECUTIVE_TICKS,
+    _MOMENTUM_EXIT_TYPE,
 )
 from ant_colony.exit_chain.position import PaperPosition, PositionSide
 from ant_colony.schemas.mission import (
@@ -99,6 +102,9 @@ def _write_trade_opened(
     take_profit: float | None = None,
     ts: datetime | None = None,
     biome: str = "equities",
+    source: str = "sector_scout",
+    watchtower_signal_id: str | None = None,
+    ttl_seconds: int | None = None,
 ) -> None:
     sl = stop_loss  if stop_loss  is not None else entry_price * (1.0 - _HARD_SL_PCT)
     tp = take_profit if take_profit is not None else entry_price * 2.0
@@ -117,6 +123,9 @@ def _write_trade_opened(
             "quantity":    quantity,
             "stop_loss":   sl,
             "take_profit": tp,
+            "source":      source,
+            "watchtower_signal_id": watchtower_signal_id,
+            "ttl_seconds": ttl_seconds,
         },
     }
     (paper_dir / f"{ant_id}.jsonl").open("a", encoding="utf-8").write(
@@ -145,6 +154,34 @@ def _write_position_update(
         "peak_price":      peak_price,
         "trading_seconds": trading_seconds,
     })
+
+
+def _write_sector_ranking(logs_root: Path, symbols: list[str]) -> None:
+    ranking_dir = logs_root / "equities" / "sector_scout"
+    ranking_dir.mkdir(parents=True, exist_ok=True)
+    ranking = [
+        {
+            "symbol": symbol,
+            "sector": symbol,
+            "return_3mo": round(0.2 - index * 0.01, 6),
+            "rank": index + 1,
+            "signal": "LONG" if index < 3 else "NEUTRAL",
+        }
+        for index, symbol in enumerate(symbols)
+    ]
+    record = {
+        "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+        "source": "sector-scout",
+        "payload": {
+            "action": "sector_ranking",
+            "ranking_date": datetime.now(tz=timezone.utc).date().isoformat(),
+            "top5": symbols[:5],
+            "ranking": ranking,
+        },
+    }
+    (ranking_dir / "sector_scout.jsonl").open("a", encoding="utf-8").write(
+        json.dumps(record) + "\n"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -237,7 +274,11 @@ class TestExitLogic:
         ant: EquitiesPaperAnt,
         entry_price: float = 100.0,
         symbol: str = "AAPL",
+        source: str = "sector_scout",
+        watchtower_signal_id: str | None = None,
+        opened_at: datetime | None = None,
     ) -> PaperPosition:
+        ttl = 14 * 24 * 3600 if source == "watchtower" or watchtower_signal_id else _TTL_TRADING_SECONDS
         pos = PaperPosition(
             position_id=uuid.uuid4().hex,
             symbol=symbol,
@@ -249,15 +290,17 @@ class TestExitLogic:
             quantity=1.0,
             stop_loss_price=entry_price * (1 - _HARD_SL_PCT),
             take_profit_price=entry_price * 2.0,
-            ttl=ant.mission.ttl,
+            ttl=ttl,
             current_price=entry_price,
             peak_price=entry_price,
-            opened_at=datetime.now(tz=timezone.utc),
+            opened_at=opened_at or datetime.now(tz=timezone.utc),
+            watchtower_signal_id=watchtower_signal_id,
         )
         ant._ledger.record_opened(pos)
         ant._open_symbols.add(symbol)
         ant._peak_prices[pos.position_id] = entry_price
         ant._trading_seconds[pos.position_id] = 0.0
+        ant._position_sources[pos.position_id] = source
         return pos
 
     def test_trailing_stop_triggers(self, tmp_path):
@@ -304,15 +347,12 @@ class TestExitLogic:
         assert len(ant._ledger.closed_trades) == 1
         assert ant._ledger.closed_trades[0].exit_reason == "hard_stop_loss"
 
-    def test_ttl_triggers_after_10_trading_days(self, tmp_path):
+    def test_ttl_triggers_after_equity_max_ttl_days(self, tmp_path):
         ant = _make_ant(tmp_path)
-        pos = self._make_position(ant, entry_price=100.0)
-
-        # Forceer trading_seconds over de TTL-grens
-        ant._trading_seconds[pos.position_id] = _TTL_TRADING_SECONDS + 1
+        opened_at = datetime.now(tz=timezone.utc) - timedelta(days=_EQUITY_MAX_TTL_DAYS, seconds=1)
+        self._make_position(ant, entry_price=100.0, opened_at=opened_at)
 
         # Prijs stabiel — geen SL/TP
-        stable_price = 100.0 * 0.98   # boven hard SL van 93 maar nog check nodig
         adapter = MagicMock()
         adapter.is_available.return_value = True
         md = MagicMock()
@@ -326,6 +366,82 @@ class TestExitLogic:
 
         assert len(ant._ledger.closed_trades) == 1
         assert ant._ledger.closed_trades[0].exit_reason == "ttl_trading_days"
+
+    def test_watchtower_ttl_stays_14_days(self, tmp_path):
+        ant = _make_ant(tmp_path)
+        opened_at = datetime.now(tz=timezone.utc) - timedelta(days=_WATCHTOWER_TTL_DAYS, seconds=1)
+        pos = self._make_position(
+            ant,
+            entry_price=100.0,
+            source="watchtower",
+            watchtower_signal_id="wt-ttl",
+            opened_at=opened_at,
+        )
+
+        adapter = MagicMock()
+        adapter.is_available.return_value = True
+        md = MagicMock()
+        md.is_valid_price = True
+        md.is_stale.return_value = False
+        md.close = 101.0
+        adapter.get_market_data.return_value = md
+        ant.biome_registry.get.return_value = adapter
+
+        ant._process_exits(advance_trading_time=False)
+
+        assert pos.ttl == _WATCHTOWER_TTL_DAYS * 24 * 3600
+        assert len(ant._ledger.closed_trades) == 1
+        assert ant._ledger.closed_trades[0].exit_reason == "ttl_trading_days"
+
+    def test_sector_scout_position_marks_and_closes_after_momentum_lost(self, tmp_path):
+        ant = _make_ant(tmp_path)
+        self._make_position(ant, entry_price=100.0, symbol="XLK", source="sector_scout")
+        _write_sector_ranking(tmp_path, ["XLE", "XLF", "XLI", "XLY", "XLU", "XLK"])
+
+        adapter = MagicMock()
+        adapter.is_available.return_value = True
+        md = MagicMock()
+        md.is_valid_price = True
+        md.is_stale.return_value = False
+        md.close = 101.0
+        adapter.get_market_data.return_value = md
+        ant.biome_registry.get.return_value = adapter
+
+        for _ in range(_MOMENTUM_EXIT_CONSECUTIVE_TICKS):
+            ant._process_exits(advance_trading_time=False)
+
+        assert len(ant._ledger.open_positions) == 1
+        assert ant._momentum_exit_pending
+
+        ant._process_exits(advance_trading_time=False)
+
+        assert len(ant._ledger.open_positions) == 0
+        assert ant._ledger.closed_trades[0].exit_reason == _MOMENTUM_EXIT_TYPE
+
+    def test_watchtower_position_ignores_sector_momentum_exit(self, tmp_path):
+        ant = _make_ant(tmp_path)
+        self._make_position(
+            ant,
+            entry_price=100.0,
+            symbol="AAPL",
+            source="watchtower",
+            watchtower_signal_id="wt-ignore-momentum",
+        )
+        _write_sector_ranking(tmp_path, ["XLE", "XLF", "XLI", "XLY", "XLU"])
+
+        adapter = MagicMock()
+        adapter.is_available.return_value = True
+        md = MagicMock()
+        md.is_valid_price = True
+        md.is_stale.return_value = False
+        md.close = 101.0
+        adapter.get_market_data.return_value = md
+        ant.biome_registry.get.return_value = adapter
+
+        for _ in range(_MOMENTUM_EXIT_CONSECUTIVE_TICKS + 1):
+            ant._process_exits(advance_trading_time=False)
+
+        assert len(ant._ledger.open_positions) == 1
 
     def test_no_exit_within_normal_range(self, tmp_path):
         ant = _make_ant(tmp_path)
