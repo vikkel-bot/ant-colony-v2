@@ -1147,7 +1147,10 @@ class TestServerApp:
     def test_health_endpoint(self):
         r = _client(ColonyContext()).get("/health")
         assert r.status_code == 200
-        assert r.json()["ok"] is True
+        data = r.json()
+        assert data["status"] == "ok"
+        assert data["uptime_seconds"] >= 0
+        assert data["agents"] == 0
 
     def test_create_app_none_context(self):
         # create_app(None) must not crash — uses empty ColonyContext

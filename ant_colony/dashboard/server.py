@@ -63,6 +63,7 @@ def create_app(ctx: ColonyContext | None = None) -> FastAPI:
     """
     if ctx is None:
         ctx = ColonyContext()
+    started_monotonic = time.monotonic()
 
     app = FastAPI(
         title="ANT COLONY v2 Dashboard",
@@ -95,7 +96,24 @@ def create_app(ctx: ColonyContext | None = None) -> FastAPI:
     # --- Health check (voor process monitors) ---
     @app.get("/health", include_in_schema=False)
     def health() -> dict:
-        return {"ok": True}
+        agents = 0
+        scheduler = getattr(ctx, "scheduler", None)
+        if scheduler is not None:
+            try:
+                records = getattr(scheduler, "_agents", {})
+                agents = sum(
+                    1
+                    for record in records.values()
+                    if str(getattr(getattr(record, "status", ""), "value", "")).lower()
+                    == "running"
+                )
+            except Exception:
+                agents = 0
+        return {
+            "status": "ok",
+            "uptime_seconds": round(time.monotonic() - started_monotonic, 3),
+            "agents": agents,
+        }
 
     logger.info("Dashboard app created — static dir: %s", _STATIC_DIR)
     return app
