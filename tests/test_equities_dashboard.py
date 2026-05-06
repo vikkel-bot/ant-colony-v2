@@ -381,6 +381,31 @@ class TestEquitiesPositionsEndpoint:
         assert pos["pnl_eur"] == pytest.approx(20.0)
         assert d["summary"]["total_invested_equities"] == pytest.approx(200.0)
 
+    def test_pnl_uses_position_current_price_from_paper_ledger(self):
+        opened = datetime.now(tz=timezone.utc)
+        position = SimpleNamespace(
+            position_id="eq-ledger-1",
+            symbol="AAPL",
+            biome="equities",
+            side=SimpleNamespace(value="long"),
+            entry_price=100.0,
+            current_price=110.0,
+            quantity=2.0,
+            stop_loss_price=92.0,
+            take_profit_price=120.0,
+            peak_price=120.0,
+            opened_at=opened,
+        )
+        ledger = SimpleNamespace(open_positions=[position])
+
+        d = _client(ColonyContext(paper_ledgers=[ledger])).get("/api/equities/positions").json()
+
+        pos = d["open_positions"][0]
+        assert pos["current_price"] == pytest.approx(110.0)
+        assert pos["trailing_stop_price"] == pytest.approx(114.0)
+        assert pos["pnl_pct"] == pytest.approx(10.0)
+        assert pos["pnl_eur"] == pytest.approx(20.0)
+
     def test_closed_positions_summary(self, tmp_path: Path):
         now = _now_iso()
         _write_jsonl(tmp_path / "paper" / "eq-ant.jsonl", [

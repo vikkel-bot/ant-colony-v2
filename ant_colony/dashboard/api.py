@@ -1106,6 +1106,7 @@ def create_router(ctx: ColonyContext) -> APIRouter:
                         "biome":              pos.biome,
                         "side":               pos.side.value,
                         "entry_price":        pos.entry_price,
+                        "current_price":      getattr(pos, "current_price", pos.entry_price),
                         "quantity":           pos.quantity,
                         "stop_loss_price":    pos.stop_loss_price,
                         "take_profit_price":  pos.take_profit_price,
@@ -3503,7 +3504,7 @@ def _read_equities_positions(
                     "stop_loss_price": getattr(pos, "stop_loss_price", None),
                     "take_profit_price": getattr(pos, "take_profit_price", None),
                     "trailing_stop_price": trailing,
-                    "current_price": getattr(pos, "entry_price", None),
+                    "current_price": getattr(pos, "current_price", getattr(pos, "entry_price", None)),
                     "opened_at": getattr(pos, "opened_at", None).isoformat()
                     if getattr(pos, "opened_at", None) is not None else None,
                     "trading_seconds": None,
