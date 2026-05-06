@@ -51,6 +51,26 @@ _BIOME_REFERENCE_MARKET: dict[str, str] = {
 }
 
 logger = logging.getLogger(__name__)
+_RUNTIME_ENV_LOADED = False
+
+
+def _ensure_runtime_env_loaded() -> None:
+    """Laad repo-.env lazy zodat standalone dashboard feature-flags ook ziet."""
+    global _RUNTIME_ENV_LOADED
+    if _RUNTIME_ENV_LOADED:
+        return
+    _RUNTIME_ENV_LOADED = True
+    try:
+        from dotenv import load_dotenv
+    except Exception:
+        return
+    repo_root = Path(__file__).resolve().parents[2]
+    for env_path in (repo_root / ".env", Path.cwd() / ".env"):
+        try:
+            if env_path.exists():
+                load_dotenv(env_path, override=False)
+        except OSError:
+            continue
 
 
 # ---------------------------------------------------------------------------
@@ -1737,6 +1757,7 @@ def create_router(ctx: ColonyContext) -> APIRouter:
     def get_watchtower_status() -> WatchtowerStatusResponse:
         """Watchtower status: ONLINE/OFFLINE/DISABLED + signaal-statistieken."""
         import os as _os
+        _ensure_runtime_env_loaded()
         enabled = _os.getenv("WATCHTOWER_ENABLED", "false").lower() == "true"
         if not enabled:
             return WatchtowerStatusResponse(enabled=False, status="DISABLED")

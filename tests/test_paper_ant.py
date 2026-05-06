@@ -7,6 +7,8 @@ Volledige coverage voor PaperAnt.
 from __future__ import annotations
 
 import json
+import logging
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -18,6 +20,7 @@ from ant_colony.ants.paper_ant import (
     BROKER_FEE_PCT,
     PaperAnt,
     _MAX_OPEN_POSITIONS,
+    _PAPER_CANDIDATE_WATCHDOG_SECONDS,
     _SL_PCT,
     _TP_PCT,
     _TRADE_CAPITAL_FRACTION,
@@ -913,8 +916,9 @@ class TestResearchCandidates:
         ant._process_research_candidates()  # should not crash
 
     def test_preload_marks_existing_candidates_as_seen(self, tmp_path: Path) -> None:
-        """Kandidaten die al in de log staan vóór startup worden niet verwerkt."""
-        cid = write_research_candidate(tmp_path / "research")
+        """Oude kandidaten die al in de log staan vóór startup worden niet verwerkt."""
+        old_ts = (datetime.now(tz=timezone.utc) - timedelta(minutes=10)).isoformat()
+        cid = write_research_candidate(tmp_path / "research", timestamp=old_ts)
         # Ant aanmaken ná schrijven → preload markeert cid als gezien
         ant = make_ant(logs_root=tmp_path)
         ant.biome_registry.get.return_value = _make_adapter_with_price(_PRICE)
@@ -922,6 +926,16 @@ class TestResearchCandidates:
         ant._tick()
         # Geen positie — kandidaat was al aanwezig bij startup
         assert len(ant._ledger.open_positions) == 0
+
+    def test_fresh_candidate_before_startup_is_processed(self, tmp_path: Path) -> None:
+        """Verse kandidaten in de research queue worden na PaperAnt-herstart alsnog verwerkt."""
+        fresh_ts = datetime.now(tz=timezone.utc).isoformat()
+        cid = write_research_candidate(tmp_path / "research", timestamp=fresh_ts)
+        ant = make_ant(logs_root=tmp_path)
+        ant.biome_registry.get.return_value = _make_adapter_with_price(_PRICE)
+        assert cid not in ant._seen_research_ids
+        ant._tick()
+        assert len(ant._ledger.open_positions) == 1
 
     def test_new_candidate_after_startup_is_processed(self, tmp_path: Path) -> None:
         """Kandidaat die ná startup arriveert wordt wel verwerkt."""
@@ -937,6 +951,21 @@ class TestResearchCandidates:
         from ant_colony.ants.paper_ant import PaperAnt
         seen = PaperAnt._preload_seen_research_ids(None)
         assert seen == set()
+
+    def test_watchdog_restarts_when_candidates_pending(self, tmp_path: Path, caplog) -> None:
+        ant = make_ant(logs_root=tmp_path)
+        write_research_candidate(tmp_path / "research")
+        ant._process_approved_candidates = MagicMock(return_value=0)
+        ant._process_research_candidates = MagicMock(side_effect=[0, 1])
+        ant._last_candidate_processed_at = (
+            time.monotonic() - _PAPER_CANDIDATE_WATCHDOG_SECONDS - 1
+        )
+
+        with caplog.at_level(logging.ERROR, logger=f"ant.paper.{ant.ant_id[:8]}"):
+            ant._tick()
+
+        assert ant._paper_watchdog_restarts == 1
+        assert any("PaperAnt watchdog" in record.message for record in caplog.records)
 
 
 # ---------------------------------------------------------------------------

@@ -20,10 +20,6 @@ Gebruik:
 
 from __future__ import annotations
 
-from pathlib import Path
-from dotenv import load_dotenv
-load_dotenv(Path(__file__).resolve().parent.parent / ".env")
-
 import argparse
 import logging
 import os
@@ -34,6 +30,9 @@ import threading
 import time
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
+
+from dotenv import load_dotenv
 
 # ---------------------------------------------------------------------------
 # Project root op sys.path zetten zodat ant_colony importeerbaar is
@@ -42,6 +41,30 @@ from datetime import datetime, timezone
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
+
+
+# ---------------------------------------------------------------------------
+# Runtime .env laden vóór feature-flag checks
+# ---------------------------------------------------------------------------
+
+def _load_runtime_env() -> list[Path]:
+    """Laad de repo-.env vroeg, ook als het script vanuit een andere cwd start."""
+    candidates = [
+        _REPO_ROOT / ".env",
+        Path.cwd() / ".env",
+    ]
+    loaded: list[Path] = []
+    for env_path in candidates:
+        try:
+            if env_path.exists():
+                load_dotenv(env_path, override=False)
+                loaded.append(env_path)
+        except OSError:
+            continue
+    return loaded
+
+
+_LOADED_ENV_FILES = _load_runtime_env()
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +233,7 @@ def _run_dashboard_watchdog(run_fn, ctx, host: str, port: int, log: logging.Logg
 # ---------------------------------------------------------------------------
 
 _ADVISOR_INTERVAL = 300   # seconden
+_RS_REGIME_SYNC_INTERVAL = 10  # seconden
 
 
 def _run_advisor_loop(advisor, queen, log: logging.Logger) -> None:
@@ -223,6 +247,20 @@ def _run_advisor_loop(advisor, queen, log: logging.Logger) -> None:
             queen.apply_advisor_decision(decision)
         except Exception:
             log.exception("QueenAdvisor loop fout — volgende cyclus over %ds.", _ADVISOR_INTERVAL)
+
+
+def _run_rs_regime_sync_loop(advisor, log: logging.Logger) -> None:
+    """Daemon thread: sync RSRegimeAnt output snel naar Queen regime-signaal."""
+    log.info("RSRegime -> Queen sync thread gestart (interval=%ds).", _RS_REGIME_SYNC_INTERVAL)
+    while True:
+        try:
+            advisor.sync_rs_regime_once()
+        except Exception:
+            log.exception(
+                "RSRegime -> Queen sync fout — volgende poging over %ds.",
+                _RS_REGIME_SYNC_INTERVAL,
+            )
+        time.sleep(_RS_REGIME_SYNC_INTERVAL)
 
 
 # ---------------------------------------------------------------------------
@@ -337,6 +375,10 @@ def main() -> None:
         datefmt="%Y-%m-%dT%H:%M:%S",
     )
     log = logging.getLogger("start_colony")
+    if _LOADED_ENV_FILES:
+        log.info(".env geladen: %s", ", ".join(str(path) for path in _LOADED_ENV_FILES))
+    else:
+        log.warning("Geen .env gevonden vóór feature-flag checks; cwd=%s repo=%s", Path.cwd(), _REPO_ROOT)
 
     # --- Stap 1: stop bestaand dashboard-proces op de doelpoort ---
     log.info("Controleren of poort %d vrij is …", args.port)
@@ -1112,6 +1154,12 @@ def main() -> None:
             target=_run_advisor_loop,
             args=(advisor, queen, log),
             name="queen-advisor",
+            daemon=True,
+        ).start()
+        threading.Thread(
+            target=_run_rs_regime_sync_loop,
+            args=(advisor, log),
+            name="rs-regime-queen-sync",
             daemon=True,
         ).start()
         log.info("QueenAdvisor gestart | interval=%ds", _ADVISOR_INTERVAL)

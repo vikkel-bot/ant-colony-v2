@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-_VALID_REGIMES = frozenset(["SIDEWAYS", "TRENDING", "VOLATILE"])
+_VALID_REGIMES = frozenset(["SIDEWAYS", "TRENDING", "VOLATILE", "RISK_ON"])
 
 
 def read_latest_queen_regime(logs_root: Path) -> str | None:

@@ -69,6 +69,16 @@ _REGIME_MAP: dict[str, str] = {
     "bear":     "VOLATILE",
 }
 
+_RS_REGIME_TO_QUEEN_REGIME: dict[str, str] = {
+    "RISK_ON":  "RISK_ON",
+    "NEUTRAL":  "SIDEWAYS",
+    "RISK_OFF": "VOLATILE",
+    "CRISIS":   "VOLATILE",
+    "TRENDING": "TRENDING",
+    "SIDEWAYS": "SIDEWAYS",
+    "VOLATILE": "VOLATILE",
+}
+
 # Market signal tabel: (regime, news_sentiment) → (combined_signal, position_size_mult, sl_mult)
 _MARKET_SIGNAL_TABLE: dict[tuple[str, str], tuple[str, float, float]] = {
     ("SIDEWAYS", "bearish"):  ("cautious",           0.5,  1.25),
@@ -294,9 +304,11 @@ class QueenAdvisor:
             self._apply_paper_logic(decision, candidates, paper_stats)
             self._apply_claude_logic(decision, candidates, paper_stats, claude_advices)
 
-            regime = self._determine_regime(candidates)
+            rs_regime = self.sync_rs_regime_once()
+            regime = rs_regime or self._determine_regime(candidates)
             if regime:
-                self._write_regime_signal(regime)
+                if rs_regime is None:
+                    self._write_regime_signal(regime)
                 news = self._read_latest_news_snapshot()
                 news_sentiment = (
                     (news.get("market_sentiment") or "neutral") if news else "neutral"
@@ -539,6 +551,38 @@ class QueenAdvisor:
             )
         except OSError:
             self._log.exception("Kan markt-signaal niet schrijven naar %s", queen_dir)
+
+    def sync_rs_regime_once(self) -> str | None:
+        """
+        Sync het meest recente RSRegimeAnt signaal direct naar Queen regime.
+
+        Dit draait ook buiten de normale 5-minuten adviescyclus, zodat PaperAnt
+        het actuele equity-regime ziet zodra RSRegimeAnt heeft getickt.
+        """
+        rs_regime = self._read_rs_regime()
+        if not rs_regime:
+            return None
+        regime = _RS_REGIME_TO_QUEEN_REGIME.get(str(rs_regime).upper())
+        if not regime:
+            return None
+        old_regime = self._read_latest_queen_regime()
+        if old_regime != regime:
+            self._write_regime_signal(regime)
+            self._log.info(
+                "Queen regime bijgewerkt | oud=%s nieuw=%s bron=rs_regime_ant",
+                old_regime or "UNKNOWN",
+                regime,
+            )
+        return regime
+
+    def _read_latest_queen_regime(self) -> str | None:
+        if self._logs_root is None:
+            return None
+        try:
+            from ant_colony.ants._queen_regime import read_latest_queen_regime
+            return read_latest_queen_regime(self._logs_root)
+        except Exception:
+            return None
 
     # ------------------------------------------------------------------
     # Weekend / markturen protocol

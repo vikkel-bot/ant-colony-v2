@@ -80,6 +80,20 @@ def write_research_record(tmp_path: Path, candidate_id: str, symbol: str = "BTC-
         fh.write(json.dumps(record) + "\n")
 
 
+def write_rs_regime(tmp_path: Path, regime: str) -> None:
+    rs_dir = tmp_path / "rs_regime"
+    rs_dir.mkdir(parents=True, exist_ok=True)
+    record = {
+        "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+        "payload": {
+            "action": "regime_signal",
+            "regime": regime,
+        },
+    }
+    with (rs_dir / "rs.jsonl").open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record) + "\n")
+
+
 def write_trade(
     tmp_path: Path,
     symbol: str,
@@ -1072,3 +1086,29 @@ class TestWeekendLogging:
 
         decision = advisor.advise()
         assert "paper-btc" in decision.kapitaal_verhogen
+
+
+class TestRSRegimeSync:
+    def test_sync_rs_regime_updates_queen_regime_immediately(self, tmp_path, caplog):
+        advisor = make_advisor(tmp_path)
+        write_rs_regime(tmp_path, "RISK_ON")
+
+        with caplog.at_level("INFO", logger="ant_colony.queen.queen_advisor.advisor"):
+            regime = advisor.sync_rs_regime_once()
+
+        assert regime == "RISK_ON"
+        regime_path = tmp_path / "queen" / "regime.jsonl"
+        records = [json.loads(line) for line in regime_path.read_text().splitlines()]
+        assert records[-1]["payload"]["regime"] == "RISK_ON"
+        assert any("Queen regime bijgewerkt" in record.message for record in caplog.records)
+
+    def test_advise_prefers_rs_regime_over_research_regime(self, tmp_path):
+        advisor = make_advisor(tmp_path)
+        write_rs_regime(tmp_path, "RISK_ON")
+        _write_research_with_regime(tmp_path, str(uuid.uuid4()), "sideways")
+
+        advisor.advise()
+
+        regime_path = tmp_path / "queen" / "regime.jsonl"
+        records = [json.loads(line) for line in regime_path.read_text().splitlines()]
+        assert records[-1]["payload"]["regime"] == "RISK_ON"

@@ -66,6 +66,7 @@ _SIGNAL_VALIDITY_TICKS = 2       # signal geldig voor heartbeat_interval × 2 se
 _MAX_OPEN_POSITIONS    = 10      # maximaal 10 open posities tegelijk (1 per symbool)
 _STALE_SIGNAL_MINUTES  = 5       # signalen ouder dan dit worden genegeerd
 _ZOMBIE_POSITION_HOURS = 168     # posities zonder close ouder dan dit → zombie (7 dagen)
+_PAPER_CANDIDATE_WATCHDOG_SECONDS = 15 * 60
 
 # --- Regime-gebaseerde entry filtering ---
 _SIDEWAYS_ALLOWED_STRATEGY_TYPES = frozenset(["mean_reversion", "rsi_based"])
@@ -113,8 +114,9 @@ class PaperAnt:
 
         self._processed_signals: set[str] = set()
         self._seen_approved_ids: set[str] = set()
-        # Pre-loaden bij startup: alle bestaande candidate_ids als gezien markeren
-        # zodat historische kandidaten niet opnieuw verwerkt worden na herstart.
+        # Pre-loaden bij startup: alleen oude candidate_ids als gezien markeren.
+        # Verse candidates blijven in de queue zodat PaperAnt na een herstart
+        # geen net-geaccepteerde ResearchAnt kandidaten mist.
         self._seen_research_ids: set[str] = self._preload_seen_research_ids(logs_root)
 
         self._status: AntStatus = AntStatus.IDLE
@@ -123,6 +125,8 @@ class PaperAnt:
         self._log_seq: int = 0
 
         self._log = logging.getLogger(f"ant.paper.{ant_id[:8]}")
+        self._last_candidate_processed_at = time.monotonic()
+        self._paper_watchdog_restarts = 0
 
         # Scout-posities: per symbool (1 per symbool tegelijk).
         self._open_symbols: set[str] = self._load_open_symbols_from_logs()
@@ -225,6 +229,11 @@ class PaperAnt:
         scout_count    = self._process_new_signals(regime=regime)
         approved_count = self._process_approved_candidates(regime=regime)
         research_count = self._process_research_candidates(regime=regime)
+        candidate_count = approved_count + research_count
+        if candidate_count > 0:
+            self._last_candidate_processed_at = time.monotonic()
+        else:
+            self._paper_candidate_watchdog(regime=regime)
         opened = len(self._ledger.open_positions) - open_before
         filtered = 1 if not trading_allowed else 0
         self._log.info(
@@ -360,6 +369,88 @@ class PaperAnt:
             return (datetime.now(tz=timezone.utc) - ts) > timedelta(minutes=_STALE_SIGNAL_MINUTES)
         except (ValueError, TypeError):
             return False
+
+    def _paper_candidate_watchdog(self, regime: str | None = None) -> None:
+        """Herstart de paper-evaluatie als verse candidates in de queue blijven staan."""
+        if not self._is_trading_allowed():
+            return
+        pending = self._count_pending_candidates()
+        if pending <= 0:
+            return
+        idle_for = time.monotonic() - self._last_candidate_processed_at
+        if idle_for < _PAPER_CANDIDATE_WATCHDOG_SECONDS:
+            return
+        self._paper_watchdog_restarts += 1
+        self._log.error(
+            "PaperAnt watchdog | pending_candidates=%d idle=%.0fs — herstart paper-evaluatie cyclus",
+            pending,
+            idle_for,
+        )
+        approved_count = self._process_approved_candidates(regime=regime)
+        research_count = self._process_research_candidates(regime=regime)
+        if approved_count + research_count > 0:
+            self._last_candidate_processed_at = time.monotonic()
+
+    def _count_pending_candidates(self) -> int:
+        """Aantal verse accepted/approved candidates die nog niet gezien zijn."""
+        if self.logs_root is None:
+            return 0
+        return self._count_pending_research_candidates() + self._count_pending_approved_candidates()
+
+    def _count_pending_research_candidates(self) -> int:
+        if self.logs_root is None:
+            return 0
+        research_dir = self.logs_root / "research"
+        if not research_dir.exists():
+            return 0
+        pending = 0
+        for jsonl_path in sorted(research_dir.glob("*.jsonl")):
+            try:
+                for line in jsonl_path.read_text(encoding="utf-8").splitlines():
+                    if not line.strip():
+                        continue
+                    try:
+                        record = json.loads(line)
+                        payload = record.get("payload") or {}
+                    except json.JSONDecodeError:
+                        continue
+                    if payload.get("action") != "candidate_accepted":
+                        continue
+                    candidate_id = str(payload.get("candidate_id") or "")
+                    if not candidate_id or candidate_id in self._seen_research_ids:
+                        continue
+                    if self._is_stale_timestamp(record.get("timestamp")):
+                        continue
+                    pending += 1
+            except OSError:
+                continue
+        return pending
+
+    def _count_pending_approved_candidates(self) -> int:
+        if self.logs_root is None:
+            return 0
+        approved_dir = self.logs_root / "approved"
+        if not approved_dir.exists():
+            return 0
+        pending = 0
+        for jsonl_path in sorted(approved_dir.glob("*.jsonl")):
+            try:
+                for line in jsonl_path.read_text(encoding="utf-8").splitlines():
+                    if not line.strip():
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    candidate_id = str(record.get("candidate_id") or "")
+                    if not candidate_id or candidate_id in self._seen_approved_ids:
+                        continue
+                    if self._is_stale_timestamp(record.get("timestamp")):
+                        continue
+                    pending += 1
+            except OSError:
+                continue
+        return pending
 
     def _is_zombie_position(self, ts_str: str, now: datetime, *, biome: str = "") -> bool:
         """True als een ongesloten positie ouder is dan _ZOMBIE_POSITION_HOURS.
@@ -624,10 +715,10 @@ class PaperAnt:
     @staticmethod
     def _preload_seen_research_ids(logs_root: Path | None) -> set[str]:
         """
-        Scan ANT_LOGS/research/*.jsonl bij startup en retourneer alle candidate_ids.
+        Scan ANT_LOGS/research/*.jsonl bij startup en retourneer oude candidate_ids.
 
-        Doel: voorkomt dat historische kandidaten opnieuw verwerkt worden na herstart.
-        Alleen kandidaten die ná startup binnenkomen worden als 'nieuw' beschouwd.
+        Doel: voorkomt dat historische kandidaten opnieuw verwerkt worden na herstart,
+        maar laat verse candidates in de queue staan voor PaperAnt.
         """
         seen: set[str] = set()
         if logs_root is None:
@@ -641,13 +732,17 @@ class PaperAnt:
                     if not line.strip():
                         continue
                     try:
-                        payload = json.loads(line).get("payload") or {}
+                        record = json.loads(line)
+                        payload = record.get("payload") or {}
                     except json.JSONDecodeError:
                         continue
                     if payload.get("action") != "candidate_accepted":
                         continue
                     cid = str(payload.get("candidate_id") or "")
-                    if cid:
+                    if cid and (
+                        not record.get("timestamp")
+                        or PaperAnt._is_stale_timestamp(record.get("timestamp"))
+                    ):
                         seen.add(cid)
             except OSError:
                 pass
