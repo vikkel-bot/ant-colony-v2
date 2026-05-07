@@ -69,6 +69,13 @@ function Find-IbgatewayExe {
 
 Write-IbgLog "IB Gateway restart check gestart | host=$HostName port=$Port"
 
+$existingGateway = Get-Process -Name "ibgateway", "IBGateway" -ErrorAction SilentlyContinue |
+    Select-Object -First 1
+if ($existingGateway) {
+    Write-IbgLog "IB Gateway al actief — geen herstart nodig"
+    exit 0
+}
+
 if (Test-IbgPort -TargetHost $HostName -TargetPort $Port) {
     Write-IbgLog "IB Gateway poort is al bereikbaar | host=$HostName port=$Port"
     exit 0

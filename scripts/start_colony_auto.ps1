@@ -53,6 +53,33 @@ function Test-Port {
     }
 }
 
+function Get-PortProcessIds {
+    param([int]$TargetPort)
+    try {
+        Get-NetTCPConnection -LocalPort $TargetPort -State Listen -ErrorAction Stop |
+            Select-Object -ExpandProperty OwningProcess -Unique
+    }
+    catch {
+        @()
+    }
+}
+
+function Stop-ColonyPortOwner {
+    param([int]$TargetPort)
+    $ownerPids = @(Get-PortProcessIds -TargetPort $TargetPort)
+    foreach ($ownerPid in $ownerPids) {
+        if ($ownerPid -and $ownerPid -ne $PID) {
+            try {
+                Write-AutoLog "Stop oude Colony instantie op poort $TargetPort | pid=$ownerPid"
+                Stop-Process -Id $ownerPid -Force
+            }
+            catch {
+                Write-AutoLog "Kon oude Colony instantie niet stoppen | pid=$ownerPid | $($_.Exception.Message)"
+            }
+        }
+    }
+}
+
 function Wait-Network {
     param([int]$MaxSeconds = 60)
     $deadline = (Get-Date).AddSeconds($MaxSeconds)
@@ -166,6 +193,8 @@ while ($true) {
 
     Update-LastSeen
     Write-AutoLog "Colony start | capital=$effectiveCapital port=$Port"
+    Stop-ColonyPortOwner -TargetPort $Port
+    Start-Sleep -Seconds 2
     & $PythonPath $startScript --capital $effectiveCapital --port $Port
     $exitCode = $LASTEXITCODE
     Write-AutoLog "Colony proces gestopt | exit_code=$exitCode | herstart over 30s"
