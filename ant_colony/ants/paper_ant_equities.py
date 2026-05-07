@@ -61,6 +61,7 @@ _HARD_SL_PCT            = 0.07    # 7% harde SL onder entry_price
 _DUMMY_TP_MULTIPLIER    = 2.0     # dummy TP = entry * 2 (voldoet aan PaperPosition schema)
 _TRADE_CAPITAL_FRACTION = 0.10    # 10% van beschikbaar kapitaal per trade
 _MAX_OPEN_POSITIONS     = 10      # max open posities tegelijk
+_SECTOR_RANKING_ENTRY_LIMIT = 3   # SectorScoutAnt emitteert LONG voor top-3
 
 # NYSE / IBKR reguliere handelsuren in Amsterdam-tijd
 _AMS_TZ             = ZoneInfo("Europe/Amsterdam")
@@ -226,12 +227,44 @@ class EquitiesPaperAnt:
         """Één handelscyclus (P3: exit vóór entry)."""
         in_market = self._is_market_open()
         self._process_exits(advance_trading_time=in_market)
+        open_before = len(self._ledger.open_positions)
+        stats = {
+            "scout": 0,
+            "research": 0,
+            "approved": 0,
+            "filtered": 0,
+        }
         if in_market:
-            self._process_scout_signals()
-            self._process_breakout_signals()
-            self._process_dividend_candidates()
-            self._process_watchtower_candidates()
+            scout_stats = self._process_scout_signals()
+            stats["scout"] += scout_stats["received"]
+            stats["filtered"] += scout_stats["filtered"]
+            stats["approved"] += scout_stats["opened"]
 
+            for processor in (
+                self._process_breakout_signals,
+                self._process_dividend_candidates,
+                self._process_watchtower_candidates,
+            ):
+                result = processor()
+                stats["approved"] += result["opened"]
+                stats["filtered"] += result["filtered"]
+        else:
+            self._log.info(
+                "EqPaper markt gesloten — entries overgeslagen | regime=%s open_posities=%d",
+                self._latest_equity_regime(),
+                len(self._ledger.open_positions),
+            )
+
+        opened = max(0, len(self._ledger.open_positions) - open_before)
+        self._log.info(
+            "paper tick | regime=%s scout=%d research=%d approved=%d filtered=%s opened=%d",
+            self._latest_equity_regime(),
+            stats["scout"],
+            stats["research"],
+            stats["approved"],
+            stats["filtered"],
+            opened,
+        )
         self._last_action = "tick"
 
     # ------------------------------------------------------------------
@@ -362,8 +395,8 @@ class EquitiesPaperAnt:
     def _is_momentum_exit_eligible(self, position: PaperPosition) -> bool:
         return self._position_sources.get(position.position_id, "sector_scout") == "sector_scout"
 
-    def _latest_sector_scout_top_symbols(self, *, limit: int = 5) -> set[str] | None:
-        """Lees de meest recente sector_scout ranking snapshot en retourneer top-N symbolen."""
+    def _latest_sector_scout_ranking_payload(self) -> dict | None:
+        """Lees de meest recente sector_scout ranking snapshot payload."""
         if self.logs_root is None:
             return None
         ranking_dir = self.logs_root / "equities" / "sector_scout"
@@ -371,7 +404,7 @@ class EquitiesPaperAnt:
             return None
 
         latest_ts: datetime | None = None
-        latest_ranking: list[dict] | None = None
+        latest_payload: dict | None = None
         for path in sorted(ranking_dir.glob("*.jsonl")):
             try:
                 for line in path.read_text(encoding="utf-8").splitlines():
@@ -390,10 +423,18 @@ class EquitiesPaperAnt:
                     ts = _parse_iso_datetime(record.get("timestamp"))
                     if latest_ts is None or (ts is not None and ts >= latest_ts):
                         latest_ts = ts or latest_ts
-                        latest_ranking = ranking
+                        latest_payload = payload
             except OSError:
                 self._log.warning("Kan sector_scout ranking niet lezen: %s", path)
 
+        return latest_payload
+
+    def _latest_sector_scout_top_symbols(self, *, limit: int = 5) -> set[str] | None:
+        """Lees de meest recente sector_scout ranking snapshot en retourneer top-N symbolen."""
+        latest_payload = self._latest_sector_scout_ranking_payload()
+        if not latest_payload:
+            return None
+        latest_ranking = latest_payload.get("ranking") or []
         if not latest_ranking:
             return None
         ordered = sorted(latest_ranking, key=lambda row: int(row.get("rank") or 999))
@@ -437,67 +478,138 @@ class EquitiesPaperAnt:
     # Signaalverwerking
     # ------------------------------------------------------------------
 
-    def _process_scout_signals(self) -> None:
+    def _process_scout_signals(self) -> dict[str, int]:
         """Verwerk opportunity_detected signalen met biome=equities uit scouts/."""
+        stats = {"received": 0, "filtered": 0, "opened": 0}
         if self.logs_root is None:
-            return
+            return stats
         scout_dir = self.logs_root / "scouts"
-        if not scout_dir.exists():
-            return
 
         # Bearish-filter: bij negatief nieuws alleen top-1 sector (rank=1) toestaan
         mkt = read_latest_market_signal(self.logs_root)
         news_bearish = (mkt or {}).get("news_sentiment") == "bearish"
 
-        for path in sorted(scout_dir.glob("*.jsonl")):
-            try:
-                for line in path.read_text(encoding="utf-8").splitlines():
-                    if not line.strip():
-                        continue
-                    try:
-                        record  = json.loads(line)
-                        payload = record.get("payload") or {}
-                    except json.JSONDecodeError:
-                        continue
+        if scout_dir.exists():
+            for path in sorted(scout_dir.glob("*.jsonl")):
+                try:
+                    for line in path.read_text(encoding="utf-8").splitlines():
+                        if not line.strip():
+                            continue
+                        try:
+                            record  = json.loads(line)
+                            payload = record.get("payload") or {}
+                        except json.JSONDecodeError:
+                            continue
 
-                    if payload.get("action") != "opportunity_detected":
-                        continue
-                    if str(payload.get("biome") or "") != "equities":
-                        continue
+                        if payload.get("action") != "opportunity_detected":
+                            continue
+                        if str(payload.get("biome") or "") != "equities":
+                            continue
 
-                    sig_id = str(payload.get("signal_id") or "")
-                    if not sig_id or sig_id in self._seen_scout_ids:
-                        continue
-                    self._seen_scout_ids.add(sig_id)
+                        sig_id = str(payload.get("signal_id") or "")
+                        if not sig_id or sig_id in self._seen_scout_ids:
+                            continue
+                        self._seen_scout_ids.add(sig_id)
+                        stats["received"] += 1
 
-                    confidence = float(payload.get("confidence") or 0.0)
-                    if confidence < _CONFIDENCE_THRESHOLD:
-                        continue
+                        symbol = str(payload.get("symbol") or "").upper()
+                        if not symbol:
+                            stats["filtered"] += 1
+                            self._log_equity_evaluation("", "FILTER", "missing_symbol")
+                            continue
 
-                    symbol = str(payload.get("symbol") or "")
-                    if not symbol or symbol in self._open_symbols:
-                        continue
+                        confidence = float(payload.get("confidence") or 0.0)
+                        if confidence < _CONFIDENCE_THRESHOLD:
+                            stats["filtered"] += 1
+                            self._log_equity_evaluation(
+                                symbol,
+                                "FILTER",
+                                f"confidence_below_threshold:{confidence:.2f}",
+                            )
+                            continue
 
-                    momentum_rank = int(payload.get("momentum_rank") or 0)
-                    if news_bearish and momentum_rank > 1:
-                        self._log.debug(
-                            "Bearish nieuws — %s rank=%d overgeslagen (alleen top-1 toegestaan)",
-                            symbol, momentum_rank,
-                        )
-                        continue
+                        momentum_rank = int(payload.get("momentum_rank") or 0)
+                        if news_bearish and momentum_rank > 1:
+                            stats["filtered"] += 1
+                            self._log_equity_evaluation(
+                                symbol,
+                                "FILTER",
+                                f"bearish_news_rank:{momentum_rank}",
+                            )
+                            continue
 
-                    self._try_open_position(symbol, source="sector_scout")
+                        if self._try_open_position(symbol, source="sector_scout"):
+                            stats["opened"] += 1
+                        else:
+                            stats["filtered"] += 1
 
-            except OSError:
-                self._log.warning("Kan scout-log niet lezen: %s", path)
+                except OSError:
+                    self._log.warning("Kan scout-log niet lezen: %s", path)
 
-    def _process_breakout_signals(self) -> None:
+        if stats["received"] == 0:
+            ranking_stats = self._process_sector_ranking_entries(news_bearish=news_bearish)
+            for key in stats:
+                stats[key] += ranking_stats[key]
+        return stats
+
+    def _process_sector_ranking_entries(self, *, news_bearish: bool) -> dict[str, int]:
+        """Fallback-intake: gebruik nieuwste sector_ranking snapshot als entrybron."""
+        stats = {"received": 0, "filtered": 0, "opened": 0}
+        payload = self._latest_sector_scout_ranking_payload()
+        if not payload:
+            self._log.debug("EqPaper sector_scout ranking niet gevonden")
+            return stats
+
+        ranking = payload.get("ranking") or []
+        if not isinstance(ranking, list) or not ranking:
+            self._log.debug("EqPaper sector_scout ranking leeg of ongeldig")
+            return stats
+
+        ordered = sorted(ranking, key=lambda row: int(row.get("rank") or 999))
+        top_symbols = [str(row.get("symbol") or "").upper() for row in ordered[:_SECTOR_RANKING_ENTRY_LIMIT]]
+        self._log.info(
+            "EqPaper sector_scout ranking ontvangen | items=%d top3=%s",
+            len(ordered),
+            ",".join(symbol for symbol in top_symbols if symbol),
+        )
+
+        ranking_date = str(payload.get("ranking_date") or datetime.now(tz=timezone.utc).date().isoformat())
+        for row in ordered[:_SECTOR_RANKING_ENTRY_LIMIT]:
+            symbol = str(row.get("symbol") or "").upper()
+            if not symbol:
+                stats["filtered"] += 1
+                self._log_equity_evaluation("", "FILTER", "ranking_missing_symbol")
+                continue
+            signal_state = str(row.get("signal") or "").upper()
+            rank = int(row.get("rank") or 999)
+            if signal_state != "LONG" or rank > _SECTOR_RANKING_ENTRY_LIMIT:
+                continue
+
+            sig_id = f"sector-ranking-{symbol.lower()}-{ranking_date}"
+            if sig_id in self._seen_scout_ids:
+                continue
+            self._seen_scout_ids.add(sig_id)
+            stats["received"] += 1
+
+            if news_bearish and rank > 1:
+                stats["filtered"] += 1
+                self._log_equity_evaluation(symbol, "FILTER", f"bearish_news_rank:{rank}")
+                continue
+
+            if self._try_open_position(symbol, source="sector_scout"):
+                stats["opened"] += 1
+            else:
+                stats["filtered"] += 1
+        return stats
+
+    def _process_breakout_signals(self) -> dict[str, int]:
         """Verwerk breakout_signal records uit equities/breakout/."""
+        stats = {"received": 0, "filtered": 0, "opened": 0}
         if self.logs_root is None:
-            return
+            return stats
         breakout_dir = self.logs_root / "equities" / "breakout"
         if not breakout_dir.exists():
-            return
+            return stats
 
         for path in sorted(breakout_dir.glob("*.jsonl")):
             try:
@@ -519,23 +631,31 @@ class EquitiesPaperAnt:
                     if not sig_id or sig_id in self._seen_breakout_ids:
                         continue
                     self._seen_breakout_ids.add(sig_id)
+                    stats["received"] += 1
 
-                    symbol = str(payload.get("symbol") or "")
-                    if not symbol or symbol in self._open_symbols:
+                    symbol = str(payload.get("symbol") or "").upper()
+                    if not symbol:
+                        stats["filtered"] += 1
+                        self._log_equity_evaluation("", "FILTER", "breakout_missing_symbol")
                         continue
 
-                    self._try_open_position(symbol, source="breakout_ant")
+                    if self._try_open_position(symbol, source="breakout_ant"):
+                        stats["opened"] += 1
+                    else:
+                        stats["filtered"] += 1
 
             except OSError:
                 self._log.warning("Kan breakout-log niet lezen: %s", path)
+        return stats
 
-    def _process_dividend_candidates(self) -> None:
+    def _process_dividend_candidates(self) -> dict[str, int]:
         """Verwerk dividend_candidate records uit equities/dividend/."""
+        stats = {"received": 0, "filtered": 0, "opened": 0}
         if self.logs_root is None:
-            return
+            return stats
         dividend_dir = self.logs_root / "equities" / "dividend"
         if not dividend_dir.exists():
-            return
+            return stats
 
         for path in sorted(dividend_dir.glob("*.jsonl")):
             try:
@@ -557,29 +677,37 @@ class EquitiesPaperAnt:
                     if not sig_id or sig_id in self._seen_dividend_ids:
                         continue
                     self._seen_dividend_ids.add(sig_id)
+                    stats["received"] += 1
 
-                    symbol = str(payload.get("symbol") or "")
-                    if not symbol or symbol in self._open_symbols:
+                    symbol = str(payload.get("symbol") or "").upper()
+                    if not symbol:
+                        stats["filtered"] += 1
+                        self._log_equity_evaluation("", "FILTER", "dividend_missing_symbol")
                         continue
 
-                    self._try_open_position(symbol, source="dividend_scout")
+                    if self._try_open_position(symbol, source="dividend_scout"):
+                        stats["opened"] += 1
+                    else:
+                        stats["filtered"] += 1
 
             except OSError:
                 self._log.warning("Kan dividend-log niet lezen: %s", path)
+        return stats
 
-    def _process_watchtower_candidates(self) -> None:
+    def _process_watchtower_candidates(self) -> dict[str, int]:
         """Verwerk door WatchtowerAnt geaccepteerde equity-candidates."""
+        stats = {"received": 0, "filtered": 0, "opened": 0}
         if self.logs_root is None:
-            return
+            return stats
         candidate_path = self.logs_root / "watchtower" / "candidates.jsonl"
         if not candidate_path.exists():
-            return
+            return stats
 
         try:
             lines = candidate_path.read_text(encoding="utf-8").splitlines()
         except OSError:
             self._log.warning("Kan Watchtower candidate-log niet lezen: %s", candidate_path)
-            return
+            return stats
 
         for line in lines:
             if not line.strip():
@@ -599,21 +727,34 @@ class EquitiesPaperAnt:
             if not sig_id or sig_id in self._seen_watchtower_ids:
                 continue
             self._seen_watchtower_ids.add(sig_id)
+            stats["received"] += 1
 
             direction = str(payload.get("direction") or "").lower()
             if direction != "long":
+                stats["filtered"] += 1
+                self._log_equity_evaluation(
+                    str(payload.get("symbol") or payload.get("asset") or "").upper(),
+                    "FILTER",
+                    f"watchtower_direction:{direction or 'missing'}",
+                )
                 continue
 
             symbol = str(payload.get("symbol") or payload.get("asset") or "").upper()
-            if not symbol or symbol in self._open_symbols:
+            if not symbol:
+                stats["filtered"] += 1
+                self._log_equity_evaluation("", "FILTER", "watchtower_missing_symbol")
                 continue
 
-            self._try_open_position(
+            if self._try_open_position(
                 symbol,
                 source="watchtower",
                 watchtower_signal_id=sig_id,
                 position_scale=_WATCHTOWER_POSITION_SCALE,
-            )
+            ):
+                stats["opened"] += 1
+            else:
+                stats["filtered"] += 1
+        return stats
 
     # ------------------------------------------------------------------
     # Positie openen
@@ -626,21 +767,21 @@ class EquitiesPaperAnt:
         source: str,
         watchtower_signal_id: str | None = None,
         position_scale: float = 1.0,
-    ) -> None:
+    ) -> bool:
         """Probeer een LONG positie te openen voor het gegeven symbool."""
+        symbol = symbol.upper()
         if symbol in self._open_symbols:
-            return
+            self._log_equity_evaluation(symbol, "FILTER", "already_open")
+            return False
 
         if len(self._ledger.open_positions) >= _MAX_OPEN_POSITIONS:
-            self._log.debug(
-                "Max posities bereikt (%d) — %s overgeslagen", _MAX_OPEN_POSITIONS, symbol
-            )
-            return
+            self._log_equity_evaluation(symbol, "FILTER", "max_positions_reached")
+            return False
 
         price = self._fetch_price(symbol)
         if price is None or price <= 0:
-            self._log.debug("Geen live prijs voor %s — positie niet geopend", symbol)
-            return
+            self._log_equity_evaluation(symbol, "FILTER", "no_live_price")
+            return False
 
         capital_available = self._ledger.capital_available
         capital_fraction  = _TRADE_CAPITAL_FRACTION
@@ -663,8 +804,8 @@ class EquitiesPaperAnt:
         capital_fraction *= position_scale
         capital_per_trade = capital_available * capital_fraction
         if capital_per_trade <= 0:
-            self._log.debug("Geen kapitaal beschikbaar — %s overgeslagen", symbol)
-            return
+            self._log_equity_evaluation(symbol, "FILTER", "no_capital_available")
+            return False
 
         quantity = capital_per_trade / price
         sl_price = price * (1.0 - hard_sl_pct)
@@ -690,7 +831,8 @@ class EquitiesPaperAnt:
             )
         except Exception:
             self._log.exception("Kan PaperPosition niet aanmaken voor %s", symbol)
-            return
+            self._log_equity_evaluation(symbol, "FILTER", "position_create_error")
+            return False
 
         self._open_symbols.add(symbol)
         self._peak_prices[position.position_id] = price
@@ -703,6 +845,33 @@ class EquitiesPaperAnt:
         self._log.info(
             "POSITIE GEOPEND | %s LONG %.6f @ %.4f  SL=%.4f  trailing=5%%  bron=%s",
             symbol, quantity, price, sl_price, source,
+        )
+        self._log_equity_evaluation(symbol, "OPEN", source)
+        return True
+
+    def _latest_equity_regime(self) -> str:
+        if self.logs_root is None:
+            return "UNKNOWN"
+        try:
+            from ant_colony.ants.equities.rs_regime_ant import read_latest_rs_regime
+
+            payload = read_latest_rs_regime(self.logs_root)
+            if payload and payload.get("regime"):
+                return str(payload["regime"]).upper()
+        except Exception:
+            self._log.debug("Kan RS-regime niet lezen voor EqPaper logging", exc_info=True)
+        return "UNKNOWN"
+
+    def _log_equity_evaluation(self, symbol: str, decision: str, reason: str) -> None:
+        self._log.info(
+            "EqPaper evaluatie | symbol=%s regime=%s kapitaal=%.2f open_posities=%d max_posities=%d beslissing=%s reden=%s",
+            symbol or "UNKNOWN",
+            self._latest_equity_regime(),
+            self._ledger.capital_available,
+            len(self._ledger.open_positions),
+            _MAX_OPEN_POSITIONS,
+            decision,
+            reason,
         )
 
     # ------------------------------------------------------------------

@@ -682,8 +682,37 @@ class TestSignalProcessing:
         ant = _make_ant(tmp_path)
         self._mock_price(ant, 200.0)
         self._write_scout_signal(tmp_path, symbol="AAPL", signal_id="sig-001")
-        ant._process_scout_signals()
+        stats = ant._process_scout_signals()
         assert "AAPL" in ant._open_symbols
+        assert stats["received"] == 1
+        assert stats["opened"] == 1
+
+    def test_sector_ranking_snapshot_opens_position_when_opportunity_log_missing(self, tmp_path):
+        ant = _make_ant(tmp_path)
+        self._mock_price(ant, 100.0)
+        _write_sector_ranking(tmp_path, ["XLK", "XLE", "XLU", "XLF"])
+
+        stats = ant._process_scout_signals()
+
+        assert {"XLK", "XLE", "XLU"}.issubset(ant._open_symbols)
+        assert "XLF" not in ant._open_symbols
+        assert stats["received"] == 3
+        assert stats["opened"] == 3
+
+    def test_sector_ranking_snapshot_logs_existing_position_filter(self, tmp_path, caplog):
+        ant = _make_ant(tmp_path)
+        self._mock_price(ant, 100.0)
+        ant._open_symbols.add("XLK")
+        _write_sector_ranking(tmp_path, ["XLK", "XLE", "XLU"])
+
+        with caplog.at_level("INFO", logger=f"ant.eq_paper.{ant.ant_id[:8]}"):
+            stats = ant._process_scout_signals()
+
+        assert stats["received"] == 3
+        assert stats["filtered"] == 1
+        assert stats["opened"] == 2
+        assert any("EqPaper sector_scout ranking ontvangen" in rec.message for rec in caplog.records)
+        assert any("reden=already_open" in rec.message for rec in caplog.records)
 
     def test_breakout_signal_opens_position(self, tmp_path):
         ant = _make_ant(tmp_path)
