@@ -63,6 +63,11 @@ class TestSchedulerInstantiation:
         s = make_scheduler(tmp_path)
         assert s.status == ColonyStatus.RUNNING
 
+    def test_dashboard_heartbeat_interval_defaults_to_10s(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("COLONY_DASHBOARD_HEARTBEAT_SECONDS", raising=False)
+        s = make_scheduler(tmp_path)
+        assert s._dashboard_heartbeat_seconds == 10
+
     def test_default_watchdog_threshold_targets_sub_minute_ticks(self, tmp_path):
         s = make_scheduler(tmp_path)
         assert s._watchdog_threshold_seconds == 60
@@ -143,6 +148,17 @@ class TestTick:
         assert s._tick_sequence == 1
         records = read_log(tmp_path / "colony" / "scheduler.jsonl")
         assert any(r.get("event_type") == "scheduler_watchdog_stale" for r in records)
+
+    def test_dashboard_heartbeat_writes_without_scheduler_tick(self, tmp_path):
+        s = make_scheduler(tmp_path)
+
+        s._write_dashboard_heartbeat()
+
+        records = read_log(tmp_path / "colony" / "scheduler.jsonl")
+        assert len(records) == 1
+        assert records[0]["event_type"] == "dashboard_heartbeat"
+        assert records[0]["sequence"] == 0
+        assert "seconds_since_last_tick" in records[0]
 
 
 # ---------------------------------------------------------------------------

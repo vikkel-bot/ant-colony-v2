@@ -7,7 +7,7 @@ Responsibilities:
   - Abort condition polling
   - Mission dispatch
   - Colony status management
-  - Append-only tick log to ANT_LOGS\\colony\\scheduler.jsonl
+  - Append-only tick and dashboard heartbeat log to ANT_LOGS\\colony\\scheduler.jsonl
 
 Rules:
   - Runs always; is never an afterthought
@@ -154,6 +154,12 @@ class ColonyScheduler:
         self._watchdog_stop = threading.Event()
         self._watchdog_thread: threading.Thread | None = None
         self._last_watchdog_recovery_at: datetime | None = None
+        self._dashboard_heartbeat_seconds = max(
+            1,
+            int(os.getenv("COLONY_DASHBOARD_HEARTBEAT_SECONDS", "10")),
+        )
+        self._dashboard_heartbeat_stop = threading.Event()
+        self._dashboard_heartbeat_thread: threading.Thread | None = None
 
         self._scheduler_log_path = logs_root / "colony" / "scheduler.jsonl"
 
@@ -177,6 +183,7 @@ class ColonyScheduler:
         logger.info("Scheduler starting. tick_interval=%ds", self._tick_interval)
         self._log_event(AuditEventType.COLONY_HALTED, source="scheduler", payload={"action": "start"})
         self._start_watchdog()
+        self._start_dashboard_heartbeat()
 
         try:
             while self._status == ColonyStatus.RUNNING:
@@ -189,6 +196,7 @@ class ColonyScheduler:
         except KeyboardInterrupt:
             logger.info("Scheduler stopped by KeyboardInterrupt.")
         finally:
+            self._stop_dashboard_heartbeat()
             self._stop_watchdog()
             logger.info("Scheduler exited. Final status: %s", self._status)
 
@@ -456,6 +464,60 @@ class ColonyScheduler:
                 fh.write(json.dumps(record, default=str) + "\n")
         except OSError:
             logger.exception("Failed to write to log: %s", path)
+
+    # ------------------------------------------------------------------
+    # Internal — dashboard heartbeat
+    # ------------------------------------------------------------------
+
+    def _start_dashboard_heartbeat(self) -> None:
+        if self._dashboard_heartbeat_seconds <= 0:
+            return
+        if (
+            self._dashboard_heartbeat_thread is not None
+            and self._dashboard_heartbeat_thread.is_alive()
+        ):
+            return
+        self._dashboard_heartbeat_stop.clear()
+        self._dashboard_heartbeat_thread = threading.Thread(
+            target=self._dashboard_heartbeat_loop,
+            name="colony-dashboard-heartbeat",
+            daemon=True,
+        )
+        self._dashboard_heartbeat_thread.start()
+
+    def _stop_dashboard_heartbeat(self) -> None:
+        self._dashboard_heartbeat_stop.set()
+        if (
+            self._dashboard_heartbeat_thread is not None
+            and self._dashboard_heartbeat_thread.is_alive()
+        ):
+            self._dashboard_heartbeat_thread.join(timeout=1.0)
+
+    def _dashboard_heartbeat_loop(self) -> None:
+        self._write_dashboard_heartbeat()
+        while not self._dashboard_heartbeat_stop.wait(self._dashboard_heartbeat_seconds):
+            self._write_dashboard_heartbeat()
+
+    def _write_dashboard_heartbeat(self) -> None:
+        """Schrijf dashboard-liveness los van scheduler ticks en agent-logica."""
+        now = datetime.now(tz=timezone.utc)
+        try:
+            seconds_since_last_tick = self.seconds_since_last_tick()
+        except Exception:
+            seconds_since_last_tick = None
+        self._append_to_log(
+            self._scheduler_log_path,
+            {
+                "event_type": "dashboard_heartbeat",
+                "sequence": self._tick_sequence,
+                "timestamp": now.isoformat(),
+                "scheduler_status": self._status.value,
+                "last_tick_completed_at": self._last_tick_completed_at.isoformat(),
+                "seconds_since_last_tick": round(seconds_since_last_tick, 3)
+                if seconds_since_last_tick is not None
+                else None,
+            },
+        )
 
     # ------------------------------------------------------------------
     # Internal — scheduler liveness watchdog
