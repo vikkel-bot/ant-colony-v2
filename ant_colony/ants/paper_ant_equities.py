@@ -14,7 +14,7 @@ Verantwoordelijkheden:
   3. Exit-logica (P3: exit vóór entry, elke tick):
        a. Trailing stop: sluit als current_price < peak_price * (1 - TRAILING_STOP_PCT)
        b. Harde SL: sluit als current_price < entry_price * (1 - HARD_SL_PCT)
-       c. Momentum-exit: sector_scout-posities sluiten als momentum twee ticks wegvalt
+       c. Momentum-exit: sector_scout-posities sluiten pas na 4h hold en 3 misses
        d. TTL noodrem: 365 dagen voor equity momentum, 14 dagen voor Watchtower
   4. Bijhoudt peak_price per positie; logt position_update events zodat
      peak_price hersteld kan worden na herstart.
@@ -88,8 +88,11 @@ _WATCHTOWER_TTL_DAYS      = 14
 _WATCHTOWER_TTL_SECONDS   = _WATCHTOWER_TTL_DAYS * _SECONDS_PER_DAY
 _MOMENTUM_EXIT_CONSECUTIVE_TICKS = _env_int(
     "EQUITY_MOMENTUM_EXIT_CONSECUTIVE_TICKS",
-    2,
+    3,
+    minimum=3,
 )
+_MOMENTUM_EXIT_MIN_HOLD_SECONDS = 4 * 3600
+_MOMENTUM_EXIT_COOLDOWN_SECONDS = 24 * 3600
 _MOMENTUM_EXIT_TYPE       = "EXIT_MOMENTUM_LOST"
 
 _CONFIDENCE_THRESHOLD    = 0.6
@@ -155,6 +158,7 @@ class EquitiesPaperAnt:
         self._position_sources: dict[str, str] = {}
         self._momentum_miss_counts: dict[str, int] = {}
         self._momentum_exit_pending: set[str] = set()
+        self._momentum_cooldowns: dict[str, datetime] = {}
 
         # Ledger-herstel bij herstart
         self._restore_from_logs()
@@ -332,7 +336,10 @@ class EquitiesPaperAnt:
                 exit_type = "hard_stop_loss"
             elif price < trailing_stop_price:
                 exit_type = "trailing_stop"
-            elif pos_id in self._momentum_exit_pending:
+            elif (
+                pos_id in self._momentum_exit_pending
+                and self._position_age_seconds(position) >= _MOMENTUM_EXIT_MIN_HOLD_SECONDS
+            ):
                 exit_type = _MOMENTUM_EXIT_TYPE
             elif self._position_age_seconds(position) >= self._position_ttl_seconds(position):
                 exit_type = "ttl_trading_days"
@@ -385,6 +392,16 @@ class EquitiesPaperAnt:
         misses = self._momentum_miss_counts.get(pos_id, 0) + 1
         self._momentum_miss_counts[pos_id] = misses
         if misses >= _MOMENTUM_EXIT_CONSECUTIVE_TICKS and pos_id not in self._momentum_exit_pending:
+            age_seconds = self._position_age_seconds(position)
+            if age_seconds < _MOMENTUM_EXIT_MIN_HOLD_SECONDS:
+                self._log.info(
+                    "Momentum-exit uitgesteld | %s age=%.0fs min_hold=%ds ticks=%d",
+                    symbol,
+                    age_seconds,
+                    _MOMENTUM_EXIT_MIN_HOLD_SECONDS,
+                    misses,
+                )
+                return
             self._momentum_exit_pending.add(pos_id)
             self._log.warning(
                 "Momentum-exit gemarkeerd | %s niet in sector_scout top5 ticks=%d",
@@ -394,6 +411,30 @@ class EquitiesPaperAnt:
 
     def _is_momentum_exit_eligible(self, position: PaperPosition) -> bool:
         return self._position_sources.get(position.position_id, "sector_scout") == "sector_scout"
+
+    def _set_momentum_cooldown(self, symbol: str, closed_at: datetime | None = None) -> None:
+        symbol = symbol.upper().strip()
+        if not symbol:
+            return
+        closed_at = closed_at or datetime.now(tz=timezone.utc)
+        if closed_at.tzinfo is None:
+            closed_at = closed_at.replace(tzinfo=timezone.utc)
+        self._momentum_cooldowns[symbol] = closed_at + timedelta(
+            seconds=_MOMENTUM_EXIT_COOLDOWN_SECONDS
+        )
+
+    def _momentum_cooldown_until(self, symbol: str) -> datetime | None:
+        symbol = symbol.upper().strip()
+        cooldown_until = self._momentum_cooldowns.get(symbol)
+        if cooldown_until is None:
+            return None
+        now = datetime.now(tz=timezone.utc)
+        if cooldown_until.tzinfo is None:
+            cooldown_until = cooldown_until.replace(tzinfo=timezone.utc)
+        if cooldown_until <= now:
+            self._momentum_cooldowns.pop(symbol, None)
+            return None
+        return cooldown_until
 
     def _latest_sector_scout_ranking_payload(self) -> dict | None:
         """Lees de meest recente sector_scout ranking snapshot payload."""
@@ -458,6 +499,8 @@ class EquitiesPaperAnt:
             "closed_at":  datetime.now(tz=timezone.utc),
             "exit_reason": exit_type,
         })
+        if exit_type == _MOMENTUM_EXIT_TYPE:
+            self._set_momentum_cooldown(position.symbol, closed.closed_at)
         self._open_symbols.discard(position.symbol)
         self._trading_seconds.pop(position.position_id, None)
         self._peak_prices.pop(position.position_id, None)
@@ -784,6 +827,15 @@ class EquitiesPaperAnt:
             self._log_equity_evaluation(symbol, "FILTER", "already_open")
             return False
 
+        cooldown_until = self._momentum_cooldown_until(symbol)
+        if cooldown_until is not None:
+            self._log_equity_evaluation(
+                symbol,
+                "FILTER",
+                f"momentum_lost_cooldown_until:{cooldown_until.isoformat()}",
+            )
+            return False
+
         if len(self._ledger.open_positions) >= _MAX_OPEN_POSITIONS:
             self._log_equity_evaluation(symbol, "FILTER", "max_positions_reached")
             return False
@@ -924,6 +976,7 @@ class EquitiesPaperAnt:
         peak_updates:   dict[str, float] = {}   # pos_id → laatste bekende peak_price
         trading_secs:   dict[str, float] = {}   # pos_id → geaccumuleerde handelsseconden
         closed_ids:     set[str]         = set()
+        momentum_closed_ts: dict[str, datetime] = {}
 
         for path in paper_dir.glob("*.jsonl"):
             if "_trades" in path.name:
@@ -953,6 +1006,14 @@ class EquitiesPaperAnt:
 
                     elif action == "trade_closed":
                         closed_ids.add(pos_id)
+                        if (
+                            payload.get("exit_type") == _MOMENTUM_EXIT_TYPE
+                            or payload.get("exit_reason") == _MOMENTUM_EXIT_TYPE
+                        ):
+                            closed_at = _parse_iso_datetime(record.get("timestamp"))
+                            if closed_at is None:
+                                closed_at = datetime.now(tz=timezone.utc)
+                            momentum_closed_ts[pos_id] = closed_at
 
                     elif action == "position_update":
                         peak = payload.get("peak_price")
@@ -995,6 +1056,35 @@ class EquitiesPaperAnt:
 
         if restored:
             self._log.info("%d equities positie(s) hersteld in ledger", restored)
+
+        self._restore_momentum_cooldowns(opened, momentum_closed_ts)
+
+    def _restore_momentum_cooldowns(
+        self,
+        opened: dict[str, dict],
+        momentum_closed_ts: dict[str, datetime],
+    ) -> None:
+        """Herstel recente MOMENTUM_LOST cooldowns uit append-only paper logs."""
+        if not momentum_closed_ts:
+            return
+        now = datetime.now(tz=timezone.utc)
+        restored = 0
+        for pos_id, closed_at in momentum_closed_ts.items():
+            opened_payload = opened.get(pos_id) or {}
+            symbol = str(opened_payload.get("symbol") or "").upper().strip()
+            if not symbol:
+                continue
+            if closed_at.tzinfo is None:
+                closed_at = closed_at.replace(tzinfo=timezone.utc)
+            cooldown_until = closed_at + timedelta(seconds=_MOMENTUM_EXIT_COOLDOWN_SECONDS)
+            if cooldown_until <= now:
+                continue
+            existing = self._momentum_cooldowns.get(symbol)
+            if existing is None or cooldown_until > existing:
+                self._momentum_cooldowns[symbol] = cooldown_until
+                restored += 1
+        if restored:
+            self._log.info("%d momentum cooldown(s) hersteld uit logs", restored)
 
     def _reconstruct_position(
         self, pos_id: str, payload: dict, ts_str: str

@@ -25,6 +25,8 @@ from ant_colony.ants.paper_ant_equities import (
     _EQUITY_MAX_TTL_DAYS,
     _WATCHTOWER_TTL_DAYS,
     _MOMENTUM_EXIT_CONSECUTIVE_TICKS,
+    _MOMENTUM_EXIT_COOLDOWN_SECONDS,
+    _MOMENTUM_EXIT_MIN_HOLD_SECONDS,
     _MOMENTUM_EXIT_TYPE,
 )
 from ant_colony.exit_chain.position import PaperPosition, PositionSide
@@ -134,12 +136,28 @@ def _write_trade_opened(
 
 
 def _write_trade_closed(
-    logs_root: Path, ant_id: str, *, position_id: str
+    logs_root: Path,
+    ant_id: str,
+    *,
+    position_id: str,
+    exit_type: str = "ttl_trading_days",
+    ts: datetime | None = None,
 ) -> None:
-    _write_paper_log(logs_root, ant_id, {
-        "action": "trade_closed",
-        "position_id": position_id,
-    })
+    paper_dir = logs_root / "paper"
+    paper_dir.mkdir(parents=True, exist_ok=True)
+    record = {
+        "timestamp": (ts or datetime.now(tz=timezone.utc)).isoformat(),
+        "source": ant_id,
+        "payload": {
+            "action": "trade_closed",
+            "position_id": position_id,
+            "exit_type": exit_type,
+            "exit_reason": exit_type,
+        },
+    }
+    (paper_dir / f"{ant_id}.jsonl").open("a", encoding="utf-8").write(
+        json.dumps(record) + "\n"
+    )
 
 
 def _write_position_update(
@@ -395,7 +413,16 @@ class TestExitLogic:
 
     def test_sector_scout_position_marks_and_closes_after_momentum_lost(self, tmp_path):
         ant = _make_ant(tmp_path)
-        self._make_position(ant, entry_price=100.0, symbol="XLK", source="sector_scout")
+        opened_at = datetime.now(tz=timezone.utc) - timedelta(
+            seconds=_MOMENTUM_EXIT_MIN_HOLD_SECONDS + 1
+        )
+        self._make_position(
+            ant,
+            entry_price=100.0,
+            symbol="XLK",
+            source="sector_scout",
+            opened_at=opened_at,
+        )
         _write_sector_ranking(tmp_path, ["XLE", "XLF", "XLI", "XLY", "XLU", "XLK"])
 
         adapter = MagicMock()
@@ -417,6 +444,60 @@ class TestExitLogic:
 
         assert len(ant._ledger.open_positions) == 0
         assert ant._ledger.closed_trades[0].exit_reason == _MOMENTUM_EXIT_TYPE
+        assert ant._momentum_cooldown_until("XLK") is not None
+
+    def test_momentum_lost_waits_for_minimum_hold_time(self, tmp_path):
+        ant = _make_ant(tmp_path)
+        self._make_position(ant, entry_price=100.0, symbol="XLK", source="sector_scout")
+        _write_sector_ranking(tmp_path, ["XLE", "XLF", "XLI", "XLY", "XLU", "XLK"])
+
+        adapter = MagicMock()
+        adapter.is_available.return_value = True
+        md = MagicMock()
+        md.is_valid_price = True
+        md.is_stale.return_value = False
+        md.close = 101.0
+        adapter.get_market_data.return_value = md
+        ant.biome_registry.get.return_value = adapter
+
+        for _ in range(_MOMENTUM_EXIT_CONSECUTIVE_TICKS + 2):
+            ant._process_exits(advance_trading_time=False)
+
+        assert len(ant._ledger.open_positions) == 1
+        assert not ant._momentum_exit_pending
+
+    def test_momentum_lost_requires_three_consecutive_misses(self, tmp_path):
+        ant = _make_ant(tmp_path)
+        opened_at = datetime.now(tz=timezone.utc) - timedelta(
+            seconds=_MOMENTUM_EXIT_MIN_HOLD_SECONDS + 1
+        )
+        self._make_position(
+            ant,
+            entry_price=100.0,
+            symbol="XLK",
+            source="sector_scout",
+            opened_at=opened_at,
+        )
+        _write_sector_ranking(tmp_path, ["XLE", "XLF", "XLI", "XLY", "XLU", "XLK"])
+
+        adapter = MagicMock()
+        adapter.is_available.return_value = True
+        md = MagicMock()
+        md.is_valid_price = True
+        md.is_stale.return_value = False
+        md.close = 101.0
+        adapter.get_market_data.return_value = md
+        ant.biome_registry.get.return_value = adapter
+
+        for _ in range(_MOMENTUM_EXIT_CONSECUTIVE_TICKS - 1):
+            ant._process_exits(advance_trading_time=False)
+
+        assert len(ant._ledger.open_positions) == 1
+        assert not ant._momentum_exit_pending
+
+        ant._process_exits(advance_trading_time=False)
+
+        assert ant._momentum_exit_pending
 
     def test_watchtower_position_ignores_sector_momentum_exit(self, tmp_path):
         ant = _make_ant(tmp_path)
@@ -528,6 +609,34 @@ class TestLedgerRecovery:
 
         assert "MSFT" not in ant._open_symbols
         assert len(ant._ledger.open_positions) == 0
+
+    def test_recent_momentum_lost_close_restores_cooldown(self, tmp_path):
+        mission = _make_mission()
+        ant_id = uuid.uuid4().hex
+        pos_id = uuid.uuid4().hex
+        closed_at = datetime.now(tz=timezone.utc) - timedelta(hours=1)
+
+        _write_trade_opened(tmp_path, ant_id, position_id=pos_id, symbol="XLB")
+        _write_trade_closed(
+            tmp_path,
+            ant_id,
+            position_id=pos_id,
+            exit_type=_MOMENTUM_EXIT_TYPE,
+            ts=closed_at,
+        )
+
+        ant = EquitiesPaperAnt(
+            ant_id=ant_id,
+            mission=mission,
+            scheduler=MagicMock(),
+            biome_registry=MagicMock(),
+            logs_root=tmp_path,
+        )
+
+        cooldown_until = ant._momentum_cooldown_until("XLB")
+        assert cooldown_until is not None
+        assert cooldown_until > datetime.now(tz=timezone.utc)
+        assert cooldown_until <= closed_at + timedelta(seconds=_MOMENTUM_EXIT_COOLDOWN_SECONDS)
 
     def test_peak_price_restored_from_position_update(self, tmp_path):
         mission = _make_mission()
@@ -721,6 +830,24 @@ class TestSignalProcessing:
         assert stats["opened"] == 2
         assert any("EqPaper sector_scout ranking ontvangen" in rec.message for rec in caplog.records)
         assert any("reden=already_open" in rec.message for rec in caplog.records)
+
+    def test_sector_ranking_respects_momentum_lost_cooldown(self, tmp_path, caplog):
+        ant = _make_ant(tmp_path)
+        self._mock_price(ant, 100.0)
+        ant._set_momentum_cooldown(
+            "XLB",
+            datetime.now(tz=timezone.utc) - timedelta(seconds=60),
+        )
+        _write_sector_ranking(tmp_path, ["XLB", "XLK", "XLE"])
+
+        with caplog.at_level("INFO", logger=f"ant.eq_paper.{ant.ant_id[:8]}"):
+            stats = ant._process_scout_signals()
+
+        assert "XLB" not in ant._open_symbols
+        assert stats["received"] == 3
+        assert stats["filtered"] == 1
+        assert stats["opened"] == 2
+        assert any("momentum_lost_cooldown_until" in rec.message for rec in caplog.records)
 
     def test_breakout_signal_opens_position(self, tmp_path):
         ant = _make_ant(tmp_path)
