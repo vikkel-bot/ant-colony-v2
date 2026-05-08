@@ -202,6 +202,24 @@ class TestStatusEndpoint:
             assert r.json()["seconds_ago"] is not None
             assert r.json()["seconds_ago"] >= 0
 
+    def test_status_prefers_dashboard_heartbeat_over_scheduler_tick(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            logs = Path(tmp)
+            log_file = logs / "colony" / "scheduler.jsonl"
+            old_tick = (datetime.now(tz=timezone.utc) - timedelta(seconds=90)).isoformat()
+            fresh_heartbeat = _now_iso()
+            _write_jsonl(
+                log_file,
+                [
+                    {"timestamp": old_tick, "event_type": "tick"},
+                    {"timestamp": fresh_heartbeat, "event_type": "dashboard_heartbeat"},
+                ],
+            )
+            ctx = ColonyContext(scheduler=_make_scheduler(), logs_root=logs)
+            r = _client(ctx).get("/api/status")
+
+            assert r.json()["seconds_ago"] < 15
+
     def test_no_log_file_last_tick_none(self):
         with tempfile.TemporaryDirectory() as tmp:
             ctx = ColonyContext(scheduler=_make_scheduler(), logs_root=Path(tmp))

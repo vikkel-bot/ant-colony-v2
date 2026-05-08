@@ -690,7 +690,7 @@ def create_router(ctx: ColonyContext) -> APIRouter:
 
     @router.get("/status", response_model=StatusResponse)
     def get_status() -> StatusResponse:
-        """Colony status en laatste tick timestamp."""
+        """Colony status en laatste dashboard heartbeat timestamp."""
         now = datetime.now(tz=timezone.utc)
 
         if ctx.scheduler is None:
@@ -2182,11 +2182,37 @@ def _real_equity(registry: BiomeRegistry | None) -> float | None:
 # ---------------------------------------------------------------------------
 
 def _last_tick_from_logs(logs_root: Path | None) -> datetime | None:
-    """Lees de timestamp van het laatste scheduler-tick event uit disk."""
+    """Lees de dashboard heartbeat; val alleen terug op ticks voor oudere logs."""
     if logs_root is None:
         return None
     log_file = logs_root / "colony" / "scheduler.jsonl"
-    return _last_timestamp_in_file(log_file)
+    return (
+        _last_event_timestamp_in_file(log_file, "dashboard_heartbeat")
+        or _last_event_timestamp_in_file(log_file, "tick")
+        or _last_timestamp_in_file(log_file)
+    )
+
+
+def _last_event_timestamp_in_file(path: Path, event_type: str) -> datetime | None:
+    """Lees de laatste timestamp voor een specifiek scheduler event_type."""
+    if not path.exists():
+        return None
+    found: datetime | None = None
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if record.get("event_type") == event_type:
+                    found = _parse_ts(record.get("timestamp"))
+        return found
+    except OSError:
+        return None
 
 
 def _last_timestamp_in_file(path: Path) -> datetime | None:
