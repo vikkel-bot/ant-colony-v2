@@ -7,7 +7,7 @@ Verantwoordelijkheden:
   1. Poll Watchtower elke WATCHTOWER_POLL_INTERVAL seconden (standaard 300s).
   2. Filter signalen: entry_score >= min, confidence >= min, geen HIGH_RISK.
   3. Schrijf gefilterde signalen naar ANT_LOGS/watchtower/signals.jsonl.
-  4. Route high-confidence POSITIVE_EDGE equity-signalen naar candidates.jsonl.
+  4. Route high-confidence niet-crypto signalen naar candidates.jsonl.
   5. Log hoeveel signalen ontvangen, gefilterd en naar Queen/Paper doorgestuurd zijn.
   6. Log "Watchtower offline, degrading gracefully" elke poll als offline.
 
@@ -41,19 +41,19 @@ _POLL_INTERVAL  = int(os.getenv("WATCHTOWER_POLL_INTERVAL", "300"))
 _MIN_ENTRY_SCORE = float(os.getenv("WATCHTOWER_MIN_ENTRY_SCORE", "0.6"))
 _MIN_CONFIDENCE  = float(os.getenv("WATCHTOWER_MIN_CONFIDENCE", "0.5"))
 
-POSITIVE_EDGE_ASSETS = frozenset({"JNJ", "GLD", "XLK", "AAPL", "XLY", "QQQ", "XLF", "XLI"})
-_QUEEN_MIN_ENTRY_SCORE = 0.65
-_QUEEN_MIN_CONFIDENCE = 0.60
 _MAX_SIGNAL_AGE_SECONDS = 2 * 3600
 _MAX_DAILY_WATCHTOWER_ENTRIES = 3
 _MAX_ASSET_ENTRY_INTERVAL_SECONDS = 24 * 3600
+_CRYPTO_ASSETS = frozenset({"BTC", "ETH", "SOL", "XRP", "ADA", "DOT", "LINK", "LTC"})
+_COMMODITY_ASSETS = frozenset({"BRENT", "WTI", "NATGAS", "COPPER", "SILVER", "GOLD"})
 
 
 @dataclass(frozen=True)
 class WatchtowerCandidate:
-    """Kandidaat die WatchtowerAnt overdraagt aan EquitiesPaperAnt."""
+    """Kandidaat die WatchtowerAnt overdraagt aan de bestaande paper intake."""
 
     asset: str
+    biome: str
     direction: str
     entry_score: float
     confidence: float
@@ -67,6 +67,7 @@ class WatchtowerCandidate:
             "action": "watchtower_candidate",
             "asset": self.asset,
             "symbol": self.asset,
+            "biome": self.biome,
             "direction": self.direction,
             "entry_score": self.entry_score,
             "confidence": self.confidence,
@@ -148,24 +149,40 @@ class WatchtowerAnt:
         filtered: list[dict] = []
         rejections: list[dict] = []
         for signal in signals:
+            asset = signal.get("asset") or signal.get("symbol")
+            direction = signal.get("direction")
+            entry_score = _safe_float(signal.get("entry_score"))
+            confidence = _safe_float(signal.get("confidence"))
+            self._log.info(
+                "Watchtower signaal ontvangen | asset=%s direction=%s score=%.3f confidence=%.3f",
+                asset or "UNKNOWN",
+                direction or "UNKNOWN",
+                entry_score,
+                confidence,
+            )
             reasons: list[str] = []
-            if _safe_float(signal.get("entry_score")) < _MIN_ENTRY_SCORE:
-                reasons.append("score too low")
-            if _safe_float(signal.get("confidence")) < _MIN_CONFIDENCE:
-                reasons.append("confidence too low")
+            reason_code: str | None = None
+            if entry_score < _MIN_ENTRY_SCORE:
+                reasons.append("entry_score_below_threshold")
+                reason_code = "score_too_low"
+            if confidence < _MIN_CONFIDENCE:
+                reasons.append("confidence_below_threshold")
+                reason_code = reason_code or "score_too_low"
             if "HIGH_RISK" in signal.get("risk_flags", []):
-                reasons.append("risk_flag HIGH_RISK")
+                reasons.append("risk_flag_high_risk")
+                reason_code = "high_risk"
 
             if reasons:
                 rejections.append({
                     "signal_id": signal.get("signal_id") or signal.get("id"),
-                    "asset": signal.get("asset") or signal.get("symbol"),
-                    "direction": signal.get("direction"),
+                    "asset": asset,
+                    "direction": direction,
                     "timestamp": signal.get("timestamp") or signal.get("created_at"),
                     "entry_score": signal.get("entry_score"),
                     "confidence": signal.get("confidence"),
                     "risk_flags": signal.get("risk_flags", []),
-                    "rejection_reason": "; ".join(reasons),
+                    "rejection_reason": reason_code or "asset_blocked",
+                    "detail_reason": "; ".join(reasons),
                 })
             else:
                 filtered.append(signal)
@@ -175,7 +192,8 @@ class WatchtowerAnt:
             _POLL_INTERVAL, received, len(filtered), len(rejections),
         )
 
-        candidates, candidate_rejections = self._route_candidates(now, signals)
+        candidates, candidate_rejections = self._route_candidates(now, filtered)
+        self._write_filtered(now, rejections + candidate_rejections)
 
         # altijd schrijven — ook bij 0 gefilterd (voor dashboard stats)
         self._write_snapshot(
@@ -238,40 +256,40 @@ class WatchtowerAnt:
     ) -> tuple[WatchtowerCandidate | None, str]:
         asset = str(signal.get("asset") or signal.get("symbol") or "").upper().strip()
         if not asset:
-            return None, "missing_asset"
-        if asset not in POSITIVE_EDGE_ASSETS:
-            if "-" in asset or asset.endswith("EUR") or asset in {"BTC", "ETH", "SOL"}:
-                return None, "crypto_confirmed_negative"
-            return None, "asset_not_positive_edge"
+            return None, "asset_blocked"
+
+        biome = _infer_signal_biome(signal, asset)
+        if biome == "crypto":
+            return None, "biome_mismatch"
 
         direction = str(signal.get("direction") or "").lower().strip()
         if direction != "long":
-            return None, "direction_not_long"
+            return None, "asset_blocked"
 
         entry_score = _safe_float(signal.get("entry_score"))
-        if entry_score < _QUEEN_MIN_ENTRY_SCORE:
-            return None, "entry_score_below_queen_threshold"
+        if entry_score < _MIN_ENTRY_SCORE:
+            return None, "score_too_low"
 
         confidence = _safe_float(signal.get("confidence"))
-        if confidence < _QUEEN_MIN_CONFIDENCE:
-            return None, "confidence_below_queen_threshold"
+        if confidence < _MIN_CONFIDENCE:
+            return None, "score_too_low"
 
         signal_id = str(signal.get("signal_id") or signal.get("id") or "").strip()
         if not signal_id:
-            return None, "missing_signal_id"
+            return None, "asset_blocked"
 
         created_at = _parse_signal_datetime(
             signal.get("created_at") or signal.get("timestamp") or signal.get("emitted_at")
         )
         if created_at is None:
-            return None, "missing_created_at"
+            return None, "asset_blocked"
         if (now - created_at).total_seconds() > _MAX_SIGNAL_AGE_SECONDS:
-            return None, "signal_expired"
+            return None, "asset_blocked"
         if created_at > now.replace(microsecond=999999):
-            return None, "signal_from_future"
+            return None, "asset_blocked"
 
         if asset in open_symbols:
-            return None, "open_position_exists"
+            return None, "asset_blocked"
 
         rate_reason = self._daily_limit_rejection(asset, now, daily_limits)
         if rate_reason:
@@ -279,6 +297,7 @@ class WatchtowerAnt:
 
         return WatchtowerCandidate(
             asset=asset,
+            biome=biome,
             direction="long",
             entry_score=entry_score,
             confidence=confidence,
@@ -292,13 +311,36 @@ class WatchtowerAnt:
         return {
             "signal_id": signal.get("signal_id") or signal.get("id"),
             "asset": signal.get("asset") or signal.get("symbol"),
+            "biome": _infer_signal_biome(signal, str(signal.get("asset") or signal.get("symbol") or "")),
             "direction": signal.get("direction"),
             "timestamp": signal.get("timestamp") or signal.get("created_at"),
             "entry_score": signal.get("entry_score"),
             "confidence": signal.get("confidence"),
             "risk_flags": signal.get("risk_flags", []),
-            "rejection_reason": reason,
+            "rejection_reason": _coarse_rejection_reason(reason),
+            "detail_reason": reason,
         }
+
+    def _write_filtered(self, now: datetime, rejections: list[dict]) -> None:
+        """Schrijf per gefilterd Watchtower-signaal een append-only auditregel."""
+        if self._out_dir is None or not rejections:
+            return
+        self._out_dir.mkdir(parents=True, exist_ok=True)
+        log_path = self._out_dir / "filtered.jsonl"
+        try:
+            with log_path.open("a", encoding="utf-8") as fh:
+                for rejection in rejections:
+                    record = {
+                        "timestamp": now.isoformat(),
+                        "source": self.ant_id,
+                        "payload": {
+                            "action": "watchtower_signal_filtered",
+                            **rejection,
+                        },
+                    }
+                    fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except OSError:
+            self._log.exception("Kon watchtower filtered log niet schrijven: %s", log_path)
 
     def _write_candidates(self, now: datetime, candidates: list[WatchtowerCandidate]) -> None:
         if self._out_dir is None:
@@ -459,6 +501,37 @@ def _safe_float(value: object) -> float:
         return float(value)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _infer_signal_biome(signal: dict, asset: str) -> str:
+    """Leid het doel-biome af uit Watchtower metadata zonder nieuwe trading paths."""
+    for key in ("biome", "asset_class", "source_field"):
+        value = str(signal.get(key) or "").lower().strip()
+        if value in {"crypto", "cryptocurrency"}:
+            return "crypto"
+        if value in {"equity", "equities", "stock", "stocks"}:
+            return "equities"
+        if value in {"commodity", "commodities"}:
+            return "commodity"
+
+    asset = asset.upper().strip()
+    if asset in _COMMODITY_ASSETS:
+        return "commodity"
+    if asset in _CRYPTO_ASSETS or asset.endswith(("-EUR", "-USD", "-BTC", "-USDT")):
+        return "crypto"
+    return "equities"
+
+
+def _coarse_rejection_reason(reason: str | None) -> str:
+    """Normaliseer filterredenen voor het append-only filtered.jsonl dashboardspoor."""
+    reason = (reason or "").lower()
+    if "high_risk" in reason or "risk_flag" in reason:
+        return "high_risk"
+    if "biome" in reason:
+        return "biome_mismatch"
+    if "score" in reason or "confidence" in reason:
+        return "score_too_low"
+    return "asset_blocked"
 
 
 def _parse_signal_datetime(value: object) -> datetime | None:

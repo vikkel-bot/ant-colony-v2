@@ -1339,9 +1339,9 @@ class PaperAnt:
             "POSITIE GESLOTEN | %s via %s  pnl_gross=%.4f fee=%.4f pnl_net=%.4f (%.2f%%)",
             position.symbol, position.exit_reason, pnl_gross, fee_total, pnl_net, pnl_pct,
         )
-        self._send_watchtower_feedback(position, pnl_pct)
+        self._send_watchtower_feedback(position, pnl_pct, pnl_net)
 
-    def _send_watchtower_feedback(self, position, pnl_pct: float) -> None:
+    def _send_watchtower_feedback(self, position, pnl_pct: float, pnl_eur: float) -> None:
         """Fire-and-forget feedback naar Watchtower na trade close."""
         if self._watchtower_client is None:
             return
@@ -1354,7 +1354,7 @@ class PaperAnt:
         elif "ttl" in reason:
             exit_label = "TTL"
         else:
-            exit_label = reason.upper()
+            exit_label = "MANUAL"
 
         if position.closed_at and position.opened_at:
             duration_hours = round(
@@ -1364,15 +1364,24 @@ class PaperAnt:
             duration_hours = 0.0
 
         outcome = {
+            "feedback_type": "TRADE_OUTCOME",
             "signal_id":    position.watchtower_signal_id,
             "asset":        position.symbol,
+            "biome":        _watchtower_feedback_biome(position),
             "direction":    position.side.value.upper(),
             "entry_price":  float(position.entry_price),
             "exit_price":   float(position.exit_price or 0.0),
             "pnl_pct":      pnl_pct,
+            "pnl_eur":      float(pnl_eur),
             "exit_reason":  exit_label,
             "duration_hours": duration_hours,
+            "entry_time":   position.opened_at.isoformat() if position.opened_at else None,
+            "exit_time":    position.closed_at.isoformat() if position.closed_at else None,
             "timestamp":    datetime.now(timezone.utc).isoformat(),
+            "strategy_type": getattr(position, "strategy_type", None),
+            "open_positions_count": len(self._ledger.open_positions),
+            "portfolio_heat": 0.0,
+            "data_quality": "MEDIUM",
         }
         threading.Thread(
             target=self._watchtower_client.post_outcome,
@@ -1433,3 +1442,12 @@ class PaperAnt:
             self._log.debug("Heartbeat gestuurd | action=%s", self._last_action)
         except Exception:
             self._log.exception("Heartbeat mislukt — doorgaan")
+
+
+def _watchtower_feedback_biome(position) -> str:
+    """Map Colony biome strings naar het Watchtower feedback schema."""
+    biome = str(getattr(position, "biome", "") or "").lower()
+    symbol = str(getattr(position, "symbol", "") or "").upper()
+    if biome == "crypto" or symbol.endswith(("-EUR", "-USD", "-BTC", "-USDT")):
+        return "CRYPTO"
+    return "EQUITIES"

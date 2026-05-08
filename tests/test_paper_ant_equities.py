@@ -646,7 +646,14 @@ class TestSignalProcessing:
         }
         (d / "dividend.jsonl").open("a", encoding="utf-8").write(json.dumps(record) + "\n")
 
-    def _write_watchtower_candidate(self, logs_root: Path, *, symbol: str, signal_id: str) -> None:
+    def _write_watchtower_candidate(
+        self,
+        logs_root: Path,
+        *,
+        symbol: str,
+        signal_id: str,
+        biome: str = "equities",
+    ) -> None:
         d = logs_root / "watchtower"
         d.mkdir(parents=True, exist_ok=True)
         now = datetime.now(tz=timezone.utc).isoformat()
@@ -657,6 +664,7 @@ class TestSignalProcessing:
                 "action": "watchtower_candidate",
                 "asset": symbol,
                 "symbol": symbol,
+                "biome": biome,
                 "direction": "long",
                 "entry_score": 0.72,
                 "confidence": 0.66,
@@ -804,6 +812,22 @@ class TestSignalProcessing:
 
         assert len(ant._ledger.open_positions) == 1
 
+    def test_watchtower_candidate_wrong_biome_is_filtered(self, tmp_path):
+        ant = _make_ant(tmp_path)
+        self._mock_price(ant, 100.0)
+        self._write_watchtower_candidate(
+            tmp_path,
+            symbol="NATGAS",
+            signal_id="wt-natgas-1",
+            biome="commodity",
+        )
+
+        stats = ant._process_watchtower_candidates()
+
+        assert stats["received"] == 1
+        assert stats["filtered"] == 1
+        assert len(ant._ledger.open_positions) == 0
+
 
 class TestWatchtowerFeedback:
     def test_feedback_sent_after_watchtower_position_close(self, tmp_path):
@@ -846,7 +870,9 @@ class TestWatchtowerFeedback:
 
         client.post_outcome.assert_called_once()
         outcome = client.post_outcome.call_args.args[0]
+        assert outcome["feedback_type"] == "TRADE_OUTCOME"
         assert outcome["signal_id"] == "wt-feedback-1"
-        assert outcome["outcome"] == "timeout"
+        assert outcome["biome"] == "EQUITIES"
+        assert outcome["exit_reason"] == "TTL"
         assert outcome["pnl_eur"] == 5.0
-        assert outcome["holding_hours"] >= 2.9
+        assert outcome["duration_hours"] >= 2.9

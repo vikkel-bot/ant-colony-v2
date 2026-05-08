@@ -248,8 +248,10 @@ class TestGetSeedSignals:
 
 class TestPostOutcome:
     _outcome = {
+        "feedback_type": "TRADE_OUTCOME",
         "signal_id": None,
         "asset": "BTC-EUR",
+        "biome": "CRYPTO",
         "direction": "LONG",
         "entry_price": 60000.0,
         "exit_price": 61000.0,

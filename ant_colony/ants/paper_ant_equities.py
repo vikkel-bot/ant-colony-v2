@@ -729,6 +729,16 @@ class EquitiesPaperAnt:
             self._seen_watchtower_ids.add(sig_id)
             stats["received"] += 1
 
+            biome = str(payload.get("biome") or "equities").lower()
+            if biome != "equities":
+                stats["filtered"] += 1
+                self._log_equity_evaluation(
+                    str(payload.get("symbol") or payload.get("asset") or "").upper(),
+                    "FILTER",
+                    f"biome_mismatch:{biome or 'missing'}",
+                )
+                continue
+
             direction = str(payload.get("direction") or "").lower()
             if direction != "long":
                 stats["filtered"] += 1
@@ -1120,9 +1130,9 @@ class EquitiesPaperAnt:
             "hard_stop_loss":  "SL",
             "trailing_stop":   "TRAILING",
             "ttl_trading_days": "TTL",
-            _MOMENTUM_EXIT_TYPE: "MOMENTUM_LOST",
+            _MOMENTUM_EXIT_TYPE: "MANUAL",
         }
-        exit_label = _map.get(exit_type, exit_type.upper())
+        exit_label = _map.get(exit_type, "MANUAL")
 
         if position.closed_at and position.opened_at:
             duration_hours = round(
@@ -1131,33 +1141,27 @@ class EquitiesPaperAnt:
         else:
             duration_hours = 0.0
 
-        if exit_type == "ttl_trading_days":
-            result = "timeout"
-        elif pnl_eur > 0:
-            result = "win"
-        else:
-            result = "loss"
-
-        risk_per_share = max(0.0, position.entry_price - position.stop_loss_price)
-        pnl_per_share = float(position.exit_price or position.entry_price) - position.entry_price
-        pnl_r = round(pnl_per_share / risk_per_share, 6) if risk_per_share > 0 else 0.0
         closed_at = position.closed_at or datetime.now(timezone.utc)
 
         outcome = {
+            "feedback_type": "TRADE_OUTCOME",
             "signal_id":    position.watchtower_signal_id,
-            "outcome":      result,
-            "pnl_r":        pnl_r,
-            "pnl_eur":      float(pnl_eur),
-            "holding_hours": duration_hours,
-            "closed_at":    closed_at.isoformat(),
             "asset":        position.symbol,
+            "biome":        "EQUITIES",
             "direction":    position.side.value.upper(),
             "entry_price":  float(position.entry_price),
             "exit_price":   float(position.exit_price or 0.0),
             "pnl_pct":      pnl_pct,
+            "pnl_eur":      float(pnl_eur),
             "exit_reason":  exit_label,
             "duration_hours": duration_hours,
+            "entry_time":   position.opened_at.isoformat() if position.opened_at else None,
+            "exit_time":    closed_at.isoformat(),
             "timestamp":    datetime.now(timezone.utc).isoformat(),
+            "strategy_type": "watchtower" if position.watchtower_signal_id else "equities_paper",
+            "open_positions_count": len(self._ledger.open_positions),
+            "portfolio_heat": 0.0,
+            "data_quality": "MEDIUM",
         }
 
         def _post_feedback() -> None:

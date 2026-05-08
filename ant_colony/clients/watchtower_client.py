@@ -187,7 +187,20 @@ class WatchtowerClient:
                 timeout=self.timeout,
             )
             resp.raise_for_status()
+            _log.info(
+                "Watchtower feedback response | status_code=%s signal_id=%s",
+                resp.status_code,
+                outcome.get("signal_id"),
+            )
             return True
+        except httpx.HTTPStatusError as exc:
+            status_code = getattr(exc.response, "status_code", "unknown")
+            _log.warning(
+                "Watchtower post_outcome mislukt | status_code=%s signal_id=%s",
+                status_code,
+                outcome.get("signal_id"),
+            )
+            return False
         except Exception:
             _log.warning(
                 "Watchtower post_outcome mislukt — outcome genegeerd (signal_id=%s)",
