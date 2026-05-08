@@ -275,6 +275,80 @@ def _run_scheduler(scheduler, log: logging.Logger) -> None:
         log.exception("Scheduler thread afgebroken met onverwachte fout.")
 
 
+_ANT_RESTART_DELAY_S = 5
+
+
+def _start_supervised_ant(
+    *,
+    label: str,
+    ant_type: str,
+    id_prefix: str,
+    mission,
+    scheduler,
+    node_id: str,
+    make_ant,
+    log: logging.Logger,
+    on_start=None,
+) -> threading.Thread:
+    """
+    Start een long-running ant onder een kleine supervisor.
+
+    Als de ant stopt door TTL, een onverwachte exception of ABORTED status,
+    wordt een nieuwe ant-instantie met nieuw ant_id gestart. Daarmee krijgt de
+    ant een fresh TTL zonder dat de hele Colony opnieuw hoeft te starten.
+    """
+
+    def _supervisor_loop() -> None:
+        from ant_colony.colony.scheduler.colony_scheduler import AgentRecord
+
+        restart_count = 0
+        while True:
+            ant_id = f"{id_prefix}-{uuid.uuid4().hex[:12]}"
+            try:
+                ant = make_ant(ant_id)
+                if on_start is not None:
+                    on_start(ant)
+                scheduler.register_agent(AgentRecord(
+                    ant_id=ant_id,
+                    mission_id=mission.mission_id,
+                    node_id=node_id,
+                    ant_type=ant_type,
+                    ttl=mission.ttl,
+                    heartbeat_interval=mission.heartbeat_interval,
+                ))
+                log.info(
+                    "%s gestart | ant_id=%s  ttl=%ds  restart=%d  fresh_ttl=true",
+                    label,
+                    ant_id,
+                    mission.ttl,
+                    restart_count,
+                )
+                status = ant.run()
+                log.error(
+                    "%s gestopt | ant_id=%s status=%s — herstart met fresh TTL over %ds",
+                    label,
+                    ant_id,
+                    getattr(status, "value", status),
+                    _ANT_RESTART_DELAY_S,
+                )
+            except Exception:
+                log.exception(
+                    "%s supervisor fout — herstart met fresh TTL over %ds",
+                    label,
+                    _ANT_RESTART_DELAY_S,
+                )
+            restart_count += 1
+            time.sleep(_ANT_RESTART_DELAY_S)
+
+    thread = threading.Thread(
+        target=_supervisor_loop,
+        name=f"{id_prefix}-supervisor",
+        daemon=True,
+    )
+    thread.start()
+    return thread
+
+
 # ---------------------------------------------------------------------------
 # Kapitaalberekening via live adapter-saldi
 # ---------------------------------------------------------------------------
@@ -763,64 +837,57 @@ def main() -> None:
             log.warning("Scout-missie niet geaccepteerd — geen ScoutAnt thread gestart.")
 
         if research_mission is not None:
-            research_ant_id = f"research-{uuid.uuid4().hex[:12]}"
-            research = ResearchAnt(
-                ant_id=research_ant_id,
+            _start_supervised_ant(
+                label="ResearchAnt",
+                ant_type="research_ant",
+                id_prefix="research",
                 mission=research_mission,
                 scheduler=scheduler,
-                biome_registry=biome_registry,
-                logs_root=logs_root,
-            )
-            threading.Thread(
-                target=research.run,
-                name=f"research-{research_ant_id[:16]}",
-                daemon=True,
-            ).start()
-            scheduler.register_agent(AgentRecord(
-                ant_id=research_ant_id,
-                mission_id=research_mission.mission_id,
                 node_id=args.node_id,
-                ant_type="research_ant",
-                ttl=research_mission.ttl,
-                heartbeat_interval=research_mission.heartbeat_interval,
-            ))
-            log.info(
-                "ResearchAnt gestart | ant_id=%s  ttl=%ds  symbols=%s",
-                research_ant_id,
-                research_mission.ttl,
-                research_mission.market_scope.symbols,
+                make_ant=lambda ant_id: ResearchAnt(
+                    ant_id=ant_id,
+                    mission=research_mission,
+                    scheduler=scheduler,
+                    biome_registry=biome_registry,
+                    logs_root=logs_root,
+                ),
+                log=log,
             )
+            log.info("ResearchAnt supervisor gestart | symbols=%s", research_mission.market_scope.symbols)
         else:
             log.warning("Research-missie niet geaccepteerd — geen ResearchAnt thread gestart.")
 
         _paper_ledgers: list = []   # in-memory ledgers geïnjecteerd in ColonyContext
 
         if paper_mission is not None:
-            paper_ant_id = f"paper-{uuid.uuid4().hex[:12]}"
-            paper = PaperAnt(
-                ant_id=paper_ant_id,
+            _paper_ledger_slot = {"ledger": None}
+
+            def _replace_paper_ledger(paper_ant) -> None:
+                old = _paper_ledger_slot.get("ledger")
+                if old in _paper_ledgers:
+                    _paper_ledgers.remove(old)
+                _paper_ledger_slot["ledger"] = paper_ant._ledger
+                _paper_ledgers.append(paper_ant._ledger)
+
+            _start_supervised_ant(
+                label="PaperAnt",
+                ant_type="paper_ant",
+                id_prefix="paper",
                 mission=paper_mission,
                 scheduler=scheduler,
-                biome_registry=biome_registry,
-                logs_root=logs_root,
-            )
-            threading.Thread(
-                target=paper.run,
-                name=f"paper-{paper_ant_id[:16]}",
-                daemon=True,
-            ).start()
-            scheduler.register_agent(AgentRecord(
-                ant_id=paper_ant_id,
-                mission_id=paper_mission.mission_id,
                 node_id=args.node_id,
-                ant_type="paper_ant",
-                ttl=paper_mission.ttl,
-                heartbeat_interval=paper_mission.heartbeat_interval,
-            ))
-            _paper_ledgers.append(paper._ledger)
+                make_ant=lambda ant_id: PaperAnt(
+                    ant_id=ant_id,
+                    mission=paper_mission,
+                    scheduler=scheduler,
+                    biome_registry=biome_registry,
+                    logs_root=logs_root,
+                ),
+                log=log,
+                on_start=_replace_paper_ledger,
+            )
             log.info(
-                "PaperAnt gestart | ant_id=%s  capital=€%.2f  ttl=%ds  symbols=%s",
-                paper_ant_id,
+                "PaperAnt supervisor gestart | capital=€%.2f ttl=%ds symbols=%s",
                 paper_mission.capital_limit,
                 paper_mission.ttl,
                 paper_mission.market_scope.symbols,

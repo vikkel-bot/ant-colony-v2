@@ -148,8 +148,9 @@ class ColonyScheduler:
         now = datetime.now(tz=timezone.utc)
         self._last_tick_started_at: datetime | None = None
         self._last_tick_completed_at: datetime = now
-        self._watchdog_threshold_seconds = int(os.getenv("COLONY_TICK_WATCHDOG_SECONDS", "300"))
+        self._watchdog_threshold_seconds = int(os.getenv("COLONY_TICK_WATCHDOG_SECONDS", "60"))
         self._watchdog_check_seconds = max(5, int(os.getenv("COLONY_TICK_WATCHDOG_CHECK_SECONDS", "30")))
+        self._slow_tick_threshold_seconds = int(os.getenv("COLONY_SLOW_TICK_SECONDS", "60"))
         self._watchdog_stop = threading.Event()
         self._watchdog_thread: threading.Thread | None = None
         self._last_watchdog_recovery_at: datetime | None = None
@@ -425,12 +426,21 @@ class ColonyScheduler:
         dispatched: list[str],
     ) -> None:
         active = sum(1 for r in self._agents.values() if r.status == AntStatus.RUNNING)
+        duration_seconds = (self._last_tick_completed_at - tick_start).total_seconds()
+        if duration_seconds > self._slow_tick_threshold_seconds:
+            logger.error(
+                "Scheduler tick traag | duration=%.1fs threshold=%ds active_agents=%d",
+                duration_seconds,
+                self._slow_tick_threshold_seconds,
+                active,
+            )
         self._append_to_log(
             self._scheduler_log_path,
             {
                 "event_type": "tick",
                 "sequence": self._tick_sequence,
                 "timestamp": tick_start.isoformat(),
+                "duration_seconds": round(duration_seconds, 3),
                 "active_agents": active,
                 "stale_aborted": stale,
                 "ttl_expired": expired,

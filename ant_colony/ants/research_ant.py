@@ -220,6 +220,14 @@ class ResearchAnt:
                 timeout,
                 self._watchdog_restarts,
             )
+            self._write_activity_log(
+                {
+                    "action": "research_watchdog_restart",
+                    "duration_seconds": round(age, 3),
+                    "threshold_seconds": timeout,
+                    "watchdog_restarts": self._watchdog_restarts,
+                }
+            )
             self._send_heartbeat()
             return
 
@@ -230,14 +238,17 @@ class ResearchAnt:
 
     def _tick(self) -> None:
         """Één analysecyclus: candles ophalen en drie strategieën controleren per symbool."""
+        tick_started = monotonic()
         biome_id  = self.mission.market_scope.biome
         timeframe = (
             self.mission.market_scope.timeframes[0]
             if self.mission.market_scope.timeframes
             else "1h"
         )
+        symbols_scanned = 0
 
         for symbol in self.mission.market_scope.symbols:
+            symbols_scanned += 1
             candles = self._fetch_candles(symbol, timeframe, biome_id)
             if len(candles) < _MIN_CANDLES:
                 self._log.debug(
@@ -254,6 +265,16 @@ class ResearchAnt:
         self._process_ingestion_candidates()
         self._check_strategy_diversity()
         self._last_action = "tick"
+        self._write_activity_log(
+            {
+                "action": "research_tick",
+                "biome": biome_id,
+                "timeframe": timeframe,
+                "symbols_scanned": symbols_scanned,
+                "duration_seconds": round(monotonic() - tick_started, 3),
+                "watchdog_restarts": self._watchdog_restarts,
+            }
+        )
 
     # ------------------------------------------------------------------
     # Data ophalen
@@ -782,6 +803,27 @@ class ResearchAnt:
                 fh.write(json.dumps(event.model_dump(mode="json"), default=str) + "\n")
         except OSError:
             self._log.exception("Kon kandidaat niet naar disk schrijven: %s", log_path)
+
+    def _write_activity_log(self, payload: dict) -> None:
+        """Schrijf een compact research lifecycle-event zodat inactiviteit zichtbaar wordt."""
+        if self.logs_root is None:
+            return
+        event = AuditEvent(
+            event_type=AuditEventType.ACTION_EXECUTED,
+            source=self.ant_id,
+            mission_id=self.mission.mission_id,
+            node_id=self.mission.allowed_node,
+            sequence=self._log_seq,
+            payload=payload,
+        )
+        self._log_seq += 1
+        log_path = self.logs_root / "research" / f"{self.ant_id}.jsonl"
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with log_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(event.model_dump(mode="json"), default=str) + "\n")
+        except OSError:
+            self._log.exception("Kon research activiteit niet naar disk schrijven: %s", log_path)
 
     # ------------------------------------------------------------------
     # Strategy diversiteit controle

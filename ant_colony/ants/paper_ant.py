@@ -36,6 +36,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from time import monotonic
 
 from ant_colony.ants._heartbeat import HeartbeatThread
 from ant_colony.ants.time_filter_ant import read_latest_time_signal
@@ -67,6 +68,7 @@ _MAX_OPEN_POSITIONS    = 10      # maximaal 10 open posities tegelijk (1 per sym
 _STALE_SIGNAL_MINUTES  = 5       # signalen ouder dan dit worden genegeerd
 _ZOMBIE_POSITION_HOURS = 168     # posities zonder close ouder dan dit → zombie (7 dagen)
 _PAPER_CANDIDATE_WATCHDOG_SECONDS = 15 * 60
+_PAPER_TICK_WATCHDOG_SECONDS = float(os.getenv("PAPER_ANT_WATCHDOG_SECONDS", "600"))
 
 # --- Regime-gebaseerde entry filtering ---
 _SIDEWAYS_ALLOWED_STRATEGY_TYPES = frozenset(["mean_reversion", "rsi_based"])
@@ -127,6 +129,9 @@ class PaperAnt:
         self._log = logging.getLogger(f"ant.paper.{ant_id[:8]}")
         self._last_candidate_processed_at = time.monotonic()
         self._paper_watchdog_restarts = 0
+        self._last_tick_completed_monotonic = monotonic()
+        self._last_tick_started_monotonic: float | None = None
+        self._tick_watchdog_restarts = 0
 
         # Scout-posities: per symbool (1 per symbool tegelijk).
         self._open_symbols: set[str] = self._load_open_symbols_from_logs()
@@ -192,7 +197,7 @@ class PaperAnt:
                     self._status = AntStatus.COMPLETED
                     break
 
-                self._tick()
+                self._run_tick_with_watchdog()
 
                 time.sleep(1.0)
 
@@ -213,6 +218,65 @@ class PaperAnt:
     # ------------------------------------------------------------------
     # Tick
     # ------------------------------------------------------------------
+
+    def _run_tick_with_watchdog(self) -> None:
+        """
+        Voer één paper tick uit met dezelfde harde liveness watchdog als ResearchAnt.
+
+        Bij timeout wordt de geblokkeerde worker als daemon achtergelaten en wordt
+        de volgende evaluatiecyclus gestart. De PaperAnt opent nooit posities buiten
+        de normale _tick guards; dit is alleen liveness-herstel.
+        """
+        timeout = max(0.0, float(_PAPER_TICK_WATCHDOG_SECONDS))
+        if timeout <= 0:
+            self._tick()
+            self._last_tick_completed_monotonic = monotonic()
+            return
+
+        completed = threading.Event()
+        errors: list[BaseException] = []
+        started = monotonic()
+        self._last_tick_started_monotonic = started
+
+        def worker() -> None:
+            try:
+                self._tick()
+            except BaseException as exc:  # pragma: no cover - opnieuw gegooid in hoofdthread
+                errors.append(exc)
+            finally:
+                completed.set()
+
+        tick_thread = threading.Thread(
+            target=worker,
+            name=f"paper-cycle-{self.ant_id[:8]}",
+            daemon=True,
+        )
+        tick_thread.start()
+
+        if not completed.wait(timeout=timeout):
+            age = monotonic() - started
+            self._tick_watchdog_restarts += 1
+            self._last_action = "tick_watchdog_restart"
+            self._log.error(
+                "PaperAnt watchdog: geen tick voltooid in %.1fs (> %.1fs) — "
+                "paper-evaluatie cyclus wordt opnieuw gestart | restarts=%d",
+                age,
+                timeout,
+                self._tick_watchdog_restarts,
+            )
+            self._write_log({
+                "action": "paper_watchdog_restart",
+                "duration_seconds": round(age, 3),
+                "threshold_seconds": timeout,
+                "watchdog_restarts": self._tick_watchdog_restarts,
+            })
+            self._send_heartbeat()
+            return
+
+        if errors:
+            raise errors[0]
+
+        self._last_tick_completed_monotonic = monotonic()
 
     def _tick(self) -> None:
         """
@@ -236,6 +300,7 @@ class PaperAnt:
             self._paper_candidate_watchdog(regime=regime)
         opened = len(self._ledger.open_positions) - open_before
         filtered = 1 if not trading_allowed else 0
+        pending = self._count_pending_candidates()
         self._log.info(
             "paper tick | regime=%s scout=%d research=%d approved=%d filtered=%s opened=%d",
             regime or "—",
@@ -243,6 +308,17 @@ class PaperAnt:
             "blocked" if filtered else 0,
             opened,
         )
+        self._write_log({
+            "action": "paper_tick",
+            "regime": regime,
+            "scout": scout_count,
+            "research": research_count,
+            "approved": approved_count,
+            "filtered": "blocked" if filtered else 0,
+            "opened": opened,
+            "pending_candidates": pending,
+            "open_positions": len(self._ledger.open_positions),
+        })
         self._last_action = "tick"
 
     # ------------------------------------------------------------------
@@ -1138,11 +1214,30 @@ class PaperAnt:
                     if signal_id in self._processed_signals:
                         continue
 
-                    # Sla cross-biome signalen over (bijv. equities-signalen in
-                    # een crypto PaperAnt). Fail-open: geen biome veld → accepteren.
+                    symbol = str(payload.get("symbol") or "")
+
+                    # Sla cross-biome signalen over (bijv. commodities-signalen in
+                    # een crypto PaperAnt). Fail-open: geen biome veld → ga door naar
+                    # de symbool-scope check hieronder.
                     signal_biome = payload.get("biome")
                     if signal_biome and signal_biome != self.mission.market_scope.biome:
                         self._processed_signals.add(signal_id)
+                        self._log.info(
+                            "Scout-signaal gefilterd | symbol=%s biome=%s reden=biome_mismatch expected=%s",
+                            symbol or "?",
+                            signal_biome,
+                            self.mission.market_scope.biome,
+                        )
+                        continue
+
+                    allowed_symbols = set(self.mission.market_scope.symbols or [])
+                    if allowed_symbols and symbol and symbol not in allowed_symbols:
+                        self._processed_signals.add(signal_id)
+                        self._log.info(
+                            "Scout-signaal gefilterd | symbol=%s reden=symbol_out_of_scope scope=%s",
+                            symbol,
+                            ",".join(sorted(allowed_symbols)),
+                        )
                         continue
 
                     self._processed_signals.add(signal_id)

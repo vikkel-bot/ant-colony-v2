@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -353,6 +354,14 @@ class TestLogEvents:
         actions = [r["payload"]["action"] for r in records]
         assert "trade_opened" in actions
 
+    def test_paper_tick_event_written_without_trade(self, tmp_path: Path) -> None:
+        ant = make_ant(logs_root=tmp_path)
+        ant._tick()
+
+        log_path = tmp_path / "paper" / f"{ant.ant_id}.jsonl"
+        records = [json.loads(l) for l in log_path.read_text().splitlines() if l.strip()]
+        assert any(r["payload"]["action"] == "paper_tick" for r in records)
+
     def test_trade_opened_event_has_required_fields(self, tmp_path: Path) -> None:
         ant = make_ant(logs_root=tmp_path)
         write_scout_signal(tmp_path / "scouts")
@@ -487,6 +496,36 @@ class TestLifecycle:
                 status = ant.run()
 
         assert status == AntStatus.ABORTED
+
+    def test_watchdog_restarts_when_tick_stalls(self, tmp_path: Path, monkeypatch, caplog) -> None:
+        ant = make_ant(logs_root=tmp_path)
+        ant.mission.ttl = 30
+        calls = {"count": 0}
+        release_stale_tick = threading.Event()
+
+        def fake_tick() -> None:
+            calls["count"] += 1
+            if calls["count"] == 1:
+                release_stale_tick.wait(0.2)
+                return
+            ant._status = AntStatus.COMPLETED
+
+        monkeypatch.setattr("ant_colony.ants.paper_ant._PAPER_TICK_WATCHDOG_SECONDS", 0.02)
+        monkeypatch.setattr("ant_colony.ants.paper_ant.time.sleep", lambda *_args: None)
+        ant._tick = fake_tick  # type: ignore[method-assign]
+
+        with caplog.at_level(logging.ERROR, logger=f"ant.paper.{ant.ant_id[:8]}"):
+            status = ant.run()
+
+        assert status == AntStatus.COMPLETED
+        assert calls["count"] >= 2
+        assert ant._tick_watchdog_restarts == 1
+        assert ant._last_action == "tick_watchdog_restart"
+        assert any("PaperAnt watchdog" in record.message for record in caplog.records)
+
+        log_path = tmp_path / "paper" / f"{ant.ant_id}.jsonl"
+        records = [json.loads(l) for l in log_path.read_text().splitlines() if l.strip()]
+        assert any(r["payload"]["action"] == "paper_watchdog_restart" for r in records)
 
 
 # ---------------------------------------------------------------------------
@@ -1457,6 +1496,42 @@ class TestLedgerRecovery:
 # ---------------------------------------------------------------------------
 
 class TestScoutSignalBiomeFilter:
+    def test_commodity_signaal_wordt_fail_closed_gefilterd(self, tmp_path: Path, caplog) -> None:
+        """Commodity-signalen horen niet door de crypto PaperAnt te lopen."""
+        scout_dir = tmp_path / "scouts"
+        sid = write_scout_signal(
+            scout_dir,
+            symbol="NATGAS",
+            biome="commodities",
+            filename="commodity_scout.jsonl",
+        )
+
+        ant = make_ant(logs_root=tmp_path)
+        with caplog.at_level(logging.INFO, logger=f"ant.paper.{ant.ant_id[:8]}"):
+            signals = ant._read_new_scout_signals()
+
+        assert signals == []
+        assert sid in ant._processed_signals
+        assert any("biome_mismatch" in record.message for record in caplog.records)
+
+    def test_symbol_buiten_mission_scope_wordt_gefilterd(self, tmp_path: Path, caplog) -> None:
+        """Fail-closed: onbekende symbolen zonder biome worden niet stil verhandeld."""
+        scout_dir = tmp_path / "scouts"
+        sid = write_scout_signal(
+            scout_dir,
+            symbol="SILVER",
+            biome="",
+            filename="silver_scout.jsonl",
+        )
+
+        ant = make_ant(logs_root=tmp_path)
+        with caplog.at_level(logging.INFO, logger=f"ant.paper.{ant.ant_id[:8]}"):
+            signals = ant._read_new_scout_signals()
+
+        assert signals == []
+        assert sid in ant._processed_signals
+        assert any("symbol_out_of_scope" in record.message for record in caplog.records)
+
     def test_equities_signaal_overgeslagen_door_crypto_ant(self, tmp_path: Path) -> None:
         """Equities-signaal (biome='equities') wordt genegeerd door crypto PaperAnt."""
         scout_dir = tmp_path / "scouts"
@@ -1505,7 +1580,7 @@ class TestScoutSignalBiomeFilter:
         write_scout_signal(scout_dir, symbol="XLK",    biome="equities", filename="eq.jsonl")
         write_scout_signal(scout_dir, symbol="ETH-EUR", biome="crypto",  filename="eth.jsonl")
 
-        ant = make_ant(logs_root=tmp_path)
+        ant = make_ant(mission=make_mission(symbols=[_SYMBOL, "ETH-EUR"]), logs_root=tmp_path)
         signals = ant._read_new_scout_signals()
         symbols = {s["symbol"] for s in signals}
         assert symbols == {_SYMBOL, "ETH-EUR"}

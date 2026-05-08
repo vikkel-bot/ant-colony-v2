@@ -178,6 +178,14 @@ def read_jsonl(path: Path) -> list[dict]:
     ]
 
 
+def candidate_records(path: Path) -> list[dict]:
+    return [
+        record
+        for record in read_jsonl(path)
+        if (record.get("payload") or {}).get("action") == "candidate_accepted"
+    ]
+
+
 def log_path(tmp_path: Path, ant: ResearchAnt) -> Path:
     return tmp_path / "research" / f"{ant.ant_id}.jsonl"
 
@@ -490,7 +498,7 @@ class TestThresholdFilter:
 
         ant._tick()
 
-        assert not log_path(tmp_path, ant).exists()
+        assert candidate_records(log_path(tmp_path, ant)) == []
 
     def test_win_rate_below_threshold_not_logged(self, tmp_path):
         """Scenario 10: win_rate < 0.45 → kandidaat niet gelogd."""
@@ -501,7 +509,7 @@ class TestThresholdFilter:
 
         ant._tick()
 
-        assert not log_path(tmp_path, ant).exists()
+        assert candidate_records(log_path(tmp_path, ant)) == []
 
     def test_both_thresholds_met_candidate_logged(self, tmp_path):
         """Precies boven beide drempels → kandidaat wel gelogd."""
@@ -524,7 +532,7 @@ class TestThresholdFilter:
 
         ant._tick()
 
-        assert not log_path(tmp_path, ant).exists()
+        assert candidate_records(log_path(tmp_path, ant)) == []
 
 
 # ---------------------------------------------------------------------------
@@ -541,7 +549,7 @@ class TestDataValidation:
 
         ant._tick()  # mag niet raisen
 
-        assert not log_path(tmp_path, ant).exists()
+        assert candidate_records(log_path(tmp_path, ant)) == []
 
     def test_empty_candles_no_crash(self, tmp_path):
         """Lege candle lijst → geen crash."""
@@ -549,6 +557,9 @@ class TestDataValidation:
         ant = make_ant(tmp_path, registry=registry)
 
         ant._tick()
+
+        records = read_jsonl(log_path(tmp_path, ant))
+        assert any((r.get("payload") or {}).get("action") == "research_tick" for r in records)
 
     def test_unavailable_adapter_no_crash(self, tmp_path):
         """Scenario 12: adapter niet bereikbaar → geen crash."""
@@ -588,7 +599,7 @@ class TestDataValidation:
 
         ant._tick()  # mag niet raisen
 
-        assert not log_path(tmp_path, ant).exists()
+        assert candidate_records(log_path(tmp_path, ant)) == []
 
 
 # ---------------------------------------------------------------------------
@@ -756,6 +767,8 @@ class TestTTLExpiry:
         assert ant._watchdog_restarts == 1
         assert ant._last_action == "tick_watchdog_restart"
         assert any("ResearchAnt watchdog" in record.message for record in caplog.records)
+        records = read_jsonl(log_path(tmp_path, ant))
+        assert any((r.get("payload") or {}).get("action") == "research_watchdog_restart" for r in records)
 
 
 # ---------------------------------------------------------------------------
@@ -838,7 +851,7 @@ class TestAuditLog:
 
         ant._tick()
 
-        assert not log_path(tmp_path, ant).exists()
+        assert candidate_records(log_path(tmp_path, ant)) == []
 
     def test_no_log_when_logs_root_is_none(self, tmp_path):
         """Scenario 20: logs_root=None → geen crash, geen bestand."""

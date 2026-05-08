@@ -63,6 +63,10 @@ class TestSchedulerInstantiation:
         s = make_scheduler(tmp_path)
         assert s.status == ColonyStatus.RUNNING
 
+    def test_default_watchdog_threshold_targets_sub_minute_ticks(self, tmp_path):
+        s = make_scheduler(tmp_path)
+        assert s._watchdog_threshold_seconds == 60
+
     def test_tick_does_not_execute_at_import(self):
         # Importing the module must not run any code — verified by the fact
         # that we can import without side effects.
@@ -85,6 +89,8 @@ class TestTick:
         log_path = tmp_path / "colony" / "scheduler.jsonl"
         records = read_log(log_path)
         assert len(records) >= 1
+        tick = next(r for r in records if r.get("event_type") == "tick")
+        assert "duration_seconds" in tick
 
     def test_tick_is_skipped_when_halted(self, tmp_path):
         s = make_scheduler(tmp_path)
