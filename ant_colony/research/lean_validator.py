@@ -32,12 +32,16 @@ class LeanValidator:
         *,
         timeout_seconds: int = 120,
         lean_executable: str = "lean",
+        template_name: str = "sma_crossover",
     ) -> None:
         self.logs_root = Path(logs_root) if logs_root is not None else Path(
             os.getenv("ANT_LOGS", "logs")
         )
         self.timeout_seconds = timeout_seconds
         self.lean_executable = lean_executable
+        self.template_name = template_name
+        self.repo_root = Path(__file__).resolve().parents[2]
+        self.template_dir = self.repo_root / "lean_projects" / template_name
 
     def validate(self, candidate: dict[str, Any]) -> LeanResult:
         """
@@ -58,13 +62,8 @@ class LeanValidator:
             output_dir = project_dir / "lean-output"
             output_dir.mkdir(parents=True, exist_ok=True)
 
-            command = [
-                self.lean_executable,
-                "backtest",
-                str(project_dir),
-                "--output",
-                str(output_dir),
-            ]
+            lean_command = self._resolve_lean_executable()
+            command = [lean_command, "backtest", str(project_dir)]
             proc = subprocess.run(
                 command,
                 capture_output=True,
@@ -78,7 +77,7 @@ class LeanValidator:
                 self._write_result(candidate_id, result)
                 return result
 
-            metrics = self._parse_output(output_dir)
+            metrics = self._parse_output(project_dir)
             if metrics is None:
                 result = self._base_result("failed", "Lean output JSON niet gevonden of onleesbaar")
                 self._write_result(candidate_id, result)
@@ -102,13 +101,38 @@ class LeanValidator:
             return result
 
     def _check_availability(self) -> str | None:
-        if shutil.which(self.lean_executable) is None:
+        if self._resolve_lean_executable() is None:
             return "lean CLI niet gevonden"
         if shutil.which("docker") is None:
             return "Docker niet gevonden"
         ok, output = self._run_quick(["docker", "--version"])
         if not ok:
             return f"Docker niet beschikbaar: {output}"
+        return None
+
+    def _resolve_lean_executable(self) -> str | None:
+        resolved = shutil.which(self.lean_executable)
+        if resolved:
+            return resolved
+        explicit = Path(self.lean_executable)
+        if explicit.exists():
+            return str(explicit)
+        if self.lean_executable != "lean":
+            return None
+        env_path = os.getenv("LEAN_CLI_PATH")
+        if env_path and Path(env_path).exists():
+            return env_path
+        common_pc1_path = (
+            Path.home()
+            / "AppData"
+            / "Local"
+            / "Python"
+            / "pythoncore-3.14-64"
+            / "Scripts"
+            / "lean.EXE"
+        )
+        if common_pc1_path.exists():
+            return str(common_pc1_path)
         return None
 
     @staticmethod
@@ -128,23 +152,55 @@ class LeanValidator:
     def _prepare_project(self, candidate: dict[str, Any]) -> Path:
         candidate_id = self._safe_id(str(candidate.get("candidate_id") or "candidate"))
         project_dir = self.logs_root / "lean" / "work" / candidate_id
-        project_dir.mkdir(parents=True, exist_ok=True)
-        (project_dir / "main.py").write_text(
-            self._render_algorithm(candidate),
-            encoding="utf-8",
-        )
-        (project_dir / "config.json").write_text(
-            json.dumps(
-                {
-                    "algorithm-language": "Python",
-                    "algorithm-location": "main.py",
-                    "data-folder": "data",
-                },
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
+        if not self.template_dir.exists():
+            raise FileNotFoundError(f"Lean template niet gevonden: {self.template_dir}")
+        shutil.copytree(self.template_dir, project_dir, dirs_exist_ok=True)
+        config_path = project_dir / "config.json"
+        try:
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            config = {"algorithm-language": "Python", "algorithm-location": "main.py"}
+        params = dict(config.get("parameters") or {})
+        params.update(self._candidate_parameters(candidate))
+        config["parameters"] = {k: str(v) for k, v in params.items()}
+        config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
         return project_dir
+
+    def _candidate_parameters(self, candidate: dict[str, Any]) -> dict[str, Any]:
+        market_scope = candidate.get("market_scope") or {}
+        parameters = candidate.get("parameters") or {}
+        strategy_params = candidate.get("strategy_parameters") or {}
+        symbol = (
+            market_scope.get("symbol")
+            or candidate.get("symbol")
+            or candidate.get("asset")
+            or parameters.get("symbol")
+            or "BTCUSD"
+        )
+        return {
+            "symbol": self._lean_symbol(str(symbol)),
+            "short_period": _first_present(
+                parameters,
+                strategy_params,
+                candidate,
+                keys=("short_period", "short_sma", "fast_period", "fast_window"),
+                default=10,
+            ),
+            "long_period": _first_present(
+                parameters,
+                strategy_params,
+                candidate,
+                keys=("long_period", "long_sma", "slow_period", "slow_window"),
+                default=30,
+            ),
+            "cash": _first_present(parameters, candidate, keys=("cash", "starting_cash"), default=10000),
+            "start_year": _first_present(parameters, candidate, keys=("start_year",), default=2021),
+            "start_month": _first_present(parameters, candidate, keys=("start_month",), default=1),
+            "start_day": _first_present(parameters, candidate, keys=("start_day",), default=1),
+            "end_year": _first_present(parameters, candidate, keys=("end_year",), default=2024),
+            "end_month": _first_present(parameters, candidate, keys=("end_month",), default=1),
+            "end_day": _first_present(parameters, candidate, keys=("end_day",), default=1),
+        }
 
     def _render_algorithm(self, candidate: dict[str, Any]) -> str:
         symbol = str((candidate.get("market_scope") or {}).get("symbol") or "SPY")
@@ -341,3 +397,14 @@ class CandidateValidationAlgorithm(QCAlgorithm):
     def _trim_reason(value: str, max_len: int = 500) -> str:
         text = " ".join(str(value).split())
         return text[:max_len] if len(text) > max_len else text
+
+
+def _first_present(*sources: dict[str, Any], keys: tuple[str, ...], default: Any) -> Any:
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for key in keys:
+            value = source.get(key)
+            if value is not None:
+                return value
+    return default

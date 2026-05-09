@@ -62,7 +62,8 @@ def test_validate_runs_lean_and_writes_passed_result(tmp_path: Path, monkeypatch
     monkeypatch.setattr(validator, "_run_quick", lambda _cmd: (True, "Docker version ok"))
 
     def fake_run(command, **kwargs):
-        output_dir = Path(command[command.index("--output") + 1])
+        project_dir = Path(command[-1])
+        output_dir = project_dir / "backtests" / "unit-test"
         output_dir.mkdir(parents=True, exist_ok=True)
         (output_dir / "result.json").write_text(
             json.dumps(
@@ -78,6 +79,7 @@ def test_validate_runs_lean_and_writes_passed_result(tmp_path: Path, monkeypatch
             encoding="utf-8",
         )
         assert kwargs["timeout"] == 120
+        assert command[:2] == ["C:/fake/tool.exe", "backtest"]
         return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
 
     monkeypatch.setattr("ant_colony.research.lean_validator.subprocess.run", fake_run)
@@ -96,3 +98,19 @@ def test_validate_runs_lean_and_writes_passed_result(tmp_path: Path, monkeypatch
     assert result["lean_sharpe"] == 0.88
     stored = json.loads((tmp_path / "lean" / "cand-lean-ok.json").read_text(encoding="utf-8"))
     assert stored["lean_status"] == "passed"
+
+
+def test_prepare_project_uses_sma_template_and_candidate_parameters(tmp_path: Path) -> None:
+    validator = LeanValidator(tmp_path)
+
+    project_dir = validator._prepare_project({
+        "candidate_id": "cand-template",
+        "market_scope": {"symbol": "BTC-EUR"},
+        "parameters": {"short_period": 12, "long_period": 34},
+    })
+
+    assert (project_dir / "main.py").exists()
+    config = json.loads((project_dir / "config.json").read_text(encoding="utf-8"))
+    assert config["parameters"]["symbol"] == "BTCEUR"
+    assert config["parameters"]["short_period"] == "12"
+    assert config["parameters"]["long_period"] == "34"

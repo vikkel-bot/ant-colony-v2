@@ -1,0 +1,17 @@
+{
+    "algorithm-language": "Python",
+    "algorithm-location": "main.py",
+    "parameters": {
+        "symbol": "BTCUSD",
+        "short_period": "10",
+        "long_period": "30",
+        "cash": "10000",
+        "start_year": "2021",
+        "start_month": "1",
+        "start_day": "1",
+        "end_year": "2024",
+        "end_month": "1",
+        "end_day": "1"
+    },
+    "local-id": 983308403
+}

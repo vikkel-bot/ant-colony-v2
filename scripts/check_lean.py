@@ -10,6 +10,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 
 def _run(command: list[str], timeout: int = 10) -> tuple[bool, str]:
@@ -29,23 +30,53 @@ def _run(command: list[str], timeout: int = 10) -> tuple[bool, str]:
 
 def main() -> int:
     lean_path = shutil.which("lean")
+    lean_fallback_path = (
+        Path.home()
+        / "AppData"
+        / "Local"
+        / "Python"
+        / "pythoncore-3.14-64"
+        / "Scripts"
+        / "lean.EXE"
+    )
+    lean_executable = lean_path or (str(lean_fallback_path) if lean_fallback_path.exists() else None)
     docker_path = shutil.which("docker")
 
-    lean_cli_ok = lean_path is not None
+    lean_cli_ok = lean_executable is not None
     docker_ok = False
     docker_output = "docker niet gevonden"
     if docker_path:
         docker_ok, docker_output = _run(["docker", "--version"])
 
     package_ok, package_output = _run([sys.executable, "-m", "pip", "show", "lean"])
+    package_source = sys.executable
+    python314_path = (
+        Path.home()
+        / "AppData"
+        / "Local"
+        / "Python"
+        / "pythoncore-3.14-64"
+        / "python.exe"
+    )
+    if not package_ok:
+        if python314_path.exists():
+            package_ok, package_output = _run([str(python314_path), "-m", "pip", "show", "lean"])
+            if package_ok:
+                package_source = str(python314_path)
+    if not package_ok:
+        package_ok, package_output = _run(["py", "-3.14", "-m", "pip", "show", "lean"])
+        if package_ok:
+            package_source = "py -3.14"
 
     print("Lean installatie check")
     print("======================")
     print(f"lean CLI      : {'OK' if lean_cli_ok else 'ONTBREEKT'}")
-    print(f"lean path     : {lean_path or '-'}")
+    print(f"lean via PATH : {lean_path or '-'}")
+    print(f"lean executable: {lean_executable or '-'}")
     print(f"Docker        : {'OK' if docker_ok else 'ONTBREEKT'}")
     print(f"Docker info   : {docker_output or '-'}")
     print(f"Python package: {'OK' if package_ok else 'ONTBREEKT'}")
+    print(f"Package source: {package_source if package_ok else '-'}")
     print(f"Package info  : {package_output.splitlines()[0] if package_output else '-'}")
     print("")
 
