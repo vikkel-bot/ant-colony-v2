@@ -63,15 +63,21 @@ from ant_colony.schemas.mission import Mission
 _TRADE_CAPITAL_FRACTION = 0.10   # 10% van beschikbaar kapitaal per trade
 _SL_PCT  = 0.02                  # 2% stop-loss onder entry
 _TP_PCT  = 0.03                  # 3% take-profit boven entry
+_SHORT_SL_PCT = 0.03             # shorts: 3% stop-loss boven entry
+_SHORT_TP_PCT = 0.04             # shorts: 4% take-profit onder entry
 _SIGNAL_VALIDITY_TICKS = 2       # signal geldig voor heartbeat_interval × 2 seconden
 _MAX_OPEN_POSITIONS    = 10      # maximaal 10 open posities tegelijk (1 per symbool)
+_MAX_OPEN_SHORT_POSITIONS = 2    # shorts apart gelimiteerd naast long posities
 _STALE_SIGNAL_MINUTES  = 5       # signalen ouder dan dit worden genegeerd
 _ZOMBIE_POSITION_HOURS = 168     # posities zonder close ouder dan dit → zombie (7 dagen)
 _PAPER_CANDIDATE_WATCHDOG_SECONDS = 15 * 60
 _PAPER_TICK_WATCHDOG_SECONDS = float(os.getenv("PAPER_ANT_WATCHDOG_SECONDS", "600"))
+_MIN_ENTRY_SHARPE = 0.15
+_MIN_ENTRY_WIN_RATE = 0.45
 
 # --- Regime-gebaseerde entry filtering ---
 _SIDEWAYS_ALLOWED_STRATEGY_TYPES = frozenset(["mean_reversion", "rsi_based"])
+_SHORT_ALLOWED_REGIMES = frozenset(["SIDEWAYS", "BEAR", "BEARISH", "RISK_OFF"])
 _VOLATILE_MIN_SHARPE    = 0.3    # minimale sharpe voor entry in VOLATILE regime
 _VOLATILE_SL_MULTIPLIER = 1.5    # SL-percentage 50% groter in VOLATILE regime
 _VOLATILE_CAPITAL_MULT  = 0.5    # positiegrootte halveren in VOLATILE regime
@@ -434,6 +440,47 @@ class PaperAnt:
             return True, ""
 
         return True, ""  # onbekend regime → fail-open
+
+    def _is_short_allowed_by_regime(self, regime: str | None, symbol: str = "") -> tuple[bool, str]:
+        """Shorts alleen toestaan in expliciet short-vriendelijk regime."""
+        normalized = str(regime or "").upper()
+        if normalized in _SHORT_ALLOWED_REGIMES:
+            return True, ""
+        if not normalized:
+            return False, f"{symbol} short geblokkeerd: geen expliciet SIDEWAYS/BEAR regime"
+        return False, f"{symbol} short geblokkeerd in regime={normalized}"
+
+    def _open_short_count(self) -> int:
+        return sum(1 for p in self._ledger.open_positions if p.side == PositionSide.SHORT)
+
+    def _short_capacity_available(self, symbol: str) -> tuple[bool, str]:
+        open_shorts = self._open_short_count()
+        if open_shorts >= _MAX_OPEN_SHORT_POSITIONS:
+            return (
+                False,
+                f"{symbol} short geblokkeerd: max_open_shorts={open_shorts}/{_MAX_OPEN_SHORT_POSITIONS}",
+            )
+        return True, ""
+
+    def _passes_entry_thresholds(
+        self,
+        *,
+        symbol: str,
+        strategy_type: str,
+        sharpe: float,
+        win_rate: float,
+    ) -> tuple[bool, str]:
+        if sharpe < _MIN_ENTRY_SHARPE:
+            return (
+                False,
+                f"{symbol} {strategy_type} sharpe={sharpe:.3f} < {_MIN_ENTRY_SHARPE:.2f}",
+            )
+        if win_rate < _MIN_ENTRY_WIN_RATE:
+            return (
+                False,
+                f"{symbol} {strategy_type} win_rate={win_rate:.3f} < {_MIN_ENTRY_WIN_RATE:.2f}",
+            )
+        return True, ""
 
     @staticmethod
     def _is_stale_timestamp(ts_str: str | None) -> bool:
@@ -879,28 +926,57 @@ class PaperAnt:
 
         direction = str(payload.get("direction") or "long")
         strategy_type = str(payload.get("strategy_type") or "unknown")
+        biome = str(payload.get("biome") or self.mission.market_scope.biome)
 
-        if direction != "long":
+        if direction not in ("long", "short"):
             self._log.debug(
-                "research candidate skipped | symbol=%s strategy=%s reason=direction_not_long direction=%s",
+                "research candidate skipped | symbol=%s strategy=%s reason=unsupported_direction direction=%s",
                 symbol, strategy_type, direction,
             )
             return
 
-        tp_pct = float(payload.get("tp_pct") or _TP_PCT)
-        sl_pct = float(payload.get("sl_pct") or _SL_PCT)
+        if direction == "short":
+            tp_pct = _SHORT_TP_PCT
+            sl_pct = _SHORT_SL_PCT
+        else:
+            tp_pct = float(payload.get("tp_pct") or _TP_PCT)
+            sl_pct = float(payload.get("sl_pct") or _SL_PCT)
 
         # Regime-filter: strategy_type en sharpe valideren
         sharpe = float(payload.get("sharpe") or payload.get("sharpe_ratio") or 0.0)
-        allowed, reason = self._is_entry_allowed_by_regime(
-            regime,
-            strategy_type=strategy_type,
-            sharpe=sharpe,
-            symbol=symbol,
-        )
-        if not allowed:
-            self._log.info("Entry geblokkeerd: %s", reason)
-            return
+        win_rate = float(payload.get("win_rate") or 0.0)
+        if direction == "short":
+            if biome != "crypto":
+                self._log.info("Entry geblokkeerd: %s short alleen toegestaan in crypto biome", symbol)
+                return
+            allowed, reason = self._is_short_allowed_by_regime(regime, symbol=symbol)
+            if not allowed:
+                self._log.info("Entry geblokkeerd: %s", reason)
+                return
+            allowed, reason = self._short_capacity_available(symbol)
+            if not allowed:
+                self._log.info("Entry geblokkeerd: %s", reason)
+                return
+            allowed, reason = self._passes_entry_thresholds(
+                symbol=symbol,
+                strategy_type=strategy_type,
+                sharpe=sharpe,
+                win_rate=win_rate,
+            )
+            if not allowed:
+                self._log.info("Entry geblokkeerd: %s", reason)
+                return
+
+        if direction == "long":
+            allowed, reason = self._is_entry_allowed_by_regime(
+                regime,
+                strategy_type=strategy_type,
+                sharpe=sharpe,
+                symbol=symbol,
+            )
+            if not allowed:
+                self._log.info("Entry geblokkeerd: %s", reason)
+                return
 
         if self._has_open_research_position(symbol, strategy_type):
             self._log.debug(
@@ -921,10 +997,18 @@ class PaperAnt:
             "symbol":        symbol,
             "current_price": price,
             "confidence":    1.0,
-            "biome":         str(payload.get("biome") or self.mission.market_scope.biome),
+            "biome":         biome,
             "signal_id":     payload.get("candidate_id"),
         }
-        self._try_open_position(sig, strategy_type=strategy_type, sl_pct=sl_pct, tp_pct=tp_pct, regime=regime)
+        self._try_open_position(
+            sig,
+            strategy_type=strategy_type,
+            sl_pct=sl_pct,
+            tp_pct=tp_pct,
+            regime=regime,
+            side=direction,
+            sharpe=sharpe,
+        )
 
     def _try_open_position(
         self,
@@ -934,8 +1018,10 @@ class PaperAnt:
         sl_pct: float | None = None,
         tp_pct: float | None = None,
         regime: str | None = None,
+        side: str = "long",
+        sharpe: float | None = None,
     ) -> None:
-        """Bouw een EntrySignal en probeer een LONG positie te openen via PaperBroker.
+        """Bouw een EntrySignal en probeer een positie te openen via PaperBroker.
 
         strategy_type: als opgegeven, wordt dit als research-positie geregistreerd
                        (dedup via _open_research_keys). Zonder strategy_type: scout-pad.
@@ -944,6 +1030,9 @@ class PaperAnt:
         """
         symbol = sig.get("symbol", "")
         if not symbol:
+            return
+        if side not in ("long", "short"):
+            self._log.debug("unsupported side voor %s: %s", symbol, side)
             return
 
         entry_price = self._fetch_price(symbol)
@@ -980,8 +1069,8 @@ class PaperAnt:
             )
             return
 
-        used_sl_pct = sl_pct if sl_pct is not None else _SL_PCT
-        used_tp_pct = tp_pct if tp_pct is not None else _TP_PCT
+        used_sl_pct = sl_pct if sl_pct is not None else (_SHORT_SL_PCT if side == "short" else _SL_PCT)
+        used_tp_pct = tp_pct if tp_pct is not None else (_SHORT_TP_PCT if side == "short" else _TP_PCT)
         capital_fraction = _TRADE_CAPITAL_FRACTION
 
         # Market signal: nieuws + regime gecombineerd — komt bovenop VOLATILE aanpassing
@@ -1006,8 +1095,12 @@ class PaperAnt:
                 symbol, used_sl_pct, capital_fraction,
             )
 
-        sl = entry_price * (1.0 - used_sl_pct)
-        tp = entry_price * (1.0 + used_tp_pct)
+        if side == "short":
+            sl = entry_price * (1.0 + used_sl_pct)
+            tp = entry_price * (1.0 - used_tp_pct)
+        else:
+            sl = entry_price * (1.0 - used_sl_pct)
+            tp = entry_price * (1.0 + used_tp_pct)
 
         capital_available = self._ledger.capital_available
         capital_per_trade = capital_available * capital_fraction
@@ -1020,7 +1113,7 @@ class PaperAnt:
                 mission_id=self.mission.mission_id,
                 ant_id=self.ant_id,
                 source=SignalSource.SCOUT_ANT,
-                side="long",
+                side=side,
                 entry_price=entry_price,
                 stop_loss_price=sl,
                 take_profit_price=tp,
@@ -1052,11 +1145,23 @@ class PaperAnt:
                 tp_pct=used_tp_pct,
             )
             self._last_action = f"trade_opened:{symbol}"
-            self._log.info(
-                "POSITIE GEOPEND | %s LONG %.8f @ %.4f  SL=%.4f  TP=%.4f  strategie=%s",
-                symbol, result.position.quantity, entry_price, sl, tp,
-                strategy_type or "scout",
-            )
+            if side == "short":
+                self._log.info(
+                    "SHORT GEOPEND | %s direction=short sharpe=%s qty=%.8f @ %.4f SL=%.4f TP=%.4f strategie=%s",
+                    symbol,
+                    f"{sharpe:.3f}" if sharpe is not None else "n/a",
+                    result.position.quantity,
+                    entry_price,
+                    sl,
+                    tp,
+                    strategy_type or "scout",
+                )
+            else:
+                self._log.info(
+                    "POSITIE GEOPEND | %s LONG %.8f @ %.4f  SL=%.4f  TP=%.4f  strategie=%s",
+                    symbol, result.position.quantity, entry_price, sl, tp,
+                    strategy_type or "scout",
+                )
         else:
             self._log.debug(
                 "Positie geweigerd voor %s — %s: %s",
@@ -1129,10 +1234,9 @@ class PaperAnt:
             or "long"
         )
 
-        # Alleen long-posities (consistent met bestaande PaperAnt doctrine)
-        if direction != "long":
+        if direction not in ("long", "short"):
             self._log.debug(
-                "Approved candidate %s heeft direction=%s — overgeslagen",
+                "Approved candidate %s heeft unsupported direction=%s — overgeslagen",
                 record.get("candidate_id"), direction,
             )
             return
@@ -1153,24 +1257,57 @@ class PaperAnt:
             or (record.get("parameters") or {}).get("strategy_type")
             or "unknown"
         )
+        biome = str(record.get("biome") or self.mission.market_scope.biome)
         sharpe = float(
             record.get("sharpe_ratio") or record.get("sharpe")
             or record.get("fitness_score") or 0.0
         )
-        allowed, reason = self._is_entry_allowed_by_regime(
-            regime, strategy_type=strategy_type, sharpe=sharpe, symbol=symbol
-        )
-        if not allowed:
-            self._log.info("Entry geblokkeerd: %s", reason)
-            return
+        win_rate = float(record.get("win_rate") or parameters.get("win_rate") or 0.0)
+        if direction == "short":
+            if biome != "crypto":
+                self._log.info("Entry geblokkeerd: %s short alleen toegestaan in crypto biome", symbol)
+                return
+            allowed, reason = self._is_short_allowed_by_regime(regime, symbol=symbol)
+            if not allowed:
+                self._log.info("Entry geblokkeerd: %s", reason)
+                return
+            allowed, reason = self._short_capacity_available(symbol)
+            if not allowed:
+                self._log.info("Entry geblokkeerd: %s", reason)
+                return
+            allowed, reason = self._passes_entry_thresholds(
+                symbol=symbol,
+                strategy_type=strategy_type,
+                sharpe=sharpe,
+                win_rate=win_rate,
+            )
+            if not allowed:
+                self._log.info("Entry geblokkeerd: %s", reason)
+                return
+
+        if direction == "long":
+            allowed, reason = self._is_entry_allowed_by_regime(
+                regime, strategy_type=strategy_type, sharpe=sharpe, symbol=symbol
+            )
+            if not allowed:
+                self._log.info("Entry geblokkeerd: %s", reason)
+                return
 
         sig = {
             "symbol":        symbol,
             "current_price": price,
             "confidence":    float(record.get("fitness_score") or 0.7),
-            "biome":         str(record.get("biome") or self.mission.market_scope.biome),
+            "biome":         biome,
         }
-        self._try_open_position(sig, regime=regime)
+        self._try_open_position(
+            sig,
+            regime=regime,
+            side=direction,
+            strategy_type=strategy_type if direction == "short" else None,
+            sl_pct=_SHORT_SL_PCT if direction == "short" else None,
+            tp_pct=_SHORT_TP_PCT if direction == "short" else None,
+            sharpe=sharpe,
+        )
 
     # ------------------------------------------------------------------
     # Scout-signalen lezen

@@ -20,8 +20,11 @@ import pytest
 from ant_colony.ants.paper_ant import (
     BROKER_FEE_PCT,
     PaperAnt,
+    _MAX_OPEN_SHORT_POSITIONS,
     _MAX_OPEN_POSITIONS,
     _PAPER_CANDIDATE_WATCHDOG_SECONDS,
+    _SHORT_SL_PCT,
+    _SHORT_TP_PCT,
     _SL_PCT,
     _TP_PCT,
     _TRADE_CAPITAL_FRACTION,
@@ -790,6 +793,7 @@ def write_research_candidate(
     tp_pct: float = 0.06,
     sl_pct: float = 0.03,
     sharpe: float = 0.8,
+    win_rate: float = 0.55,
     biome: str = _BIOME,
     ant_id: str = "ant-research-001",
     filename: str | None = None,
@@ -810,6 +814,7 @@ def write_research_candidate(
             "tp_pct": tp_pct,
             "sl_pct": sl_pct,
             "sharpe": sharpe,
+            "win_rate": win_rate,
             "biome": biome,
         },
     }
@@ -889,12 +894,77 @@ class TestResearchCandidates:
         ant._tick()
         assert len(ant._ledger.open_positions) == 1
 
-    def test_short_direction_skipped(self, tmp_path: Path) -> None:
+    def test_short_direction_opens_in_sideways(self, tmp_path: Path, caplog) -> None:
         ant = make_ant(logs_root=tmp_path)
         ant.biome_registry.get.return_value = _make_adapter_with_price(_PRICE)
-        write_research_candidate(tmp_path / "research", direction="short")
-        ant._tick()
+        write_research_candidate(
+            tmp_path / "research",
+            direction="short",
+            strategy_type="rsi_overbought",
+            sharpe=0.7,
+            win_rate=0.7,
+        )
+
+        with caplog.at_level(logging.INFO, logger=f"ant.paper.{ant.ant_id[:8]}"):
+            ant._process_research_candidates(regime="SIDEWAYS")
+
+        assert len(ant._ledger.open_positions) == 1
+        pos = ant._ledger.open_positions[0]
+        assert pos.side == PositionSide.SHORT
+        assert pos.stop_loss_price == pytest.approx(_PRICE * (1.0 + _SHORT_SL_PCT))
+        assert pos.take_profit_price == pytest.approx(_PRICE * (1.0 - _SHORT_TP_PCT))
+        assert any("SHORT GEOPEND" in r.message for r in caplog.records)
+
+    def test_short_direction_blocked_in_risk_on(self, tmp_path: Path) -> None:
+        ant = make_ant(logs_root=tmp_path)
+        ant.biome_registry.get.return_value = _make_adapter_with_price(_PRICE)
+        write_research_candidate(
+            tmp_path / "research",
+            direction="short",
+            strategy_type="rsi_overbought",
+            sharpe=0.7,
+            win_rate=0.7,
+        )
+
+        ant._process_research_candidates(regime="RISK_ON")
+
         assert len(ant._ledger.open_positions) == 0
+
+    def test_short_direction_requires_thresholds(self, tmp_path: Path) -> None:
+        ant = make_ant(logs_root=tmp_path)
+        ant.biome_registry.get.return_value = _make_adapter_with_price(_PRICE)
+        write_research_candidate(
+            tmp_path / "research",
+            direction="short",
+            strategy_type="rsi_overbought",
+            sharpe=0.8,
+            win_rate=0.4,
+        )
+
+        ant._process_research_candidates(regime="SIDEWAYS")
+
+        assert len(ant._ledger.open_positions) == 0
+
+    def test_short_direction_limited_to_two_open_positions(self, tmp_path: Path) -> None:
+        symbols = ["XRP-EUR", "ADA-EUR", "LINK-EUR"]
+        mission = make_mission(capital=100_000.0, symbols=symbols)
+        ant = make_ant(mission=mission, logs_root=tmp_path)
+        ant.biome_registry.get.return_value = _make_adapter_with_price(_PRICE)
+        for idx, symbol in enumerate(symbols):
+            write_research_candidate(
+                tmp_path / "research",
+                filename=f"r{idx}.jsonl",
+                symbol=symbol,
+                direction="short",
+                strategy_type=f"rsi_overbought_{idx}",
+                sharpe=0.7,
+                win_rate=0.7,
+            )
+
+        ant._process_research_candidates(regime="SIDEWAYS")
+
+        shorts = [p for p in ant._ledger.open_positions if p.side == PositionSide.SHORT]
+        assert len(shorts) == _MAX_OPEN_SHORT_POSITIONS
 
     def test_no_price_skips_candidate(self, tmp_path: Path) -> None:
         ant = make_ant(logs_root=tmp_path)
