@@ -41,9 +41,10 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
+from threading import RLock
 
 from ant_colony.colony.node_registry import NodeRegistry
 from ant_colony.colony.scheduler.colony_scheduler import ColonyScheduler, KillLevel
@@ -71,6 +72,7 @@ _VALID_PROMOTIONS: dict[CandidateStatus, CandidateStatus] = {
 }
 
 logger = logging.getLogger(__name__)
+_WATCHTOWER_CONTEXT_TTL = timedelta(hours=24)
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +176,8 @@ class Queen:
         self._biome_limits: dict[str, float] = {}
         self._node_registry: NodeRegistry = NodeRegistry()
         self._log_sequence: int = 0
+        self._watchtower_lock = RLock()
+        self._watchtower_state: dict = self._load_watchtower_state()
 
     # ------------------------------------------------------------------
     # Kapitaal
@@ -653,6 +657,79 @@ class Queen:
     # Advisor integratie
     # ------------------------------------------------------------------
 
+    def register_watchtower_signal(self, signal: dict) -> None:
+        """
+        Registreer Watchtower-context voor QueenAdvisor en dashboard.
+
+        Watchtower blijft adviserend: deze methode zet geen trade of harde
+        blokkade, maar houdt bij welke signalen de Queen wel of niet gebruikt.
+        """
+        if not isinstance(signal, dict):
+            return
+
+        now = datetime.now(tz=timezone.utc)
+        signal_ts = (
+            _parse_watchtower_ts(
+                signal.get("created_at")
+                or signal.get("timestamp")
+                or signal.get("emitted_at")
+                or signal.get("received_at")
+            )
+            or now
+        ).astimezone(timezone.utc)
+        accepted = _truthy(signal.get("queen_accepted", signal.get("accepted", True)))
+
+        event = {
+            "timestamp": signal_ts.isoformat(),
+            "asset": str(signal.get("asset") or signal.get("symbol") or "").upper(),
+            "asset_class": (
+                signal.get("asset_class")
+                or signal.get("biome")
+                or signal.get("source_field")
+                or "unknown"
+            ),
+            "entry_score": _float_or_zero(signal.get("entry_score")),
+            "confidence": _float_or_zero(signal.get("confidence")),
+            "regime": signal.get("regime") or signal.get("market_regime") or "unknown",
+            "risk_flags": _as_list(signal.get("risk_flags")),
+            "accepted": accepted,
+            "reason": signal.get("queen_rejection_reason") or signal.get("rejection_reason") or "",
+            "signal_id": signal.get("signal_id") or signal.get("id"),
+        }
+
+        with self._watchtower_lock:
+            state = dict(self._watchtower_state or {})
+            events = [e for e in state.get("signal_events_24h", []) if isinstance(e, dict)]
+            events.append(event)
+            cutoff = now - _WATCHTOWER_CONTEXT_TTL
+            events = [
+                e for e in events
+                if (_parse_watchtower_ts(e.get("timestamp")) or cutoff) >= cutoff
+            ]
+            state.update({
+                "last_signal_ts": event["timestamp"],
+                "last_asset": event["asset"],
+                "last_asset_class": event["asset_class"],
+                "last_score": event["entry_score"],
+                "last_confidence": event["confidence"],
+                "last_regime": event["regime"],
+                "last_risk_flags": event["risk_flags"],
+                "signals_24h": [str(e.get("timestamp")) for e in events if e.get("timestamp")],
+                "signal_events_24h": events,
+                "accepted_24h": sum(1 for e in events if e.get("accepted")),
+                "rejected_24h": sum(1 for e in events if not e.get("accepted")),
+                "updated_at": now.isoformat(),
+            })
+            self._watchtower_state = state
+            self._persist_watchtower_state()
+
+    def get_watchtower_context(self) -> dict:
+        """Geef de laatst bekende Watchtower-context terug."""
+        with self._watchtower_lock:
+            state = {**_default_watchtower_state(), **dict(self._watchtower_state or {})}
+            state["last_risk_flags"] = _as_list(state.get("last_risk_flags"))
+            return state
+
     def apply_advisor_decision(self, decision) -> None:
         """
         Verwerk een QueenDecision van QueenAdvisor.
@@ -665,10 +742,6 @@ class Queen:
             decision: QueenDecision van QueenAdvisor.advise().
         """
         from ant_colony.queen.allocator import AllocationPlan
-
-        if decision.is_empty():
-            logger.debug("apply_advisor_decision: lege beslissing — niets te doen")
-            return
 
         # Allocatie aanpassen als het plan adviezen bevat
         alloc_result = None
@@ -690,8 +763,11 @@ class Queen:
     def _log_advisor_decision(self, decision, alloc_result=None) -> None:
         if self._logs_root is None:
             return
+        wt_context = getattr(decision, "watchtower_context", {}) or {}
         record = {
             "timestamp":               datetime.now(tz=timezone.utc).isoformat(),
+            "regime":                  getattr(decision, "regime", None),
+            "watchtower_context":      wt_context,
             "allocatie_aanpassingen":  decision.allocatie_aanpassingen,
             "prioriteit_kandidaten":   decision.prioriteit_kandidaten,
             "deprioriteer_kandidaten": decision.deprioriteer_kandidaten,
@@ -704,12 +780,46 @@ class Queen:
         log_path = self._logs_root / "queen" / "decisions.jsonl"
         self._append_to_log(log_path, record)
         logger.info(
-            "Advisor beslissing gelogd | gevolgd=%d genegeerd=%d verhogen=%d verlagen=%d",
+            "Queen cyclus | regime=%s wt_score=%s wt_regime=%s deprioriteer=%d verhogen=%d gevolgd=%d genegeerd=%d",
+            record.get("regime") or "unknown",
+            wt_context.get("last_score", 0.0),
+            wt_context.get("last_regime", "unknown"),
+            len(decision.deprioriteer_kandidaten),
+            len(decision.kapitaal_verhogen),
             len(decision.adviezen_gevolgd),
             len(decision.adviezen_genegeerd),
-            len(decision.kapitaal_verhogen),
-            len(decision.kapitaal_verlagen),
         )
+
+    def _watchtower_state_path(self) -> Path | None:
+        if self._logs_root is None:
+            return None
+        return self._logs_root / "queen" / "watchtower_state.json"
+
+    def _load_watchtower_state(self) -> dict:
+        path = self._watchtower_state_path()
+        if path is None or not path.exists():
+            return _default_watchtower_state()
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            logger.warning("Watchtower Queen-state kon niet gelezen worden: %s", path)
+            return _default_watchtower_state()
+        if not isinstance(data, dict):
+            return _default_watchtower_state()
+        return {**_default_watchtower_state(), **data}
+
+    def _persist_watchtower_state(self) -> None:
+        path = self._watchtower_state_path()
+        if path is None:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps(self._watchtower_state, ensure_ascii=False, indent=2, default=str),
+                encoding="utf-8",
+            )
+        except OSError:
+            logger.exception("Watchtower Queen-state kon niet geschreven worden: %s", path)
 
     # ------------------------------------------------------------------
     # Kill-switch
@@ -809,3 +919,60 @@ class Queen:
                 fh.write(json.dumps(record, default=str) + "\n")
         except OSError:
             logger.exception("Failed to write audit log: %s", path)
+
+
+def _default_watchtower_state() -> dict:
+    return {
+        "last_signal_ts": None,
+        "last_asset": None,
+        "last_asset_class": "unknown",
+        "last_score": 0.0,
+        "last_confidence": 0.0,
+        "last_regime": "unknown",
+        "last_risk_flags": [],
+        "signals_24h": [],
+        "signal_events_24h": [],
+        "accepted_24h": 0,
+        "rejected_24h": 0,
+        "updated_at": None,
+    }
+
+
+def _parse_watchtower_ts(value: object) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        text = str(value).strip()
+        if not text:
+            return None
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def _float_or_zero(value: object) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _as_list(value: object) -> list:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, (tuple, set)):
+        return list(value)
+    return [value]
+
+
+def _truthy(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() not in {"0", "false", "no", "nee", "rejected"}
+    return bool(value)

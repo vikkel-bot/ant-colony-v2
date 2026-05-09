@@ -97,12 +97,14 @@ class WatchtowerAnt:
         scheduler: ColonyScheduler,
         logs_root: Path | None,
         client: WatchtowerClient,
+        queen=None,
     ) -> None:
         self.ant_id    = ant_id
         self.mission   = mission
         self.scheduler = scheduler
         self.logs_root = logs_root
         self._client   = client
+        self.queen     = queen
 
         self._log = logging.getLogger(f"ant.watchtower.{ant_id[:8]}")
         self._out_dir = (Path(logs_root) / "watchtower") if logs_root else None
@@ -184,6 +186,7 @@ class WatchtowerAnt:
                     "rejection_reason": reason_code or "asset_blocked",
                     "detail_reason": "; ".join(reasons),
                 })
+                self._register_queen_signal(signal, accepted=False, reason=reason_code or "asset_blocked")
             else:
                 filtered.append(signal)
 
@@ -213,6 +216,7 @@ class WatchtowerAnt:
     ) -> tuple[list[WatchtowerCandidate], list[dict]]:
         """Filter Watchtower-signalen naar paper-candidates voor de equities-pipeline."""
         candidates: list[WatchtowerCandidate] = []
+        accepted_signals: list[dict] = []
         rejections: list[dict] = []
         open_symbols = self._read_open_equity_symbols()
         daily_limits = self._load_daily_limits(now)
@@ -223,6 +227,7 @@ class WatchtowerAnt:
             if candidate is None:
                 rejection = self._candidate_rejection_record(signal, reason)
                 rejections.append(rejection)
+                self._register_queen_signal(signal, accepted=False, reason=reason)
                 self._log.info(
                     "Watchtower signaal gefilterd | asset=%s reden=%s",
                     rejection.get("asset") or "UNKNOWN",
@@ -231,6 +236,7 @@ class WatchtowerAnt:
                 continue
 
             candidates.append(candidate)
+            accepted_signals.append(signal)
             self._record_daily_accept(candidate.asset, now, daily_limits)
             limits_changed = True
             self._log.info(
@@ -242,6 +248,8 @@ class WatchtowerAnt:
 
         if candidates:
             self._write_candidates(now, candidates)
+            for signal in accepted_signals:
+                self._register_queen_signal(signal, accepted=True)
         if limits_changed:
             self._save_daily_limits(daily_limits)
 
@@ -358,6 +366,23 @@ class WatchtowerAnt:
                     fh.write(json.dumps(record, ensure_ascii=False) + "\n")
         except OSError:
             self._log.exception("Kon watchtower candidates niet schrijven: %s", log_path)
+
+    def _register_queen_signal(self, signal: dict, *, accepted: bool, reason: str = "") -> None:
+        """Meld Watchtower-flow bij Queen als die beschikbaar is."""
+        if self.queen is None:
+            return
+        if _safe_float(signal.get("entry_score")) < 0.50:
+            return
+        try:
+            payload = dict(signal)
+            payload["queen_accepted"] = bool(accepted)
+            if reason:
+                payload["queen_rejection_reason"] = reason
+            register = getattr(self.queen, "register_watchtower_signal", None)
+            if callable(register):
+                register(payload)
+        except Exception:
+            self._log.exception("Watchtower signaal kon niet bij Queen geregistreerd worden")
 
     def _read_open_equity_symbols(self) -> set[str]:
         if self.logs_root is None:

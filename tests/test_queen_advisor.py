@@ -15,7 +15,7 @@ Scenarios:
   9.  Claude advies verlopen → genegeerd (niet in actieve adviezen)
   10. Claude advies zonder paper-data → genegeerd, wacht op bewijs
   11. Claude confidence < 6 → genegeerd
-  12. apply_advisor_decision lege beslissing → geen crash, geen log
+  12. apply_advisor_decision lege beslissing → geen crash, wel cyclus-log
   13. apply_advisor_decision met allocatie_aanpassingen → apply_allocation_plan wordt aangeroepen
   14. apply_advisor_decision logt naar ANT_LOGS/queen/decisions.jsonl
   15. logs_root=None → geen crash
@@ -526,6 +526,34 @@ def test_apply_empty_decision_no_crash(tmp_path: Path) -> None:
     queen = _make_real_queen(tmp_path)
     decision = QueenDecision()
     queen.apply_advisor_decision(decision)   # should not raise
+    records = read_decisions(tmp_path)
+    assert len(records) == 1
+    assert records[0]["watchtower_context"] == {}
+
+
+def test_register_watchtower_signal_persists_state(tmp_path: Path) -> None:
+    queen = _make_real_queen(tmp_path)
+    ts = datetime.now(tz=timezone.utc).isoformat()
+
+    queen.register_watchtower_signal({
+        "signal_id": "sig-aapl",
+        "asset": "AAPL",
+        "asset_class": "equities",
+        "entry_score": 0.72,
+        "confidence": 0.66,
+        "regime": "RISK_ON",
+        "risk_flags": [],
+        "timestamp": ts,
+        "queen_accepted": True,
+    })
+
+    state = json.loads((tmp_path / "queen" / "watchtower_state.json").read_text())
+    assert state["last_asset"] == "AAPL"
+    assert state["last_score"] == pytest.approx(0.72)
+    assert state["last_regime"] == "RISK_ON"
+    assert state["accepted_24h"] == 1
+    assert state["rejected_24h"] == 0
+    assert queen.get_watchtower_context()["last_asset"] == "AAPL"
 
 
 def test_apply_decision_logs_to_decisions_jsonl(tmp_path: Path) -> None:
@@ -549,6 +577,29 @@ def test_apply_decision_with_allocatie_aanpassingen(tmp_path: Path) -> None:
     records = read_decisions(tmp_path)
     assert len(records) == 1
     assert records[0]["allocatie_toegepast"] is True
+
+
+def test_watchtower_context_prioritizes_matching_candidate(tmp_path: Path) -> None:
+    queen = MagicMock()
+    queen.get_watchtower_context.return_value = {
+        "last_signal_ts": datetime.now(tz=timezone.utc).isoformat(),
+        "last_asset": "AAPL",
+        "last_asset_class": "equities",
+        "last_score": 0.72,
+        "last_regime": "RISK_ON",
+        "last_risk_flags": [],
+    }
+    advisor = QueenAdvisor(queen=queen, logs_root=tmp_path)
+    decision = QueenDecision()
+
+    advisor._apply_watchtower_context(
+        decision,
+        [{"candidate_id": "cand-aapl", "symbol": "AAPL", "biome": "equities"}],
+        "RISK_ON",
+    )
+
+    assert decision.prioriteit_kandidaten == ["cand-aapl"]
+    assert decision.watchtower_context["last_asset"] == "AAPL"
 
 
 # ---------------------------------------------------------------------------

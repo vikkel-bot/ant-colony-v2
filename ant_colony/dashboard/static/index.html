@@ -1655,17 +1655,21 @@ function renderQueen() {
   }
 
   const wt24 = q.watchtower_signals_24h || {};
-  const wtReasons = q.watchtower_rejection_reasons || {};
   const wtLast = q.watchtower_last_signal || null;
   const wtLastTxt = wtLast && wtLast.timestamp
     ? `${fTS(wtLast.timestamp) || wtLast.timestamp} · ${wtLast.asset || '—'}`
     : '—';
+  const wtScore = wtLast && wtLast.entry_score != null ? Number(wtLast.entry_score).toFixed(2) : '0';
+  const wtRegime = wtLast && wtLast.regime ? wtLast.regime : 'unknown';
+  const wtFlags = wtLast && Array.isArray(wtLast.risk_flags) && wtLast.risk_flags.length
+    ? wtLast.risk_flags.join(',')
+    : 'none';
   const wtHtml = `<div class="queen-decision" style="margin-bottom:7px">
     <div class="queen-dec-ts">Watchtower → Queen</div>
     <div style="display:grid;grid-template-columns:1fr auto;gap:3px 8px;font-size:10px;color:var(--muted)">
       <span>Laatste signaal</span><strong style="color:var(--text);font-weight:600">${wtLastTxt}</strong>
-      <span>24u ontvangen</span><strong style="color:var(--text);font-weight:600">${wt24.received || 0} · ${wt24.accepted || 0} ja · ${wt24.rejected || 0} nee</strong>
-      <span>Afwijsredenen</span><strong style="color:var(--text);font-weight:600">regime=${wtReasons.regime || 0} · score=${wtReasons.score || 0} · risk_flag=${wtReasons.risk_flag || 0}</strong>
+      <span>24u ontvangen</span><strong style="color:var(--text);font-weight:600">${wt24.received || 0} · ${wt24.accepted || 0} gebruikt · ${wt24.rejected || 0} genegeerd</strong>
+      <span>Context</span><strong style="color:var(--text);font-weight:600">regime=${wtRegime} · score=${wtScore} · risk_flags=${wtFlags}</strong>
     </div>
   </div>`;
 

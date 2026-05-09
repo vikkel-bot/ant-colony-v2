@@ -53,7 +53,11 @@ def _make_client(signals: list[dict] | None = None, healthy: bool = True) -> Wat
     return client
 
 
-def _make_ant(tmp_path: Path, client: WatchtowerClient | None = None) -> WatchtowerAnt:
+def _make_ant(
+    tmp_path: Path,
+    client: WatchtowerClient | None = None,
+    queen=None,
+) -> WatchtowerAnt:
     if client is None:
         client = _make_client()
     return WatchtowerAnt(
@@ -62,6 +66,7 @@ def _make_ant(tmp_path: Path, client: WatchtowerClient | None = None) -> Watchto
         scheduler=MagicMock(),
         logs_root=tmp_path,
         client=client,
+        queen=queen,
     )
 
 
@@ -416,6 +421,33 @@ class TestWatchtowerCandidateConsumer:
         rec = self._read_snapshot(tmp_path)
         assert rec["candidates_accepted"] == 1
         assert rec["candidate_rejections"] == []
+
+    def test_accepted_signal_is_registered_with_queen(self, tmp_path):
+        queen = MagicMock()
+        client = _make_client(signals=[self._signal(asset="AAPL")])
+        ant = _make_ant(tmp_path, client, queen=queen)
+
+        ant._tick()
+
+        queen.register_watchtower_signal.assert_called_once()
+        payload = queen.register_watchtower_signal.call_args.args[0]
+        assert payload["asset"] == "AAPL"
+        assert payload["queen_accepted"] is True
+
+    def test_candidate_rejection_is_registered_with_queen(self, tmp_path):
+        queen = MagicMock()
+        client = _make_client(signals=[
+            self._signal(asset="BTC-EUR", entry_score=0.95, confidence=0.95),
+        ])
+        ant = _make_ant(tmp_path, client, queen=queen)
+
+        ant._tick()
+
+        queen.register_watchtower_signal.assert_called_once()
+        payload = queen.register_watchtower_signal.call_args.args[0]
+        assert payload["asset"] == "BTC-EUR"
+        assert payload["queen_accepted"] is False
+        assert payload["queen_rejection_reason"] == "biome_mismatch"
 
     def test_below_poll_threshold_is_logged_to_filtered_file(self, tmp_path):
         client = _make_client(signals=[

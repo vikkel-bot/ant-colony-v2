@@ -1763,6 +1763,7 @@ def main() -> None:
                     scheduler=scheduler,
                     logs_root=logs_root,
                     client=_wt_client,
+                    queen=queen,
                 )
                 scheduler.register_agent(AgentRecord(
                     ant_id=_wt_ant_id,

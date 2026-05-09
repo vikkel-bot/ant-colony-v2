@@ -3781,6 +3781,38 @@ def _empty_watchtower_received_summary() -> dict[str, Any]:
     }
 
 
+def _read_queen_watchtower_state(logs_root: Path) -> dict[str, Any] | None:
+    path = logs_root / "queen" / "watchtower_state.json"
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _apply_queen_watchtower_state(summary: dict[str, Any], state: dict[str, Any] | None) -> None:
+    if not state:
+        return
+    accepted = int(state.get("accepted_24h") or 0)
+    rejected = int(state.get("rejected_24h") or 0)
+    signals_24h = state.get("signals_24h") or []
+    received = len(signals_24h) if isinstance(signals_24h, list) else accepted + rejected
+    summary["received_24h"] = received
+    summary["accepted_24h"] = accepted
+    summary["rejected_24h"] = rejected
+    summary["last_signal"] = {
+        "timestamp": state.get("last_signal_ts"),
+        "asset": state.get("last_asset"),
+        "entry_score": _round_or_none(_float_or_none(state.get("last_score")), 4),
+        "confidence": _round_or_none(_float_or_none(state.get("last_confidence")), 4),
+        "regime": state.get("last_regime"),
+        "risk_flags": state.get("last_risk_flags") or [],
+        "queen_accepted": True,
+    }
+
+
 def _classify_watchtower_rejection(reason: str | None) -> str:
     text = (reason or "").lower()
     if "regime" in text:
@@ -3876,6 +3908,7 @@ def _read_watchtower_candidate_rows(
 def _read_watchtower_received_signals(logs_root: Path, limit: int = 50) -> dict[str, Any]:
     signal_path = logs_root / "watchtower" / "signals.jsonl"
     summary = _empty_watchtower_received_summary()
+    queen_wt_state = _read_queen_watchtower_state(logs_root)
 
     now = datetime.now(tz=timezone.utc)
     cutoff = now - timedelta(hours=24)
@@ -3894,6 +3927,7 @@ def _read_watchtower_received_signals(logs_root: Path, limit: int = 50) -> dict[
                 "asset": latest["asset"],
                 "queen_accepted": latest["queen_accepted"],
             }
+        _apply_queen_watchtower_state(summary, queen_wt_state)
         return {"signals": rows[: max(1, min(limit, 200))], "summary": summary}
 
     try:
@@ -3961,6 +3995,7 @@ def _read_watchtower_received_signals(logs_root: Path, limit: int = 50) -> dict[
                         cls = _classify_watchtower_rejection(row.get("rejection_reason"))
                         summary["rejection_reasons"][cls] = summary["rejection_reasons"].get(cls, 0) + 1
     except OSError:
+        _apply_queen_watchtower_state(summary, queen_wt_state)
         return {"signals": [], "summary": summary}
 
     rows.sort(
@@ -3975,4 +4010,5 @@ def _read_watchtower_received_signals(logs_root: Path, limit: int = 50) -> dict[
             "queen_accepted": latest["queen_accepted"],
         }
 
+    _apply_queen_watchtower_state(summary, queen_wt_state)
     return {"signals": rows[: max(1, min(limit, 200))], "summary": summary}

@@ -109,6 +109,57 @@ def _compute_market_signal(
         return _MARKET_SIGNAL_DEFAULT
     key = (regime.upper(), (news_sentiment or "neutral").lower())
     return _MARKET_SIGNAL_TABLE.get(key, _MARKET_SIGNAL_DEFAULT)
+
+
+def _safe_float(value: object) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _parse_context_ts(value: object) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        text = str(value).strip()
+        if not text:
+            return None
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def _watchtower_context_is_fresh(wt: dict, max_age: timedelta = timedelta(minutes=30)) -> bool:
+    ts = _parse_context_ts(wt.get("last_signal_ts"))
+    if ts is None:
+        return False
+    age = datetime.now(tz=timezone.utc) - ts
+    return timedelta(0) <= age <= max_age
+
+
+def _candidate_matches_watchtower(candidate: dict, wt: dict, regime: str | None) -> bool:
+    symbol = str(candidate.get("symbol") or candidate.get("asset") or "").upper().strip()
+    wt_asset = str(wt.get("last_asset") or "").upper().strip()
+    if symbol and wt_asset and symbol == wt_asset:
+        return True
+
+    wt_asset_class = str(wt.get("last_asset_class") or "").lower().strip()
+    biome = str(candidate.get("biome") or "").lower().strip()
+    if wt_asset_class and biome and wt_asset_class in {biome, f"{biome}s"}:
+        return True
+    if wt_asset_class == "equity" and biome == "equities":
+        return True
+
+    wt_regime = str(wt.get("last_regime") or "").upper().strip()
+    if not wt_regime:
+        return False
+    candidate_regime = str(candidate.get("best_regime") or "").lower().strip()
+    mapped_candidate_regime = _REGIME_MAP.get(candidate_regime, candidate_regime.upper())
+    return wt_regime in {mapped_candidate_regime, str(regime or "").upper().strip()}
 _MIN_TRADES_LOW   = 10     # minimale trades voor verlagen
 _CLAUDE_MIN_CONF  = 6      # minimale confidence voor Claude advies
 
@@ -194,6 +245,8 @@ class QueenDecision:
     kapitaal_verlagen:      list[str]          = field(default_factory=list)
     adviezen_gevolgd:       list[str]          = field(default_factory=list)
     adviezen_genegeerd:     list[str]          = field(default_factory=list)
+    watchtower_context:     dict               = field(default_factory=dict)
+    regime:                 str | None         = None
 
     def is_empty(self) -> bool:
         return not any([
@@ -215,6 +268,8 @@ class QueenDecision:
             "kapitaal_verlagen":      self.kapitaal_verlagen,
             "adviezen_gevolgd":       self.adviezen_gevolgd,
             "adviezen_genegeerd":     self.adviezen_genegeerd,
+            "watchtower_context":     self.watchtower_context,
+            "regime":                 self.regime,
         }
 
 
@@ -316,6 +371,9 @@ class QueenAdvisor:
                 combined, pos_mult, sl_mult = _compute_market_signal(regime, news_sentiment)
                 self._write_market_signal(regime, news_sentiment, combined, pos_mult, sl_mult)
 
+            decision.regime = regime
+            self._apply_watchtower_context(decision, candidates, regime)
+
             self._log.info(
                 "Advies-cyclus klaar | open=%s regime=%s prioriteit=%d deprioriteer=%d "
                 "verhogen=%d verlagen=%d gevolgd=%d genegeerd=%d",
@@ -331,6 +389,62 @@ class QueenAdvisor:
         except Exception:
             self._log.exception("Fout in QueenAdvisor.advise() — lege beslissing geretourneerd")
         return decision
+
+    def _apply_watchtower_context(
+        self,
+        decision: QueenDecision,
+        candidates: list[dict],
+        regime: str | None,
+    ) -> None:
+        """Gebruik Watchtower als zachte prioriteitsinput, nooit als harde blokkade."""
+        try:
+            get_context = getattr(self._queen, "get_watchtower_context", None)
+            wt = get_context() if callable(get_context) else {}
+            wt = wt if isinstance(wt, dict) else {}
+            decision.watchtower_context = wt
+        except Exception:
+            self._log.exception("Watchtower-context kon niet gelezen worden")
+            decision.watchtower_context = {}
+            return
+
+        wt = decision.watchtower_context
+        wt_regime = str(wt.get("last_regime") or "unknown").upper()
+        queen_regime = str(regime or "unknown").upper()
+        if wt_regime == "SIDEWAYS" and queen_regime == "RISK_ON":
+            self._log.warning(
+                "Watchtower/Queen regime conflict | watchtower=%s queen=%s",
+                wt_regime,
+                queen_regime,
+            )
+
+        risk_flags = [str(flag).lower() for flag in (wt.get("last_risk_flags") or [])]
+        if "high_risk" in risk_flags:
+            for candidate in candidates:
+                cid = str(candidate.get("candidate_id") or "").strip()
+                if cid and cid not in decision.deprioriteer_kandidaten:
+                    decision.deprioriteer_kandidaten.append(cid)
+            if candidates:
+                decision.adviezen_genegeerd.append(
+                    f"watchtower: high_risk → {len(candidates)} kandidaat/kandidaten lager"
+                )
+
+        score = _safe_float(wt.get("last_score"))
+        if score <= 0.65 or not _watchtower_context_is_fresh(wt):
+            return
+
+        matches = 0
+        for candidate in candidates:
+            if not _candidate_matches_watchtower(candidate, wt, regime):
+                continue
+            cid = str(candidate.get("candidate_id") or "").strip()
+            if cid and cid not in decision.prioriteit_kandidaten:
+                decision.prioriteit_kandidaten.append(cid)
+                matches += 1
+
+        if matches:
+            decision.adviezen_gevolgd.append(
+                f"watchtower: score={score:.2f} → {matches} kandidaat/kandidaten hoger"
+            )
 
     # ------------------------------------------------------------------
     # Bronnen lezen

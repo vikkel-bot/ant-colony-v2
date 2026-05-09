@@ -536,3 +536,30 @@ class TestWatchtowerReceivedEndpoint:
         assert d["summary"]["accepted_24h"] == 1
         assert d["summary"]["rejected_24h"] == 1
         assert d["summary"]["last_signal"]["asset"] in {"AAPL", "BTC-EUR"}
+
+    def test_queen_status_reads_watchtower_state(self, tmp_path: Path):
+        ts = _now_iso()
+        state = {
+            "last_signal_ts": ts,
+            "last_asset": "AAPL",
+            "last_score": 0.72,
+            "last_confidence": 0.66,
+            "last_regime": "RISK_ON",
+            "last_risk_flags": ["macro"],
+            "signals_24h": [ts, ts],
+            "accepted_24h": 1,
+            "rejected_24h": 1,
+        }
+        state_path = tmp_path / "queen" / "watchtower_state.json"
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+
+        d = _client(ColonyContext(logs_root=tmp_path)).get("/api/queen/status").json()
+        assert d["watchtower_last_signal"]["asset"] == "AAPL"
+        assert d["watchtower_last_signal"]["entry_score"] == pytest.approx(0.72)
+        assert d["watchtower_last_signal"]["regime"] == "RISK_ON"
+        assert d["watchtower_signals_24h"] == {
+            "received": 2,
+            "accepted": 1,
+            "rejected": 1,
+        }
