@@ -39,6 +39,27 @@ function New-PowerShellAction {
         -WorkingDirectory $WorkingDirectory
 }
 
+function Resolve-ColonyRoot {
+    param([string]$Root)
+    try {
+        $resolved = (Resolve-Path -LiteralPath $Root -ErrorAction Stop).Path
+    }
+    catch {
+        $resolved = $Root
+    }
+    $leaf = Split-Path -Leaf $resolved
+    $parent = Split-Path -Parent $resolved
+    if ($leaf -eq "ant-colony-v2" -and (Split-Path -Leaf $parent) -eq "ant-colony-v2") {
+        $candidateStartScript = Join-Path $parent "scripts\start_colony.py"
+        if (Test-Path -LiteralPath $candidateStartScript) {
+            Write-Host "Dubbele projectroot gecorrigeerd: $resolved -> $parent" -ForegroundColor Yellow
+            return $parent
+        }
+    }
+    $resolved = (Resolve-Path -LiteralPath $resolved -ErrorAction Stop).Path
+    return $resolved
+}
+
 function Register-OrReplaceTask {
     param(
         [string]$TaskName,
@@ -76,6 +97,8 @@ function Register-OrReplaceTask {
 
     Write-Host "Taak aangemaakt: $TaskName" -ForegroundColor Green
 }
+
+$ProjectRoot = Resolve-ColonyRoot -Root $ProjectRoot
 
 $colonyAuto = Join-Path $ProjectRoot "scripts\start_colony_auto.ps1"
 $watchtowerAuto = Join-Path $ProjectRoot "scripts\start_watchtower_auto.ps1"

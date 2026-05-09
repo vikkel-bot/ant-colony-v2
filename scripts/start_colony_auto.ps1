@@ -1,7 +1,6 @@
 param(
     [string]$ProjectRoot = (Split-Path -Parent $PSScriptRoot),
     [string]$PythonPath = "",
-    [double]$Capital = 150000,
     [int]$Port = 8000,
     [string]$HostName = "127.0.0.1",
     [int]$IbPort = 7497,
@@ -32,6 +31,27 @@ function Write-AutoLog {
     $line = "{0} {1}" -f (Get-Date).ToString("s"), $Message
     Add-Content -Path $LogPath -Value $line
     Write-Host $line
+}
+
+function Resolve-ColonyRoot {
+    param([string]$Root)
+    try {
+        $resolved = (Resolve-Path -LiteralPath $Root -ErrorAction Stop).Path
+    }
+    catch {
+        $resolved = $Root
+    }
+    $leaf = Split-Path -Leaf $resolved
+    $parent = Split-Path -Parent $resolved
+    if ($leaf -eq "ant-colony-v2" -and (Split-Path -Leaf $parent) -eq "ant-colony-v2") {
+        $candidateStartScript = Join-Path $parent "scripts\start_colony.py"
+        if (Test-Path -LiteralPath $candidateStartScript) {
+            Write-AutoLog "Dubbele projectroot gecorrigeerd | oud=$resolved nieuw=$parent"
+            return $parent
+        }
+    }
+    $resolved = (Resolve-Path -LiteralPath $resolved -ErrorAction Stop).Path
+    return $resolved
 }
 
 function Test-Port {
@@ -80,6 +100,18 @@ function Stop-ColonyPortOwner {
     }
 }
 
+function Prepare-ColonyPort {
+    param([int]$TargetPort)
+    Stop-ColonyPortOwner -TargetPort $TargetPort
+    Start-Sleep -Seconds 2
+    if (Test-Port -TargetHost $HostName -TargetPort $TargetPort -TimeoutMs 1000) {
+        Write-AutoLog "Poort $TargetPort blijft bezet na stop-poging; Colony start geblokkeerd"
+        return $false
+    }
+    Write-AutoLog "Poort $TargetPort vrij"
+    return $true
+}
+
 function Wait-Network {
     param([int]$MaxSeconds = 60)
     $deadline = (Get-Date).AddSeconds($MaxSeconds)
@@ -94,27 +126,12 @@ function Wait-Network {
     return $false
 }
 
-function Wait-IbGateway {
-    param([int]$MaxSeconds = 120)
-    $deadline = (Get-Date).AddSeconds($MaxSeconds)
-    $restartScript = Join-Path $ProjectRoot "scripts\restart_ibgateway.ps1"
-    if ((-not (Test-Port -TargetHost $HostName -TargetPort $IbPort -TimeoutMs 1000)) -and
-        (Test-Path -LiteralPath $restartScript)) {
-        Write-AutoLog "IB Gateway check via backup-script"
-        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $restartScript `
-            -HostName $HostName `
-            -Port $IbPort `
-            -WaitSeconds 5 | Out-Null
+function Test-IbGatewayOptional {
+    if (Test-Port -TargetHost $HostName -TargetPort $IbPort -TimeoutMs 1000) {
+        Write-AutoLog "IB Gateway bereikbaar | ${HostName}:${IbPort}"
+        return $true
     }
-
-    while ((Get-Date) -lt $deadline) {
-        if (Test-Port -TargetHost $HostName -TargetPort $IbPort -TimeoutMs 1000) {
-            Write-AutoLog "IB Gateway bereikbaar | ${HostName}:${IbPort}"
-            return $true
-        }
-        Start-Sleep -Seconds 3
-    }
-    Write-AutoLog "IB Gateway niet bereikbaar binnen ${MaxSeconds}s"
+    Write-AutoLog "WARNING: IB Gateway niet bereikbaar | ${HostName}:${IbPort} | Colony start zonder IBKR"
     return $false
 }
 
@@ -142,6 +159,8 @@ function Update-LastSeen {
     (Get-Date).ToUniversalTime().ToString("o") | Set-Content -Path $StatePath
 }
 
+$ProjectRoot = Resolve-ColonyRoot -Root $ProjectRoot
+
 if (-not $PythonPath) {
     $PythonPath = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
 }
@@ -157,15 +176,15 @@ if (-not (Test-Path -LiteralPath $PythonPath)) {
 }
 
 Set-Location -LiteralPath $ProjectRoot
-Write-AutoLog "Colony autostart gestart | root=$ProjectRoot port=$Port capital=$Capital"
+Write-AutoLog "Colony autostart gestart | root=$ProjectRoot port=$Port"
 
 while ($true) {
     $preflightOk = $false
     for ($attempt = 1; $attempt -le 3; $attempt++) {
         Write-AutoLog "Preflight poging $attempt/3"
         $networkOk = Wait-Network -MaxSeconds 60
-        $ibOk = Wait-IbGateway -MaxSeconds 120
-        if ($networkOk -and $ibOk) {
+        Test-IbGatewayOptional | Out-Null
+        if ($networkOk) {
             $preflightOk = $true
             break
         }
@@ -178,13 +197,11 @@ while ($true) {
         exit 1
     }
 
-    $effectiveCapital = $Capital
     if (Test-LongOfflineWindow -Hours 8) {
         $env:COLONY_READONLY_MODE = "true"
         $env:ANT_COLONY_READONLY = "true"
         $env:IBKR_PAPER_MODE = "true"
-        $effectiveCapital = 0
-        Write-AutoLog "READONLY mode actief: systeem was langer dan 8 uur offline; capital=0 tot menselijke check"
+        Write-AutoLog "READONLY mode actief: systeem was langer dan 8 uur offline; menselijke check vereist"
     }
     else {
         $env:COLONY_READONLY_MODE = "false"
@@ -192,10 +209,13 @@ while ($true) {
     }
 
     Update-LastSeen
-    Write-AutoLog "Colony start | capital=$effectiveCapital port=$Port"
-    Stop-ColonyPortOwner -TargetPort $Port
-    Start-Sleep -Seconds 2
-    & $PythonPath $startScript --capital $effectiveCapital --port $Port
+    if (-not (Prepare-ColonyPort -TargetPort $Port)) {
+        Write-AutoLog "Colony start overgeslagen; retry over 60s"
+        Start-Sleep -Seconds 60
+        continue
+    }
+    Write-AutoLog "Colony start | port=$Port"
+    & $PythonPath $startScript --port $Port
     $exitCode = $LASTEXITCODE
     Write-AutoLog "Colony proces gestopt | exit_code=$exitCode | herstart over 30s"
     Update-LastSeen

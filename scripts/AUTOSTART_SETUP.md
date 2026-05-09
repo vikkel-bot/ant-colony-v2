@@ -15,7 +15,7 @@ registreren.
 Open PowerShell als administrator:
 
 ```powershell
-cd C:\Users\Gebruiker\ant-colony-v2\ant-colony-v2
+cd C:\Users\Gebruiker\ant-colony-v2
 powershell.exe -ExecutionPolicy Bypass -File scripts\setup_autostart.ps1
 ```
 
@@ -72,7 +72,6 @@ Als PC2 langer dan 8 uur offline was, start `start_colony_auto.ps1` met:
 - `COLONY_READONLY_MODE=true`
 - `ANT_COLONY_READONLY=true`
 - `IBKR_PAPER_MODE=true`
-- `--capital 0`
 
 Dit voorkomt automatische handelsactiviteit tot er een menselijke check is
 gedaan. Na controle kun je de normale taak opnieuw starten of de state-file
