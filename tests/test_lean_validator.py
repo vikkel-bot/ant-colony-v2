@@ -1,116 +1,127 @@
 from __future__ import annotations
 
 import json
-import subprocess
 from pathlib import Path
+
+import pandas as pd
 
 from ant_colony.research.lean_validator import LeanValidator
 
 
-def test_validate_returns_unavailable_when_lean_missing(tmp_path: Path) -> None:
-    validator = LeanValidator(tmp_path, lean_executable="definitely-missing-lean")
+class _FakeTrades:
+    def count(self) -> int:
+        return 12
 
-    result = validator.validate(
+    def win_rate(self) -> float:
+        return 0.58
+
+
+class _FakePortfolio:
+    trades = _FakeTrades()
+
+    def sharpe_ratio(self) -> float:
+        return 1.23
+
+    def max_drawdown(self) -> float:
+        return -0.045
+
+
+class _FakeVectorBT:
+    class Portfolio:
+        last_kwargs = None
+
+        @classmethod
+        def from_signals(cls, close, **kwargs):
+            cls.last_kwargs = kwargs
+            return _FakePortfolio()
+
+
+def _sample_ohlcv() -> pd.DataFrame:
+    idx = pd.date_range("2025-01-01", periods=80, freq="D")
+    close = pd.Series(range(100, 180), index=idx, dtype=float)
+    return pd.DataFrame(
         {
-            "candidate_id": "cand-lean-missing",
-            "biome": "equities",
-            "market_scope": {"symbol": "AAPL"},
-            "entry_conditions": {"direction": "long"},
-            "exit_conditions": {"take_profit_pct": 0.06, "stop_loss_pct": 0.03},
-        }
+            "Open": close - 1,
+            "High": close + 2,
+            "Low": close - 2,
+            "Close": close,
+            "Volume": 1000,
+        },
+        index=idx,
     )
+
+
+def test_validate_returns_unavailable_when_vectorbt_missing(tmp_path: Path, monkeypatch) -> None:
+    validator = LeanValidator(tmp_path)
+    monkeypatch.setattr(
+        validator,
+        "_load_vectorbt",
+        lambda: (None, "vectorbt niet beschikbaar: test"),
+    )
+
+    result = validator.validate({"candidate_id": "cand-vectorbt-missing"})
 
     assert result["lean_status"] == "unavailable"
     assert result["lean_sharpe"] is None
-    assert (tmp_path / "lean" / "cand-lean-missing.json").exists()
+    assert (tmp_path / "lean" / "cand-vectorbt-missing.json").exists()
 
 
-def test_parse_lean_statistics_json(tmp_path: Path) -> None:
-    output_dir = tmp_path / "out"
-    output_dir.mkdir()
-    (output_dir / "result.json").write_text(
-        json.dumps(
-            {
-                "Statistics": {
-                    "Sharpe Ratio": "1.23",
-                    "Drawdown": "4.5%",
-                    "Win Rate": "62%",
-                    "Total Trades": "31",
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
+def test_validate_runs_vectorbt_and_writes_passed_result(tmp_path: Path, monkeypatch) -> None:
     validator = LeanValidator(tmp_path)
-
-    metrics = validator._parse_output(output_dir)
-
-    assert metrics is not None
-    assert metrics["lean_sharpe"] == 1.23
-    assert metrics["lean_max_drawdown"] == 0.045
-    assert metrics["lean_win_rate"] == 0.62
-    assert metrics["lean_trades"] == 31
-
-
-def test_validate_runs_lean_and_writes_passed_result(tmp_path: Path, monkeypatch) -> None:
-    validator = LeanValidator(tmp_path, lean_executable="lean")
-
-    monkeypatch.setattr(
-        "ant_colony.research.lean_validator.shutil.which",
-        lambda _cmd: "C:/fake/tool.exe",
-    )
-    monkeypatch.setattr(validator, "_run_quick", lambda _cmd: (True, "Docker version ok"))
-
-    def fake_run(command, **kwargs):
-        project_dir = Path(command[-1])
-        output_dir = project_dir / "backtests" / "unit-test"
-        output_dir.mkdir(parents=True, exist_ok=True)
-        (output_dir / "result.json").write_text(
-            json.dumps(
-                {
-                    "statistics": {
-                        "Sharpe Ratio": "0.88",
-                        "Max Drawdown": "3%",
-                        "Win Rate": "55%",
-                        "Total Trades": 18,
-                    }
-                }
-            ),
-            encoding="utf-8",
-        )
-        assert kwargs["timeout"] == 120
-        assert command[:2] == ["C:/fake/tool.exe", "backtest"]
-        return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
-
-    monkeypatch.setattr("ant_colony.research.lean_validator.subprocess.run", fake_run)
+    monkeypatch.setattr(validator, "_load_vectorbt", lambda: (_FakeVectorBT, ""))
+    monkeypatch.setattr(validator, "_fetch_ohlcv", lambda _candidate: _sample_ohlcv())
 
     result = validator.validate(
         {
-            "candidate_id": "cand-lean-ok",
-            "biome": "equities",
-            "market_scope": {"symbol": "AAPL"},
-            "entry_conditions": {"direction": "long"},
-            "exit_conditions": {"take_profit_pct": 0.06, "stop_loss_pct": 0.03},
+            "candidate_id": "cand-vectorbt-ok",
+            "biome": "crypto",
+            "market_scope": {"symbol": "BTC-EUR"},
+            "strategy_type": "sma_crossover",
+            "parameters": {"short_period": 10, "long_period": 30},
         }
     )
 
     assert result["lean_status"] == "passed"
-    assert result["lean_sharpe"] == 0.88
-    stored = json.loads((tmp_path / "lean" / "cand-lean-ok.json").read_text(encoding="utf-8"))
+    assert result["lean_reason"] == "VectorBT backtest voltooid"
+    assert result["lean_sharpe"] == 1.23
+    assert result["lean_max_drawdown"] == 0.045
+    assert result["lean_win_rate"] == 0.58
+    assert result["lean_trades"] == 12
+    stored = json.loads((tmp_path / "lean" / "cand-vectorbt-ok.json").read_text(encoding="utf-8"))
     assert stored["lean_status"] == "passed"
 
 
-def test_prepare_project_uses_sma_template_and_candidate_parameters(tmp_path: Path) -> None:
+def test_failed_when_data_is_empty(tmp_path: Path, monkeypatch) -> None:
     validator = LeanValidator(tmp_path)
+    monkeypatch.setattr(validator, "_load_vectorbt", lambda: (_FakeVectorBT, ""))
+    monkeypatch.setattr(validator, "_fetch_ohlcv", lambda _candidate: pd.DataFrame())
 
-    project_dir = validator._prepare_project({
-        "candidate_id": "cand-template",
-        "market_scope": {"symbol": "BTC-EUR"},
-        "parameters": {"short_period": 12, "long_period": 34},
-    })
+    result = validator.validate({"candidate_id": "cand-no-data"})
 
-    assert (project_dir / "main.py").exists()
-    config = json.loads((project_dir / "config.json").read_text(encoding="utf-8"))
-    assert config["parameters"]["symbol"] == "BTCEUR"
-    assert config["parameters"]["short_period"] == "12"
-    assert config["parameters"]["long_period"] == "34"
+    assert result["lean_status"] == "failed"
+    assert "OHLCV" in result["lean_reason"]
+
+
+def test_sma_strategy_builds_long_entries(tmp_path: Path) -> None:
+    validator = LeanValidator(tmp_path)
+    signals = validator._build_signals(
+        {"strategy_type": "sma_crossover", "parameters": {"short_period": 3, "long_period": 5}},
+        _sample_ohlcv()["Close"],
+    )
+
+    assert signals["entries"] is not None
+    assert signals["exits"] is not None
+    assert signals["short_entries"] is None
+    assert bool(signals["entries"].any())
+
+
+def test_rsi_short_strategy_uses_short_entries(tmp_path: Path) -> None:
+    validator = LeanValidator(tmp_path)
+    close = pd.Series([100, 102, 104, 106, 108, 110, 112, 114, 116, 118, 120, 119, 118, 117, 116])
+    signals = validator._build_signals(
+        {"strategy_type": "rsi_overbought", "direction": "short"},
+        close,
+    )
+
+    assert signals["entries"] is None
+    assert signals["short_entries"] is not None
