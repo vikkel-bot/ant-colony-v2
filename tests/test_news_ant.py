@@ -16,6 +16,8 @@ import pytest
 from ant_colony.ants.news_ant import (
     NewsAnt,
     _classify,
+    _parse_rss_items,
+    _rss_tags_for_title,
     _sentiment_score,
     _BULLISH_THRESHOLD,
     _BEARISH_THRESHOLD,
@@ -61,6 +63,20 @@ def _make_ant(tmp_path: Path, api_key: str = "test-key") -> NewsAnt:
 
 def _fake_articles(titles: list[str]) -> list[dict]:
     return [{"title": t, "description": ""} for t in titles]
+
+
+def _fake_rss(title: str = "Bitcoin markets surge on Fed rate optimism") -> bytes:
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>BBC Test</title>
+    <item>
+      <title>{title}</title>
+      <description>Strong market growth and rally</description>
+      <link>https://example.com/story</link>
+    </item>
+  </channel>
+</rss>""".encode("utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -275,6 +291,73 @@ class TestApiLimitGuard:
         written_files_after = list(ant._out_dir.glob("*.json"))
         assert written_files_after == written_files_before, \
             "Geen snapshot mag worden geschreven als limiet bereikt is"
+
+    def test_api_usage_is_persisted(self, tmp_path):
+        ant = _make_ant(tmp_path)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"articles": []}
+
+        with patch("httpx.get", return_value=mock_resp):
+            ant._fetch_one("Bitcoin")
+
+        usage_path = tmp_path / "news" / "api_usage.json"
+        data = json.loads(usage_path.read_text(encoding="utf-8"))
+        assert data["calls"] == 1
+        assert data["date"] == ant._reset_date.isoformat()
+
+
+# ---------------------------------------------------------------------------
+# RSS fallback
+# ---------------------------------------------------------------------------
+
+class TestRssFallback:
+    def test_rss_tag_mapping(self):
+        assert "crypto" in _rss_tags_for_title("Bitcoin surges after ETF demand")
+        assert "market" in _rss_tags_for_title("Fed rate decision moves markets")
+        assert "technology" in _rss_tags_for_title("AI chip stocks rally")
+        assert "commodity" in _rss_tags_for_title("Oil and gas prices rise")
+
+    def test_parse_rss_items(self):
+        articles = _parse_rss_items(_fake_rss(), source="BBC Business")
+        assert len(articles) == 1
+        assert articles[0]["title"].startswith("Bitcoin markets")
+        assert articles[0]["url"] == "https://example.com/story"
+        assert "crypto" in articles[0]["tags"]
+
+    def test_tick_uses_rss_fallback_on_newsapi_429(self, tmp_path, caplog):
+        ant = _make_ant(tmp_path)
+        ant._out_dir.mkdir(parents=True, exist_ok=True)
+        now = datetime(2026, 4, 27, 10, 0, 0, tzinfo=timezone.utc)
+        ant._reset_date = now.date()
+
+        def fake_get(url, **kwargs):
+            resp = MagicMock()
+            if "newsapi.org" in url:
+                resp.status_code = 429
+                resp.json.return_value = {"status": "error"}
+                return resp
+            resp.status_code = 200
+            resp.content = _fake_rss()
+            return resp
+
+        with patch("httpx.get", side_effect=fake_get):
+            with patch("ant_colony.ants.news_ant.datetime") as mock_dt:
+                mock_dt.now.return_value = now
+                import logging
+                with caplog.at_level(logging.INFO, logger=f"ant.news.{ant.ant_id[:8]}"):
+                    ant._tick()
+
+        snapshots = [
+            p for p in (tmp_path / "news").glob("*.json")
+            if p.name != "api_usage.json"
+        ]
+        assert len(snapshots) == 1
+        data = json.loads(snapshots[0].read_text(encoding="utf-8"))
+        assert data["source"] == "rss_fallback"
+        assert data["article_count"] > 0
+        assert data["top_headlines"]
+        assert any("NewsAPI 429 → RSS fallback actief" in r.message for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------
