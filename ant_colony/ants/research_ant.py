@@ -39,6 +39,7 @@ from ant_colony.biome.biome_adapter import MarketData
 from ant_colony.biome.biome_registry import BiomeRegistry
 from ant_colony.colony.scheduler.colony_scheduler import ColonyScheduler
 from ant_colony.lab.backtester import Backtester, BacktestConfig, OHLCVBar
+from ant_colony.research.lean_validator import LeanValidator
 from ant_colony.schemas.ant import AntStatus
 from ant_colony.schemas.audit_event import AuditEvent, AuditEventType
 from ant_colony.schemas.heartbeat import Heartbeat, HeartbeatStatus
@@ -112,6 +113,7 @@ class ResearchAnt:
         self._seen_ingestion_ids: set[str] = self._preload_seen_ingestion_ids(logs_root)
 
         self._backtester = Backtester()
+        self._lean_validator = LeanValidator(logs_root=logs_root) if logs_root is not None else None
         self._log = logging.getLogger(f"ant.research.{ant_id[:8]}")
 
     # ------------------------------------------------------------------
@@ -738,7 +740,59 @@ class ResearchAnt:
             "KANDIDAAT | %s %s | sharpe=%.3f win_rate=%.3f direction=%s id=%s",
             symbol, signal_type, sharpe, win_rate, direction, candidate_id,
         )
+        self._validate_with_lean(candidate, internal_sharpe=sharpe)
         self._write_candidate_log(candidate, direction=direction)
+
+    # ------------------------------------------------------------------
+    # Optional Lean validation
+    # ------------------------------------------------------------------
+
+    def _validate_with_lean(self, candidate: StrategyCandidate, *, internal_sharpe: float) -> None:
+        """Run optional Lean validation and attach the result to the candidate."""
+        if self._lean_validator is None:
+            return
+        try:
+            lean_result = self._lean_validator.validate(candidate.model_dump(mode="json"))
+        except Exception as exc:  # pragma: no cover - defensive: Lean may never block research
+            self._log.warning(
+                "Lean validatie overgeslagen | candidate_id=%s reden=%s",
+                candidate.candidate_id,
+                exc,
+            )
+            lean_result = {
+                "lean_sharpe": None,
+                "lean_max_drawdown": None,
+                "lean_win_rate": None,
+                "lean_trades": None,
+                "lean_status": "unavailable",
+                "lean_reason": str(exc),
+            }
+        lean_status = str(lean_result.get("lean_status") or "unavailable")
+        lean_sharpe = lean_result.get("lean_sharpe")
+
+        lean_validated: bool | None = None
+        if lean_status == "passed":
+            try:
+                lean_validated = bool(float(lean_sharpe) > (internal_sharpe * 0.8))
+            except (TypeError, ValueError):
+                lean_validated = False
+        elif lean_status == "failed":
+            lean_validated = False
+
+        candidate.parameters["lean_validation"] = lean_result
+        if lean_validated is not None:
+            candidate.parameters["lean_validated"] = lean_validated
+        if candidate.backtest_results is not None:
+            candidate.backtest_results.extra["lean_validation"] = lean_result
+            if lean_validated is not None:
+                candidate.backtest_results.extra["lean_validated"] = lean_validated
+
+        self._log.info(
+            "Lean validatie | candidate_id=%s status=%s lean_sharpe=%s",
+            candidate.candidate_id,
+            lean_status,
+            lean_sharpe,
+        )
 
     # ------------------------------------------------------------------
     # Disk logging
@@ -763,6 +817,8 @@ class ResearchAnt:
         tp_pct        = (candidate.exit_conditions or {}).get("take_profit_pct")
         strategy_type = _strategy_type_from_signal(candidate.name or "", entry_kws, tp_pct=tp_pct)
         grade         = _grade_from_sharpe(sharpe)
+        lean_validation = (candidate.parameters or {}).get("lean_validation") or {}
+        lean_validated = (candidate.parameters or {}).get("lean_validated")
 
         self._log.debug(
             "Classificatie | signal=%s keywords=%s tp_pct=%s → strategy_type=%s",
@@ -793,6 +849,13 @@ class ResearchAnt:
                 "regime_stats":            bt.regime_stats if bt else None,
                 "tp_pct":                  (candidate.exit_conditions or {}).get("take_profit_pct"),
                 "sl_pct":                  (candidate.exit_conditions or {}).get("stop_loss_pct"),
+                "lean_validated":          lean_validated,
+                "lean_status":             lean_validation.get("lean_status"),
+                "lean_sharpe":             lean_validation.get("lean_sharpe"),
+                "lean_max_drawdown":       lean_validation.get("lean_max_drawdown"),
+                "lean_win_rate":           lean_validation.get("lean_win_rate"),
+                "lean_trades":             lean_validation.get("lean_trades"),
+                "lean_reason":             lean_validation.get("lean_reason"),
             },
         )
 

@@ -140,13 +140,27 @@ def make_ant(
     registry: BiomeRegistry | None = None,
     scheduler: MagicMock | None = None,
 ) -> ResearchAnt:
-    return ResearchAnt(
+    ant = ResearchAnt(
         ant_id="ant-research-test-0001",
         mission=mission or make_mission(),
         scheduler=scheduler or MagicMock(),
         biome_registry=registry or make_registry(),
         logs_root=tmp_path,
     )
+    ant._lean_validator = MagicMock()
+    ant._lean_validator.validate.return_value = lean_unavailable_result()
+    return ant
+
+
+def lean_unavailable_result() -> dict:
+    return {
+        "lean_sharpe": None,
+        "lean_max_drawdown": None,
+        "lean_win_rate": None,
+        "lean_trades": None,
+        "lean_status": "unavailable",
+        "lean_reason": "test lean unavailable",
+    }
 
 
 def stub_backtester(
@@ -899,6 +913,27 @@ class TestAuditLog:
 
         record = read_jsonl(log_path(tmp_path, ant))[0]
         assert abs(record["payload"]["sharpe"] - 0.75) < 1e-3
+
+    def test_lean_validation_fields_logged_for_candidate(self, tmp_path):
+        candles = make_candles(GOLDEN_CROSS_CLOSES)
+        ant = make_ant(tmp_path, registry=make_registry(candles=candles))
+        ant._lean_validator.validate.return_value = {
+            "lean_sharpe": 0.7,
+            "lean_max_drawdown": 0.04,
+            "lean_win_rate": 0.58,
+            "lean_trades": 24,
+            "lean_status": "passed",
+            "lean_reason": "Lean backtest voltooid",
+        }
+        stub_backtester(ant, sharpe=0.8)
+
+        ant._tick()
+
+        payload = read_jsonl(log_path(tmp_path, ant))[0]["payload"]
+        assert payload["lean_status"] == "passed"
+        assert payload["lean_validated"] is True
+        assert payload["lean_sharpe"] == 0.7
+        assert payload["lean_trades"] == 24
 
 
 # ---------------------------------------------------------------------------
