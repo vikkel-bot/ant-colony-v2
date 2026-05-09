@@ -17,7 +17,7 @@ Verantwoordelijkheden:
   5. Retourneert een QueenDecision (Queen heeft altijd veto via apply)
 
 Beslissingslogica:
-  1. Paper win_rate > 0.60 over 20+ trades → kapitaal_verhogen
+  1. Paper win_rate > 0.55 over 10+ trades → kapitaal_verhogen
   2. Paper win_rate < 0.30 over 10+ trades → kapitaal_verlagen, deprioriteer
   3. Claude advies EN paper bevestigt → prioriteit_kandidaten
   4. Claude advies MAAR paper tegenspreekt → adviezen_genegeerd
@@ -58,9 +58,11 @@ _BRIEFING_MINUTE = 15
 _WEEKEND_LOG_INTERVAL = timedelta(hours=1)
 
 # Drempelwaarden beslissingslogica
-_WIN_HIGH         = 0.60   # win_rate boven dit → verhoog kapitaal
+_WIN_HIGH         = 0.60   # Claude-paper bevestiging blijft strenger
+_PAPER_WIN_HIGH   = 0.55   # paper win_rate boven dit → verhoog kapitaal
 _WIN_LOW          = 0.30   # win_rate onder dit → verlaag kapitaal
-_MIN_TRADES_HIGH  = 20     # minimale trades voor verhogen
+_MIN_TRADES_HIGH  = 20     # minimale trades voor Claude-paper bevestiging
+_PAPER_MIN_TRADES_HIGH = 10 # minimale trades voor paper verhogen
 
 # Mapping van backtester best_regime naar PaperAnt-regime
 _REGIME_MAP: dict[str, str] = {
@@ -166,6 +168,7 @@ _CLAUDE_MIN_CONF  = 6      # minimale confidence voor Claude advies
 # Paper stats tijdvenster — historische trades (pre-reset, bevroren prijzen) buiten
 # dit venster worden genegeerd bij win_rate berekening.
 _STATS_WINDOW_DAYS = 7
+_STAGNANT_TOP3_AGE = timedelta(days=14)
 
 
 # ---------------------------------------------------------------------------
@@ -179,7 +182,7 @@ def select_diverse_top_n(candidates: list[dict], n: int = 3) -> list[dict]:
     Regels (in volgorde):
       1. Sorteer op sharpe (hoogste eerst)
       2. Maximaal 1 kandidaat per symbool
-      3. Maximaal 1 kandidaat per strategy_type (unknown telt niet mee als duplicate)
+      3. Maximaal 1 kandidaat per strategy_type
 
     Args:
         candidates: Lijst van candidate-dicts met "sharpe", "symbol", "strategy_type".
@@ -201,21 +204,34 @@ def select_diverse_top_n(candidates: list[dict], n: int = 3) -> list[dict]:
     for c in sorted_cands:
         if len(result) >= n:
             break
-        symbol        = c.get("symbol") or ""
-        strategy_type = c.get("strategy_type") or c.get("strategy") or "unknown"
+        symbol        = _candidate_symbol_key(c)
+        strategy_type = _candidate_strategy_type_key(c)
 
         if symbol and symbol in seen_symbols:
             continue
-        if strategy_type != "unknown" and strategy_type in seen_types:
+        if strategy_type and strategy_type in seen_types:
             continue
 
         if symbol:
             seen_symbols.add(symbol)
-        if strategy_type != "unknown":
+        if strategy_type:
             seen_types.add(strategy_type)
         result.append(c)
 
+    _log.info(
+        "Queen diversiteit | top3=%s typen=%s",
+        [c.get("symbol") or c.get("asset") or "unknown" for c in result],
+        [c.get("strategy_type") or c.get("strategy") or "unknown" for c in result],
+    )
     return result
+
+
+def _candidate_symbol_key(candidate: dict) -> str:
+    return str(candidate.get("symbol") or candidate.get("asset") or "").upper().strip()
+
+
+def _candidate_strategy_type_key(candidate: dict) -> str:
+    return str(candidate.get("strategy_type") or candidate.get("strategy") or "unknown").lower().strip()
 
 
 # ---------------------------------------------------------------------------
@@ -470,7 +486,14 @@ class QueenAdvisor:
                         continue
                     payload = rec.get("payload") or {}
                     if payload.get("action") == "candidate_accepted":
-                        candidates.append(payload)
+                        enriched = dict(payload)
+                        if "_accepted_at" not in enriched:
+                            enriched["_accepted_at"] = (
+                                rec.get("timestamp")
+                                or rec.get("created_at")
+                                or rec.get("generated_at")
+                            )
+                        candidates.append(enriched)
             except OSError:
                 pass
         return candidates
@@ -884,9 +907,12 @@ class QueenAdvisor:
         """
         Regels 1 en 2: paper-prestaties bepalen kapitaal- en prioriteitsaanpassingen.
 
-        1. win_rate > 0.60 over 20+ trades → kandidaat in kapitaal_verhogen
+        1. win_rate > 0.55 over 10+ trades → kandidaat in kapitaal_verhogen
         2. win_rate < 0.30 over 10+ trades → kandidaat in kapitaal_verlagen + deprioriteer
+        3. strategy_type 2+ weken in top-3 zonder paper trade → stagnant + deprioriteer
         """
+        self._apply_stagnant_top3_logic(decision, candidates, paper_stats)
+
         if not paper_stats:
             return
 
@@ -913,7 +939,7 @@ class QueenAdvisor:
             cids   = symbol_to_cands.get(symbol, [])
             mids   = symbol_to_missions.get(symbol, [])
 
-            if total >= _MIN_TRADES_HIGH and wr > _WIN_HIGH:
+            if total >= _PAPER_MIN_TRADES_HIGH and wr > _PAPER_WIN_HIGH:
                 decision.kapitaal_verhogen.extend(mids)
                 decision.adviezen_gevolgd.append(
                     f"paper:{symbol} win_rate={wr:.2%} ({total} trades) → kapitaal verhogen"
@@ -925,6 +951,68 @@ class QueenAdvisor:
                 decision.adviezen_gevolgd.append(
                     f"paper:{symbol} win_rate={wr:.2%} ({total} trades) → verlagen + deprioriteer"
                 )
+
+    def _apply_stagnant_top3_logic(
+        self,
+        decision: QueenDecision,
+        candidates: list[dict],
+        paper_stats: dict[str, dict],
+    ) -> None:
+        """
+        Verlaag prioriteit voor strategy_types die lang zichtbaar zijn maar nooit paper-traden.
+
+        Conservatief: alleen de huidige diverse top-3 wordt beoordeeld. Een type
+        is stagnant als er een top-3 kandidaat is, dezelfde strategy_type al
+        minstens 14 dagen in research logs voorkomt en geen enkel symbool van
+        dat type een paper trade heeft.
+        """
+        if not candidates:
+            return
+
+        top3 = select_diverse_top_n(candidates, n=3)
+        if not top3:
+            return
+
+        now = datetime.now(tz=timezone.utc)
+        by_type: dict[str, list[dict]] = {}
+        for candidate in candidates:
+            strategy_type = _candidate_strategy_type_key(candidate)
+            if strategy_type:
+                by_type.setdefault(strategy_type, []).append(candidate)
+
+        for top_candidate in top3:
+            strategy_type = _candidate_strategy_type_key(top_candidate)
+            if not strategy_type:
+                continue
+            same_type = by_type.get(strategy_type, [])
+            first_seen: datetime | None = None
+            symbols: set[str] = set()
+            cids: list[str] = []
+
+            for candidate in same_type:
+                symbol = _candidate_symbol_key(candidate)
+                if symbol:
+                    symbols.add(symbol)
+                cid = str(candidate.get("candidate_id") or "").strip()
+                if cid:
+                    cids.append(cid)
+                ts = _parse_context_ts(candidate.get("_accepted_at") or candidate.get("timestamp"))
+                if ts is not None and (first_seen is None or ts < first_seen):
+                    first_seen = ts
+
+            if first_seen is None or now - first_seen < _STAGNANT_TOP3_AGE:
+                continue
+
+            has_paper_trade = any((paper_stats.get(symbol) or {}).get("total_trades", 0) > 0 for symbol in symbols)
+            if has_paper_trade:
+                continue
+
+            for cid in cids:
+                if cid and cid not in decision.deprioriteer_kandidaten:
+                    decision.deprioriteer_kandidaten.append(cid)
+            decision.adviezen_gevolgd.append(
+                f"stagnant:{strategy_type} al >=14d in top-3 zonder paper trade → prioriteit verlaagd"
+            )
 
     def _apply_claude_logic(
         self,

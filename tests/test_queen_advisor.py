@@ -58,20 +58,28 @@ def make_advisor(tmp_path: Path, ttl_minutes: int = 60) -> QueenAdvisor:
     return QueenAdvisor(queen=queen, logs_root=tmp_path, advice_ttl_minutes=ttl_minutes)
 
 
-def write_research_record(tmp_path: Path, candidate_id: str, symbol: str = "BTC-EUR",
-                           sharpe: float = 0.8, grade: str = "A") -> None:
+def write_research_record(
+    tmp_path: Path,
+    candidate_id: str,
+    symbol: str = "BTC-EUR",
+    sharpe: float = 0.8,
+    grade: str = "A",
+    strategy_type: str = "sma_crossover",
+    timestamp: str | None = None,
+) -> None:
     research_dir = tmp_path / "research"
     research_dir.mkdir(parents=True, exist_ok=True)
     record = {
         "event_type": "action_executed",
         "source": "ant-research-001",
+        "timestamp": timestamp or datetime.now(tz=timezone.utc).isoformat(),
         "payload": {
             "action":        "candidate_accepted",
             "candidate_id":  candidate_id,
             "symbol":        symbol,
             "sharpe":        sharpe,
             "win_rate":      0.6,
-            "strategy_type": "sma_crossover",
+            "strategy_type": strategy_type,
             "grade":         grade,
         },
     }
@@ -350,7 +358,7 @@ def test_read_claude_advices_just_within_ttl(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def test_high_win_rate_triggers_kapitaal_verhogen(tmp_path: Path) -> None:
-    """win_rate > 0.60 over 20+ trades → kapitaal_verhogen."""
+    """win_rate > 0.55 over 10+ trades → kapitaal_verhogen."""
     queen = make_queen(tmp_path)
     mission_mock = MagicMock()
     mission_mock.ant_type = "paper_ant"
@@ -368,6 +376,26 @@ def test_high_win_rate_triggers_kapitaal_verhogen(tmp_path: Path) -> None:
     decision = advisor.advise()
     assert "paper-mission-001" in decision.kapitaal_verhogen
     assert len(decision.adviezen_gevolgd) >= 1
+
+
+def test_high_win_rate_uses_relaxed_paper_threshold(tmp_path: Path) -> None:
+    """10 trades met 60% winrate is genoeg voor paper-verhogen."""
+    queen = make_queen(tmp_path)
+    mission_mock = MagicMock()
+    mission_mock.ant_type = "paper_ant"
+    mission_mock.market_scope.symbols = ["BTC-EUR"]
+    queen.active_missions = {"paper-mission-001": mission_mock}
+    advisor = QueenAdvisor(queen=queen, logs_root=tmp_path)
+
+    write_research_record(tmp_path, str(uuid.uuid4()), symbol="BTC-EUR")
+    for _ in range(6):
+        write_trade(tmp_path, "BTC-EUR", pnl=5.0)
+    for _ in range(4):
+        write_trade(tmp_path, "BTC-EUR", pnl=-2.0)
+
+    decision = advisor.advise()
+
+    assert "paper-mission-001" in decision.kapitaal_verhogen
 
 
 def test_low_win_rate_triggers_verlagen_and_deprioriteer(tmp_path: Path) -> None:
@@ -665,15 +693,16 @@ def test_diverse_top_n_picks_diverse_set() -> None:
     assert len({c["strategy_type"] for c in result}) == 3   # alle 3 unieke types
 
 
-def test_diverse_top_n_unknown_type_not_deduplicated() -> None:
-    """strategy_type='unknown' telt niet als duplicate — meerdere unknowns zijn toegestaan."""
+def test_diverse_top_n_unknown_type_is_deduplicated() -> None:
+    """Ook unknown telt als strategy_type — maximaal 1 type in top-N."""
     cands = [
         _make_candidate("BTC-EUR", "unknown", 0.9),
         _make_candidate("ETH-EUR", "unknown", 0.8),
         _make_candidate("SOL-EUR", "unknown", 0.7),
     ]
     result = select_diverse_top_n(cands, n=3)
-    assert len(result) == 3   # alle 3 toegelaten ondanks zelfde type
+    assert len(result) == 1
+    assert result[0]["symbol"] == "BTC-EUR"
 
 
 def test_diverse_top_n_fewer_than_n_candidates() -> None:
@@ -702,6 +731,39 @@ def test_diverse_top_n_btc_dominantie_doorbroken() -> None:
     assert symbols.count("BTC-EUR") == 1
     assert "ETH-EUR" in symbols
     assert "SOL-EUR" in symbols
+
+
+def test_diverse_top_n_logs_selected_mix(caplog) -> None:
+    cands = [
+        _make_candidate("BTC-EUR", "sma_crossover", 0.9),
+        _make_candidate("ETH-EUR", "rsi_based", 0.8),
+    ]
+
+    with caplog.at_level("INFO", logger="ant_colony.queen.queen_advisor"):
+        select_diverse_top_n(cands, n=3)
+
+    assert any("Queen diversiteit" in rec.message for rec in caplog.records)
+
+
+def test_stagnant_top3_strategy_type_deprioritized(tmp_path: Path) -> None:
+    queen = make_queen(tmp_path)
+    advisor = QueenAdvisor(queen=queen, logs_root=tmp_path)
+    old_ts = (datetime.now(tz=timezone.utc) - timedelta(days=15)).isoformat()
+
+    cid = str(uuid.uuid4())
+    write_research_record(
+        tmp_path,
+        cid,
+        symbol="BTC-EUR",
+        sharpe=1.14,
+        strategy_type="sma_crossover",
+        timestamp=old_ts,
+    )
+
+    decision = advisor.advise()
+
+    assert cid in decision.deprioriteer_kandidaten
+    assert any("stagnant:sma_crossover" in msg for msg in decision.adviezen_gevolgd)
 
 
 def test_apply_decision_logs_all_fields(tmp_path: Path) -> None:
