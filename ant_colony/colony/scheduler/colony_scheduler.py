@@ -7,7 +7,8 @@ Responsibilities:
   - Abort condition polling
   - Mission dispatch
   - Colony status management
-  - Append-only tick and dashboard heartbeat log to ANT_LOGS\\colony\\scheduler.jsonl
+  - Dagelijks geroteerde tick- en heartbeat-logs in ANT_LOGS\\colony\\scheduler_YYYYMMDD.jsonl
+  (max 10 MB per bestand, 7 dagen bewaard)
 
 Rules:
   - Runs always; is never an afterthought
@@ -23,7 +24,7 @@ import logging
 import os
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Protocol
@@ -34,6 +35,9 @@ from ant_colony.schemas.heartbeat import Heartbeat
 from ant_colony.schemas.mission import Mission
 
 logger = logging.getLogger(__name__)
+
+_SCHEDULER_LOG_MAX_BYTES   = 10 * 1024 * 1024  # 10 MB per bestand
+_SCHEDULER_LOG_RETAIN_DAYS = 7                   # bewaar maximaal 7 dagen
 
 
 def _env_int(name: str, default: int) -> int:
@@ -182,7 +186,7 @@ class ColonyScheduler:
         self._dashboard_heartbeat_stop = threading.Event()
         self._dashboard_heartbeat_thread: threading.Thread | None = None
 
-        self._scheduler_log_path = logs_root / "colony" / "scheduler.jsonl"
+        self._cleanup_old_scheduler_logs()
 
     # ------------------------------------------------------------------
     # Public API
@@ -279,8 +283,7 @@ class ColonyScheduler:
                 enabled=profile_enabled,
             )
             if profile_enabled:
-                self._append_to_log(
-                    self._scheduler_log_path,
+                self._append_to_scheduler_log(
                     {
                         "event_type": "scheduler_tick_profile",
                         "sequence": self._tick_sequence,
@@ -506,8 +509,7 @@ class ColonyScheduler:
             step_name,
             duration_seconds,
         )
-        self._append_to_log(
-            self._scheduler_log_path,
+        self._append_to_scheduler_log(
             {
                 "event_type": "slow_tick_step",
                 "sequence": self._tick_sequence,
@@ -534,7 +536,7 @@ class ColonyScheduler:
             payload=payload or {},
             sequence=self._tick_sequence,
         )
-        self._append_to_log(self._scheduler_log_path, event.model_dump(mode="json"))
+        self._append_to_scheduler_log(event.model_dump(mode="json"))
 
     def _log_tick_summary(
         self,
@@ -565,7 +567,7 @@ class ColonyScheduler:
         }
         if profile_steps is not None:
             record["profile_steps"] = list(profile_steps)
-        self._append_to_log(self._scheduler_log_path, record)
+        self._append_to_scheduler_log(record)
 
     def _append_to_log(self, path: Path, record: dict) -> None:
         """Append a single JSON record to a log file. Creates parent dirs if needed."""
@@ -575,6 +577,51 @@ class ColonyScheduler:
                 fh.write(json.dumps(record, default=str) + "\n")
         except OSError:
             logger.exception("Failed to write to log: %s", path)
+
+    # ------------------------------------------------------------------
+    # Internal — scheduler log rotatie
+    # ------------------------------------------------------------------
+
+    def _current_scheduler_log_path(self) -> Path:
+        today = datetime.now(tz=timezone.utc).strftime("%Y%m%d")
+        return self._logs_root / "colony" / f"scheduler_{today}.jsonl"
+
+    def _append_to_scheduler_log(self, record: dict) -> None:
+        """Schrijf naar het dagelijkse scheduler log; roteert bij 10 MB."""
+        path = self._current_scheduler_log_path()
+        self._rotate_scheduler_log_if_needed(path)
+        self._append_to_log(path, record)
+
+    def _rotate_scheduler_log_if_needed(self, path: Path) -> None:
+        """Hernoem het huidige logbestand als het ≥ 10 MB is."""
+        try:
+            if not path.exists() or path.stat().st_size < _SCHEDULER_LOG_MAX_BYTES:
+                return
+            now = datetime.now(tz=timezone.utc)
+            today   = now.strftime("%Y%m%d")
+            ts_part = now.strftime("%H%M%S")
+            rotated = path.parent / f"scheduler_{today}_{ts_part}.jsonl"
+            path.rename(rotated)
+            logger.info("Scheduler log geroteerd (>10 MB): %s → %s", path.name, rotated.name)
+            self._cleanup_old_scheduler_logs()
+        except OSError:
+            logger.exception("Fout bij roteren scheduler log")
+
+    def _cleanup_old_scheduler_logs(self) -> None:
+        """Verwijder scheduler_*.jsonl bestanden ouder dan RETAIN_DAYS dagen."""
+        colony_dir = self._logs_root / "colony"
+        if not colony_dir.exists():
+            return
+        cutoff = datetime.now(tz=timezone.utc) - timedelta(days=_SCHEDULER_LOG_RETAIN_DAYS)
+        for f in colony_dir.glob("scheduler_*.jsonl"):
+            try:
+                date_str = f.stem.split("_")[1][:8]  # scheduler_YYYYMMDD[_HHMMSS]
+                file_date = datetime.strptime(date_str, "%Y%m%d").replace(tzinfo=timezone.utc)
+                if file_date < cutoff:
+                    f.unlink()
+                    logger.info("Oud scheduler log verwijderd: %s", f.name)
+            except (ValueError, OSError, IndexError):
+                continue
 
     # ------------------------------------------------------------------
     # Internal — dashboard heartbeat
@@ -616,8 +663,7 @@ class ColonyScheduler:
             seconds_since_last_tick = self.seconds_since_last_tick()
         except Exception:
             seconds_since_last_tick = None
-        self._append_to_log(
-            self._scheduler_log_path,
+        self._append_to_scheduler_log(
             {
                 "event_type": "dashboard_heartbeat",
                 "sequence": self._tick_sequence,
@@ -677,8 +723,7 @@ class ColonyScheduler:
             seconds,
             self._watchdog_threshold_seconds,
         )
-        self._append_to_log(
-            self._scheduler_log_path,
+        self._append_to_scheduler_log(
             {
                 "event_type": "scheduler_watchdog_stale",
                 "sequence": self._tick_sequence,
@@ -704,8 +749,7 @@ class ColonyScheduler:
             return False
 
     def _log_scheduler_error(self, event_type: str, exc: BaseException) -> None:
-        self._append_to_log(
-            self._scheduler_log_path,
+        self._append_to_scheduler_log(
             {
                 "event_type": event_type,
                 "sequence": self._tick_sequence,

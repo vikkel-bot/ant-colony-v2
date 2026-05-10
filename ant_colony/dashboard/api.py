@@ -2197,10 +2197,11 @@ def _real_equity(registry: BiomeRegistry | None) -> float | None:
 # ---------------------------------------------------------------------------
 
 def _last_tick_from_logs(logs_root: Path | None) -> datetime | None:
-    """Lees de dashboard heartbeat; val alleen terug op ticks voor oudere logs."""
+    """Lees de dashboard heartbeat uit het dagelijkse scheduler log."""
     if logs_root is None:
         return None
-    log_file = logs_root / "colony" / "scheduler.jsonl"
+    today = datetime.now(tz=timezone.utc).strftime("%Y%m%d")
+    log_file = logs_root / "colony" / f"scheduler_{today}.jsonl"
     return (
         _last_event_timestamp_in_file(log_file, "dashboard_heartbeat")
         or _last_event_timestamp_in_file(log_file, "tick")

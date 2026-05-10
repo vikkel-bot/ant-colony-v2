@@ -194,7 +194,8 @@ class TestStatusEndpoint:
     def test_last_tick_from_log(self):
         with tempfile.TemporaryDirectory() as tmp:
             logs = Path(tmp)
-            log_file = logs / "colony" / "scheduler.jsonl"
+            today = datetime.now(tz=timezone.utc).strftime("%Y%m%d")
+            log_file = logs / "colony" / f"scheduler_{today}.jsonl"
             _write_jsonl(log_file, [{"timestamp": _now_iso(), "event_type": "tick"}])
             ctx = ColonyContext(scheduler=_make_scheduler(), logs_root=logs)
             r = _client(ctx).get("/api/status")
@@ -205,7 +206,8 @@ class TestStatusEndpoint:
     def test_status_prefers_dashboard_heartbeat_over_scheduler_tick(self):
         with tempfile.TemporaryDirectory() as tmp:
             logs = Path(tmp)
-            log_file = logs / "colony" / "scheduler.jsonl"
+            today = datetime.now(tz=timezone.utc).strftime("%Y%m%d")
+            log_file = logs / "colony" / f"scheduler_{today}.jsonl"
             old_tick = (datetime.now(tz=timezone.utc) - timedelta(seconds=90)).isoformat()
             fresh_heartbeat = _now_iso()
             _write_jsonl(

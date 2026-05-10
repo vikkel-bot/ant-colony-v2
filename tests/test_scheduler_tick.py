@@ -48,6 +48,12 @@ def make_record(
     )
 
 
+def scheduler_log_path(base: Path) -> Path:
+    """Geeft het huidige dagelijkse scheduler log pad (UTC datum)."""
+    today = datetime.now(tz=timezone.utc).strftime("%Y%m%d")
+    return base / "colony" / f"scheduler_{today}.jsonl"
+
+
 def read_log(path: Path) -> list[dict]:
     if not path.exists():
         return []
@@ -92,7 +98,7 @@ class TestTick:
     def test_tick_writes_to_log(self, tmp_path):
         s = make_scheduler(tmp_path)
         s.tick()
-        log_path = tmp_path / "colony" / "scheduler.jsonl"
+        log_path = scheduler_log_path(tmp_path)
         records = read_log(log_path)
         assert len(records) >= 1
         tick = next(r for r in records if r.get("event_type") == "tick")
@@ -103,7 +109,7 @@ class TestTick:
 
         s.tick()
 
-        records = read_log(tmp_path / "colony" / "scheduler.jsonl")
+        records = read_log(scheduler_log_path(tmp_path))
         tick = next(r for r in records if r.get("event_type") == "tick")
         profile = next(r for r in records if r.get("event_type") == "scheduler_tick_profile")
         step_names = {step["step"] for step in profile["steps"]}
@@ -120,7 +126,7 @@ class TestTick:
 
         s.tick()
 
-        records = read_log(tmp_path / "colony" / "scheduler.jsonl")
+        records = read_log(scheduler_log_path(tmp_path))
         assert "LANGZAME TICK" in caplog.text
         assert any(r.get("event_type") == "slow_tick_step" for r in records)
 
@@ -130,7 +136,7 @@ class TestTick:
         assert s.status == ColonyStatus.HALTED
 
         # Tick after halt must be a no-op — no new log entries from tick
-        log_path = tmp_path / "colony" / "scheduler.jsonl"
+        log_path = scheduler_log_path(tmp_path)
         entries_before = len(read_log(log_path))
         s.tick()
         entries_after = len(read_log(log_path))
@@ -140,7 +146,7 @@ class TestTick:
         s = make_scheduler(tmp_path)
         s.tick()
         s.tick()
-        log_path = tmp_path / "colony" / "scheduler.jsonl"
+        log_path = scheduler_log_path(tmp_path)
         records = read_log(log_path)
         sequences = [r["sequence"] for r in records if "sequence" in r]
         assert sequences == sorted(sequences)
@@ -173,7 +179,7 @@ class TestTick:
 
         assert recovered is True
         assert s._tick_sequence == 1
-        records = read_log(tmp_path / "colony" / "scheduler.jsonl")
+        records = read_log(scheduler_log_path(tmp_path))
         assert any(r.get("event_type") == "scheduler_watchdog_stale" for r in records)
 
     def test_dashboard_heartbeat_writes_without_scheduler_tick(self, tmp_path):
@@ -181,7 +187,7 @@ class TestTick:
 
         s._write_dashboard_heartbeat()
 
-        records = read_log(tmp_path / "colony" / "scheduler.jsonl")
+        records = read_log(scheduler_log_path(tmp_path))
         assert len(records) == 1
         assert records[0]["event_type"] == "dashboard_heartbeat"
         assert records[0]["sequence"] == 0
@@ -361,7 +367,7 @@ class TestKillSwitch:
         s = make_scheduler(tmp_path)
         s.kill_switch(KillLevel.COLONY)
 
-        log_path = tmp_path / "colony" / "scheduler.jsonl"
+        log_path = scheduler_log_path(tmp_path)
         records = read_log(log_path)
         event_types = [r.get("event_type") for r in records]
         assert "colony_halted" in event_types
@@ -381,7 +387,7 @@ class TestLogIntegrity:
         s.tick()
         s.tick()
 
-        log_path = tmp_path / "colony" / "scheduler.jsonl"
+        log_path = scheduler_log_path(tmp_path)
         assert log_path.exists()
 
         raw = log_path.read_text(encoding="utf-8")
@@ -393,4 +399,85 @@ class TestLogIntegrity:
         deep = tmp_path / "a" / "b" / "c"
         s = ColonyScheduler(logs_root=deep, tick_interval=1)
         s.tick()
-        assert (deep / "colony" / "scheduler.jsonl").exists()
+        assert scheduler_log_path(deep).exists()
+
+    def test_log_filename_contains_utc_date(self, tmp_path):
+        s = make_scheduler(tmp_path)
+        s.tick()
+        today = datetime.now(tz=timezone.utc).strftime("%Y%m%d")
+        expected = tmp_path / "colony" / f"scheduler_{today}.jsonl"
+        assert expected.exists()
+
+    def test_log_does_not_write_to_legacy_scheduler_jsonl(self, tmp_path):
+        s = make_scheduler(tmp_path)
+        s.tick()
+        legacy = tmp_path / "colony" / "scheduler.jsonl"
+        assert not legacy.exists()
+
+
+# ---------------------------------------------------------------------------
+# Log rotatie
+# ---------------------------------------------------------------------------
+
+class TestLogRotation:
+    def test_size_overflow_renames_current_file(self, tmp_path):
+        from ant_colony.colony.scheduler.colony_scheduler import _SCHEDULER_LOG_MAX_BYTES
+        s = make_scheduler(tmp_path)
+        path = s._current_scheduler_log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Schrijf net genoeg bytes om de rotatie-drempel te overschrijden
+        path.write_bytes(b"x" * _SCHEDULER_LOG_MAX_BYTES)
+        s._rotate_scheduler_log_if_needed(path)
+        # Het originele bestand is weg (hernoemd), er is een _HHMMSS-variant
+        colony_dir = tmp_path / "colony"
+        today = datetime.now(tz=timezone.utc).strftime("%Y%m%d")
+        rotated = list(colony_dir.glob(f"scheduler_{today}_*.jsonl"))
+        assert len(rotated) == 1
+        assert not path.exists()
+
+    def test_size_below_threshold_does_not_rotate(self, tmp_path):
+        s = make_scheduler(tmp_path)
+        path = s._current_scheduler_log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}\n", encoding="utf-8")
+        s._rotate_scheduler_log_if_needed(path)
+        assert path.exists()
+
+    def test_cleanup_removes_logs_older_than_7_days(self, tmp_path):
+        colony_dir = tmp_path / "colony"
+        colony_dir.mkdir(parents=True)
+        cutoff = datetime.now(tz=timezone.utc) - timedelta(days=8)
+        old_date = cutoff.strftime("%Y%m%d")
+        old_file = colony_dir / f"scheduler_{old_date}.jsonl"
+        old_file.write_text("{}\n", encoding="utf-8")
+
+        today = datetime.now(tz=timezone.utc).strftime("%Y%m%d")
+        today_file = colony_dir / f"scheduler_{today}.jsonl"
+        today_file.write_text("{}\n", encoding="utf-8")
+
+        s = make_scheduler(tmp_path)  # cleanup wordt in __init__ aangeroepen
+        assert not old_file.exists()
+        assert today_file.exists()
+
+    def test_cleanup_keeps_logs_within_7_days(self, tmp_path):
+        colony_dir = tmp_path / "colony"
+        colony_dir.mkdir(parents=True)
+        recent = datetime.now(tz=timezone.utc) - timedelta(days=5)
+        recent_date = recent.strftime("%Y%m%d")
+        recent_file = colony_dir / f"scheduler_{recent_date}.jsonl"
+        recent_file.write_text("{}\n", encoding="utf-8")
+
+        make_scheduler(tmp_path)
+        assert recent_file.exists()
+
+    def test_append_after_rotation_writes_to_fresh_file(self, tmp_path):
+        from ant_colony.colony.scheduler.colony_scheduler import _SCHEDULER_LOG_MAX_BYTES
+        s = make_scheduler(tmp_path)
+        path = s._current_scheduler_log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"x" * _SCHEDULER_LOG_MAX_BYTES)
+        # tick() triggert automatisch rotatie + schrijft naar vers bestand
+        s.tick()
+        assert path.exists()
+        records = read_log(path)
+        assert len(records) >= 1  # vers bestand bevat de nieuwe tick
