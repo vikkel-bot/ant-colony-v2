@@ -6,6 +6,7 @@ kill-switch levels, and log output.
 """
 
 import json
+import logging
 import tempfile
 import time
 from datetime import datetime, timedelta, timezone
@@ -96,6 +97,32 @@ class TestTick:
         assert len(records) >= 1
         tick = next(r for r in records if r.get("event_type") == "tick")
         assert "duration_seconds" in tick
+
+    def test_tick_profiles_scheduler_steps_during_startup_window(self, tmp_path):
+        s = make_scheduler(tmp_path)
+
+        s.tick()
+
+        records = read_log(tmp_path / "colony" / "scheduler.jsonl")
+        tick = next(r for r in records if r.get("event_type") == "tick")
+        profile = next(r for r in records if r.get("event_type") == "scheduler_tick_profile")
+        step_names = {step["step"] for step in profile["steps"]}
+
+        assert "profile_steps" in tick
+        assert "scheduler.check_heartbeats" in step_names
+        assert "scheduler.enforce_ttls" in step_names
+        assert "scheduler.dispatch_pending_missions" in step_names
+
+    def test_slow_tick_step_is_logged_when_profile_threshold_exceeded(self, tmp_path, caplog):
+        s = make_scheduler(tmp_path)
+        s._profile_slow_step_seconds = 0.0
+        caplog.set_level(logging.ERROR, logger="ant_colony.colony.scheduler.colony_scheduler")
+
+        s.tick()
+
+        records = read_log(tmp_path / "colony" / "scheduler.jsonl")
+        assert "LANGZAME TICK" in caplog.text
+        assert any(r.get("event_type") == "slow_tick_step" for r in records)
 
     def test_tick_is_skipped_when_halted(self, tmp_path):
         s = make_scheduler(tmp_path)

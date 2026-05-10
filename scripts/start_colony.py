@@ -205,6 +205,19 @@ def _kill_port(port: int, log: logging.Logger) -> None:
 _DASHBOARD_RESTART_DELAY_S = 5
 
 
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        logging.getLogger("start_colony").warning(
+            "Ongeldige int env %s=%r — default=%d",
+            name,
+            os.getenv(name),
+            default,
+        )
+        return default
+
+
 def _run_dashboard_watchdog(run_fn, ctx, host: str, port: int, log: logging.Logger) -> None:
     """Daemon thread: herstart dashboard automatisch bij onverwachte exit of crash."""
     attempt = 0
@@ -261,6 +274,91 @@ def _run_rs_regime_sync_loop(advisor, log: logging.Logger) -> None:
                 _RS_REGIME_SYNC_INTERVAL,
             )
         time.sleep(_RS_REGIME_SYNC_INTERVAL)
+
+
+# ---------------------------------------------------------------------------
+# Runtime diagnostics thread
+# ---------------------------------------------------------------------------
+
+def _thread_snapshot() -> dict[str, str]:
+    snapshot: dict[str, str] = {}
+    for thread in threading.enumerate():
+        ident = thread.ident if thread.ident is not None else id(thread)
+        snapshot[f"{thread.name}:{ident}"] = thread.name
+    return snapshot
+
+
+def _run_runtime_diagnostics(log: logging.Logger) -> None:
+    """Log thread- en geheugengroei zonder agent-logica te blokkeren."""
+    interval = max(5, _env_int("COLONY_RUNTIME_DIAG_INTERVAL_SECONDS", 60))
+    memory_warning_mb = max(1, _env_int("COLONY_MEMORY_WARNING_MB", 500))
+    previous_threads = _thread_snapshot()
+    peak_thread_count = len(previous_threads)
+
+    process = None
+    try:
+        import psutil  # type: ignore
+
+        process = psutil.Process(os.getpid())
+    except Exception as exc:
+        log.warning(
+            "Runtime diagnose: psutil niet beschikbaar — geheugengebruik niet gemeten: %s",
+            exc,
+        )
+
+    while True:
+        try:
+            current_threads = _thread_snapshot()
+            thread_count = threading.active_count()
+            added = [
+                name
+                for key, name in current_threads.items()
+                if key not in previous_threads
+            ]
+            removed = [
+                name
+                for key, name in previous_threads.items()
+                if key not in current_threads
+            ]
+
+            memory_mb: float | None = None
+            if process is not None:
+                try:
+                    memory_mb = process.memory_info().rss / (1024 * 1024)
+                except Exception as exc:
+                    log.warning("Runtime diagnose: geheugenmeting mislukt: %s", exc)
+
+            log.info(
+                "Runtime diagnose | threads=%d peak_threads=%d geheugen_mb=%s",
+                thread_count,
+                peak_thread_count,
+                f"{memory_mb:.1f}" if memory_mb is not None else "n/a",
+            )
+
+            if len(current_threads) > peak_thread_count:
+                peak_thread_count = len(current_threads)
+                log.warning(
+                    "Runtime diagnose | threadgroei gedetecteerd | threads=%d nieuw=%s",
+                    len(current_threads),
+                    added or ["<geen nieuwe threadnaam gevonden>"],
+                )
+            elif added:
+                log.info("Runtime diagnose | nieuwe threads=%s", added)
+
+            if removed:
+                log.info("Runtime diagnose | verdwenen threads=%s", removed)
+
+            if memory_mb is not None and memory_mb > memory_warning_mb:
+                log.warning(
+                    "Runtime diagnose | geheugen hoog | %.1fMB > %dMB",
+                    memory_mb,
+                    memory_warning_mb,
+                )
+
+            previous_threads = current_threads
+        except Exception:
+            log.exception("Runtime diagnose fout — volgende cyclus over %ds.", interval)
+        time.sleep(interval)
 
 
 # ---------------------------------------------------------------------------
@@ -1808,6 +1906,14 @@ def main() -> None:
         name="dashboard-watchdog",
         daemon=True,
     ).start()
+
+    threading.Thread(
+        target=_run_runtime_diagnostics,
+        args=(log,),
+        name="runtime-diagnostics",
+        daemon=True,
+    ).start()
+    log.info("Runtime diagnose gestart | interval=%ds", _env_int("COLONY_RUNTIME_DIAG_INTERVAL_SECONDS", 60))
 
     # Hoofdthread blijft leven zodat daemon threads (scheduler, ants, dashboard)
     # niet worden beëindigd bij een clean return van main().

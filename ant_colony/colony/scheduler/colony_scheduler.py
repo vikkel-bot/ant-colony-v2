@@ -36,6 +36,22 @@ from ant_colony.schemas.mission import Mission
 logger = logging.getLogger(__name__)
 
 
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        logger.warning("Ongeldige int env %s=%r — default=%d", name, os.getenv(name), default)
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        logger.warning("Ongeldige float env %s=%r — default=%.1f", name, os.getenv(name), default)
+        return default
+
+
 # ---------------------------------------------------------------------------
 # Colony status
 # ---------------------------------------------------------------------------
@@ -148,15 +164,20 @@ class ColonyScheduler:
         now = datetime.now(tz=timezone.utc)
         self._last_tick_started_at: datetime | None = None
         self._last_tick_completed_at: datetime = now
-        self._watchdog_threshold_seconds = int(os.getenv("COLONY_TICK_WATCHDOG_SECONDS", "60"))
-        self._watchdog_check_seconds = max(5, int(os.getenv("COLONY_TICK_WATCHDOG_CHECK_SECONDS", "30")))
-        self._slow_tick_threshold_seconds = int(os.getenv("COLONY_SLOW_TICK_SECONDS", "60"))
+        self._watchdog_threshold_seconds = _env_int("COLONY_TICK_WATCHDOG_SECONDS", 60)
+        self._watchdog_check_seconds = max(5, _env_int("COLONY_TICK_WATCHDOG_CHECK_SECONDS", 30))
+        self._slow_tick_threshold_seconds = _env_int("COLONY_SLOW_TICK_SECONDS", 60)
+        self._profile_first_ticks = max(0, _env_int("COLONY_PROFILE_FIRST_TICKS", 20))
+        self._profile_slow_step_seconds = max(
+            0.0,
+            _env_float("COLONY_PROFILE_SLOW_STEP_SECONDS", 5.0),
+        )
         self._watchdog_stop = threading.Event()
         self._watchdog_thread: threading.Thread | None = None
         self._last_watchdog_recovery_at: datetime | None = None
         self._dashboard_heartbeat_seconds = max(
             1,
-            int(os.getenv("COLONY_DASHBOARD_HEARTBEAT_SECONDS", "10")),
+            _env_int("COLONY_DASHBOARD_HEARTBEAT_SECONDS", 10),
         )
         self._dashboard_heartbeat_stop = threading.Event()
         self._dashboard_heartbeat_thread: threading.Thread | None = None
@@ -222,13 +243,56 @@ class ColonyScheduler:
             self._tick_sequence += 1
             tick_start = datetime.now(tz=timezone.utc)
             self._last_tick_started_at = tick_start
+            profile_enabled = self._is_profile_tick()
+            profile_steps: list[dict] = []
 
-            stale = self._check_heartbeats()
-            expired = self._enforce_ttls()
-            dispatched = self._dispatch_pending_missions()
+            stale = self._profile_step(
+                "scheduler.check_heartbeats",
+                self._check_heartbeats,
+                profile_steps,
+                enabled=profile_enabled,
+            )
+            expired = self._profile_step(
+                "scheduler.enforce_ttls",
+                self._enforce_ttls,
+                profile_steps,
+                enabled=profile_enabled,
+            )
+            dispatched = self._profile_step(
+                "scheduler.dispatch_pending_missions",
+                self._dispatch_pending_missions,
+                profile_steps,
+                enabled=profile_enabled,
+            )
 
             self._last_tick_completed_at = datetime.now(tz=timezone.utc)
-            self._log_tick_summary(tick_start, stale=stale, expired=expired, dispatched=dispatched)
+            self._profile_step(
+                "scheduler.log_tick_summary",
+                lambda: self._log_tick_summary(
+                    tick_start,
+                    stale=stale,
+                    expired=expired,
+                    dispatched=dispatched,
+                    profile_steps=profile_steps if profile_enabled else None,
+                ),
+                profile_steps,
+                enabled=profile_enabled,
+            )
+            if profile_enabled:
+                self._append_to_log(
+                    self._scheduler_log_path,
+                    {
+                        "event_type": "scheduler_tick_profile",
+                        "sequence": self._tick_sequence,
+                        "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+                        "profile_window": f"first_{self._profile_first_ticks}_ticks",
+                        "steps": profile_steps,
+                        "note": (
+                            "ColonyScheduler profileert alleen scheduler-stappen; "
+                            "QueenAdvisor en ants draaien in eigen daemon-threads."
+                        ),
+                    },
+                )
         finally:
             self._tick_lock.release()
 
@@ -404,9 +468,55 @@ class ColonyScheduler:
 
         if self._agent_stopper is not None:
             try:
+                started = time.perf_counter()
                 self._agent_stopper(ant_id, reason)
+                duration = time.perf_counter() - started
+                if self._is_profile_tick():
+                    self._log_slow_tick_step("callback.agent_stopper", duration)
             except Exception:
                 logger.exception("agent_stopper raised for ant_id=%s", ant_id)
+
+    # ------------------------------------------------------------------
+    # Internal — tick profiling
+    # ------------------------------------------------------------------
+
+    def _is_profile_tick(self) -> bool:
+        return self._profile_first_ticks > 0 and self._tick_sequence <= self._profile_first_ticks
+
+    def _profile_step(self, step_name: str, func, profile_steps: list[dict], *, enabled: bool):
+        started = time.perf_counter()
+        try:
+            return func()
+        finally:
+            duration = time.perf_counter() - started
+            if enabled:
+                profile_steps.append(
+                    {
+                        "step": step_name,
+                        "duration_seconds": round(duration, 6),
+                    }
+                )
+                self._log_slow_tick_step(step_name, duration)
+
+    def _log_slow_tick_step(self, step_name: str, duration_seconds: float) -> None:
+        if duration_seconds <= self._profile_slow_step_seconds:
+            return
+        logger.error(
+            "LANGZAME TICK | stap=%s duur=%.3fs",
+            step_name,
+            duration_seconds,
+        )
+        self._append_to_log(
+            self._scheduler_log_path,
+            {
+                "event_type": "slow_tick_step",
+                "sequence": self._tick_sequence,
+                "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+                "step": step_name,
+                "duration_seconds": round(duration_seconds, 3),
+                "threshold_seconds": self._profile_slow_step_seconds,
+            },
+        )
 
     # ------------------------------------------------------------------
     # Internal — logging
@@ -432,6 +542,7 @@ class ColonyScheduler:
         stale: list[str],
         expired: list[str],
         dispatched: list[str],
+        profile_steps: list[dict] | None = None,
     ) -> None:
         active = sum(1 for r in self._agents.values() if r.status == AntStatus.RUNNING)
         duration_seconds = (self._last_tick_completed_at - tick_start).total_seconds()
@@ -442,19 +553,19 @@ class ColonyScheduler:
                 self._slow_tick_threshold_seconds,
                 active,
             )
-        self._append_to_log(
-            self._scheduler_log_path,
-            {
-                "event_type": "tick",
-                "sequence": self._tick_sequence,
-                "timestamp": tick_start.isoformat(),
-                "duration_seconds": round(duration_seconds, 3),
-                "active_agents": active,
-                "stale_aborted": stale,
-                "ttl_expired": expired,
-                "dispatched": dispatched,
-            },
-        )
+        record = {
+            "event_type": "tick",
+            "sequence": self._tick_sequence,
+            "timestamp": tick_start.isoformat(),
+            "duration_seconds": round(duration_seconds, 3),
+            "active_agents": active,
+            "stale_aborted": stale,
+            "ttl_expired": expired,
+            "dispatched": dispatched,
+        }
+        if profile_steps is not None:
+            record["profile_steps"] = list(profile_steps)
+        self._append_to_log(self._scheduler_log_path, record)
 
     def _append_to_log(self, path: Path, record: dict) -> None:
         """Append a single JSON record to a log file. Creates parent dirs if needed."""
