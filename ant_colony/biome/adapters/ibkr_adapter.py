@@ -141,6 +141,19 @@ def _is_connection_lost_error(exc: BaseException) -> bool:
     )
 
 
+def _is_timeout_error(exc: BaseException) -> bool:
+    """Herken timeout-uitzonderingen van reqHistoricalData.
+
+    Onderscheidt pure connection-timeouts van subscription-fouten (PermissionError,
+    error 162). Timeout = TWS reageert niet op dit symbool; subscription-fout =
+    TWS reageert wel, maar weigert de data.
+    """
+    if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
+        return True
+    text = str(exc).lower()
+    return "timeout" in text or "timed out" in text
+
+
 class IBKRAdapter:
     """
     BiomeAdapter voor Interactive Brokers via ib_insync.
@@ -183,6 +196,7 @@ class IBKRAdapter:
         self._reconnect_thread: threading.Thread | None = None
         self._last_connect_error: BaseException | None = None
         self._ibkr_available: bool | None = None
+        self._timeout_symbols: set[str] = set()
         self._log        = logging.getLogger(
             f"adapter.ibkr.{'paper' if paper else 'live'}"
         )
@@ -414,6 +428,7 @@ class IBKRAdapter:
                 self._ib = ib
                 self._last_connect_error = None
                 self._ibkr_available = True
+                self._timeout_symbols.clear()
                 self._log.info(
                     "IBKR verbonden | %s:%d clientId=%d paper=%s",
                     host_, port_, client_id_, self._paper_mode,
@@ -479,6 +494,13 @@ class IBKRAdapter:
                     interval=interval,
                     reason="omdat IBKR bij startup/offline-check niet beschikbaar is",
                 )
+            if symbol in self._timeout_symbols:
+                return self._get_yfinance_fallback_candles(
+                    symbol,
+                    period=period,
+                    interval=interval,
+                    reason="eerder timeout op IBKR — cached naar yfinance",
+                )
             lock_acquired = self._ib_lock.acquire(timeout=_CANDLE_LOCK_WAIT_SECONDS)
             if not lock_acquired:
                 fallback_reason = "omdat IBKR candle lock bezet is"
@@ -522,15 +544,13 @@ class IBKRAdapter:
                             fallback_reason = "omdat IBKR verbinding verbroken is"
                         elif not _is_historical_data_fallback_error(exc):
                             raise
-                        elif isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
-                            # Geen respons van TWS → verbinding stalt → als offline markeren
-                            # zodat volgende aanroepen niet opnieuw wachten op een timeout.
-                            # PermissionError / error-162-tekst gaan naar de else-tak:
-                            # die zijn symbool-specifiek en markeren IBKR niet als offline.
-                            self._ib = None
-                            self._ibkr_available = False
-                            self._start_reconnect_loop()
-                            fallback_reason = "na IBKR timeout — offline gemarkeerd"
+                        elif _is_timeout_error(exc):
+                            # TWS reageert niet op dit symbool — per-symbool markeren.
+                            # IBKR blijft beschikbaar voor andere symbolen; geen reconnect.
+                            # PermissionError / error-162-tekst: symbool-specifieke
+                            # subscriptieweigering → else-tak, geen tracking.
+                            self._timeout_symbols.add(symbol)
+                            fallback_reason = "na IBKR timeout — symbool gemarkeerd voor yfinance"
                         else:
                             fallback_reason = "na IBKR fout (market data/subscription)"
                 finally:

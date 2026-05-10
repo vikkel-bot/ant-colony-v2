@@ -397,17 +397,17 @@ class TestGetCandles:
         ]
         with patched_ib(ib):
             adapter = _connected_adapter(ib)
-            with patch.object(adapter, "_start_reconnect_loop"):
-                with patch(
-                    "ant_colony.biome.adapters.yahoo_finance_adapter.YahooFinanceAdapter.get_candles",
-                    return_value=fallback,
-                ) as yf_get:
-                    caplog.set_level(logging.INFO, logger="adapter.ibkr.paper")
-                    result = adapter.get_candles("XLK", period="3mo", interval="1d")
+            with patch(
+                "ant_colony.biome.adapters.yahoo_finance_adapter.YahooFinanceAdapter.get_candles",
+                return_value=fallback,
+            ) as yf_get:
+                caplog.set_level(logging.INFO, logger="adapter.ibkr.paper")
+                result = adapter.get_candles("XLK", period="3mo", interval="1d")
         assert result == fallback
         yf_get.assert_called_once_with("XLK", period="3mo", interval="1d")
-        assert "yfinance fallback voor XLK na IBKR timeout — offline gemarkeerd" in caplog.text
+        assert "yfinance fallback voor XLK na IBKR timeout — symbool gemarkeerd voor yfinance" in caplog.text
         assert "yfinance fallback geslaagd voor XLK" in caplog.text
+        assert "XLK" in adapter._timeout_symbols
 
     def test_connection_refused_starts_reconnect_loop_and_uses_yfinance_fallback(self) -> None:
         adapter = IBKRAdapter()
@@ -500,7 +500,7 @@ class TestGetCandles:
         assert result == fallback
         reconnect.assert_called_once()
 
-    def test_timeout_marks_offline_and_starts_reconnect(self) -> None:
+    def test_timeout_tracks_symbol_ibkr_stays_available(self) -> None:
         ib = MagicMock()
         ib.isConnected.return_value = True
         ib.reqHistoricalData.side_effect = TimeoutError("historical data request timed out")
@@ -527,8 +527,9 @@ class TestGetCandles:
                     result = adapter.get_candles("XLE", period="3mo", interval="1d")
 
         assert result == fallback
-        reconnect.assert_called_once()
-        assert adapter._ibkr_available is False
+        reconnect.assert_not_called()           # IBKR blijft online, geen reconnect
+        assert adapter._ibkr_available is not False  # IBKR als geheel nog beschikbaar
+        assert "XLE" in adapter._timeout_symbols     # symbool gemarkeerd
 
     def test_permission_error_falls_back_without_reconnect(self) -> None:
         ib = MagicMock()
@@ -559,28 +560,29 @@ class TestGetCandles:
         assert result == fallback
         reconnect.assert_not_called()
 
-    def test_timeout_prevents_second_reqhistoricaldata_call(self) -> None:
-        """Na één TimeoutError markeert de cache IBKR als offline: de tweede aanroep
-        per symbool mag reqHistoricalData nooit meer bereiken."""
+    def test_timeout_prevents_second_reqhistoricaldata_for_same_symbol(self) -> None:
+        """Na één TimeoutError voor AAPL mag reqHistoricalData niet opnieuw worden
+        aangeroepen voor AAPL. Andere symbols worden nog steeds via IBKR geprobeerd."""
         ib = MagicMock()
         ib.isConnected.return_value = True
         ib.reqHistoricalData.side_effect = asyncio.TimeoutError()
         with patched_ib(ib):
             adapter = _connected_adapter(ib)
-            with patch.object(adapter, "_start_reconnect_loop"):
-                with patch(
-                    "ant_colony.biome.adapters.yahoo_finance_adapter.YahooFinanceAdapter.get_candles",
-                    return_value=[],
-                ):
-                    adapter.get_candles("AAPL")  # eerste aanroep — timeout
-                    adapter.get_candles("MSFT")  # tweede aanroep — moet IBKR overslaan
+            with patch(
+                "ant_colony.biome.adapters.yahoo_finance_adapter.YahooFinanceAdapter.get_candles",
+                return_value=[],
+            ):
+                adapter.get_candles("AAPL")  # eerste aanroep — timeout, AAPL gemarkeerd
+                adapter.get_candles("AAPL")  # tweede aanroep — skip IBKR via _timeout_symbols
 
         assert ib.reqHistoricalData.call_count == 1
-        assert adapter._ibkr_available is False
+        assert "AAPL" in adapter._timeout_symbols
+        assert adapter._ibkr_available is not False  # IBKR als geheel nog beschikbaar
 
-    def test_permission_error_does_not_mark_ibkr_offline(self) -> None:
+    def test_permission_error_does_not_mark_ibkr_offline_or_track_symbol(self) -> None:
         """PermissionError = ontbrekende datasubscriptie voor één symbool.
-        IBKR blijft beschikbaar voor andere symbolen."""
+        IBKR blijft beschikbaar. Symbool wordt NIET in _timeout_symbols gezet
+        (het is geen timeout, maar een expliciete weigering door TWS)."""
         ib = MagicMock()
         ib.isConnected.return_value = True
         ib.reqHistoricalData.side_effect = PermissionError("market data subscription ontbreekt")
@@ -595,6 +597,35 @@ class TestGetCandles:
 
         reconnect.assert_not_called()
         assert adapter._ibkr_available is not False
+        assert "XLK" not in adapter._timeout_symbols
+
+    def test_text_timeout_also_tracked_per_symbol(self) -> None:
+        """Tekst-gebaseerde timeout-fouten (bijv. ib_insync-wrappers) worden
+        ook per symbool gemarkeerd, niet alleen isinstance-timeouts."""
+        ib = MagicMock()
+        ib.isConnected.return_value = True
+        ib.reqHistoricalData.side_effect = Exception("historical data request timed out")
+        with patched_ib(ib):
+            adapter = _connected_adapter(ib)
+            with patch(
+                "ant_colony.biome.adapters.yahoo_finance_adapter.YahooFinanceAdapter.get_candles",
+                return_value=[],
+            ):
+                adapter.get_candles("XLRE")
+        assert "XLRE" in adapter._timeout_symbols
+        assert adapter._ibkr_available is not False
+
+    def test_reconnect_clears_timeout_symbols(self) -> None:
+        """Succesvolle reconnect reset de timeout-symbolen zodat nieuwe subscriptions
+        na TWS-herstart opnieuw worden geprobeerd."""
+        ib = MagicMock()
+        ib.isConnected.return_value = False  # eerste isConnected → opnieuw verbinden
+        with patched_ib(ib):
+            adapter = IBKRAdapter()
+            adapter._timeout_symbols.update({"XLK", "XLRE", "XLE"})
+            result = adapter.connect()
+        assert result is True
+        assert len(adapter._timeout_symbols) == 0
 
     def test_reconnect_loop_stops_after_max_attempts(self) -> None:
         adapter = IBKRAdapter()
@@ -614,15 +645,14 @@ class TestGetCandles:
         ib.reqHistoricalData.side_effect = TimeoutError("historical data request timed out")
         with patched_ib(ib):
             adapter = _connected_adapter(ib)
-            with patch.object(adapter, "_start_reconnect_loop"):
-                with patch(
-                    "ant_colony.biome.adapters.yahoo_finance_adapter.YahooFinanceAdapter.get_candles",
-                    return_value=[],
-                ):
-                    caplog.set_level(logging.INFO, logger="adapter.ibkr.paper")
-                    result = adapter.get_candles("XLE", period="3mo", interval="1d")
+            with patch(
+                "ant_colony.biome.adapters.yahoo_finance_adapter.YahooFinanceAdapter.get_candles",
+                return_value=[],
+            ):
+                caplog.set_level(logging.INFO, logger="adapter.ibkr.paper")
+                result = adapter.get_candles("XLE", period="3mo", interval="1d")
         assert result == []
-        assert "yfinance fallback voor XLE na IBKR timeout — offline gemarkeerd" in caplog.text
+        assert "yfinance fallback voor XLE na IBKR timeout — symbool gemarkeerd voor yfinance" in caplog.text
         assert "yfinance fallback ook mislukt voor XLE" in caplog.text
 
     def test_exchange_and_currency_passed_to_stock(self) -> None:
@@ -691,19 +721,18 @@ class TestGetCandles:
 
         with patched_ib(ib):
             adapter = _connected_adapter(ib)
-            with patch.object(adapter, "_start_reconnect_loop"):
-                with patch(
-                    "ant_colony.biome.adapters.yahoo_finance_adapter.YahooFinanceAdapter.get_candles",
-                    return_value=fallback,
-                ) as yf_get:
-                    started = time.monotonic()
-                    with ThreadPoolExecutor(max_workers=5) as executor:
-                        futures = [
-                            executor.submit(adapter.get_candles, f"ETF{i}", period="3mo", interval="1d")
-                            for i in range(5)
-                        ]
-                        results = [future.result(timeout=3) for future in futures]
-                    elapsed = time.monotonic() - started
+            with patch(
+                "ant_colony.biome.adapters.yahoo_finance_adapter.YahooFinanceAdapter.get_candles",
+                return_value=fallback,
+            ) as yf_get:
+                started = time.monotonic()
+                with ThreadPoolExecutor(max_workers=5) as executor:
+                    futures = [
+                        executor.submit(adapter.get_candles, f"ETF{i}", period="3mo", interval="1d")
+                        for i in range(5)
+                    ]
+                    results = [future.result(timeout=3) for future in futures]
+                elapsed = time.monotonic() - started
 
         assert elapsed < 3.0
         assert all(result == fallback for result in results)
