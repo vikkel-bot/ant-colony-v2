@@ -522,8 +522,17 @@ class IBKRAdapter:
                             fallback_reason = "omdat IBKR verbinding verbroken is"
                         elif not _is_historical_data_fallback_error(exc):
                             raise
+                        elif isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
+                            # Geen respons van TWS → verbinding stalt → als offline markeren
+                            # zodat volgende aanroepen niet opnieuw wachten op een timeout.
+                            # PermissionError / error-162-tekst gaan naar de else-tak:
+                            # die zijn symbool-specifiek en markeren IBKR niet als offline.
+                            self._ib = None
+                            self._ibkr_available = False
+                            self._start_reconnect_loop()
+                            fallback_reason = "na IBKR timeout — offline gemarkeerd"
                         else:
-                            fallback_reason = "na IBKR timeout/fout"
+                            fallback_reason = "na IBKR fout (market data/subscription)"
                 finally:
                     self._ib_lock.release()
 
