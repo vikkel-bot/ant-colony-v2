@@ -23,6 +23,7 @@ Scenarios:
 from __future__ import annotations
 
 import json
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,6 +37,7 @@ from ant_colony.ants.operator_ant import (
     _extract_url,
     _type_from_filename,
 )
+from ant_colony.schemas.ant import AntStatus
 from ant_colony.schemas.mission import (
     AbortConditions,
     MarketScope,
@@ -316,6 +318,29 @@ def test_multiple_inputs_each_processed(tmp_path: Path) -> None:
 
     op_recs = [r for r in read_ingestion_log(tmp_path) if r.get("source") == ant.ant_id]
     assert len(op_recs) == 3
+
+
+def test_watchdog_aborts_when_tick_stalls(tmp_path: Path, monkeypatch, caplog) -> None:
+    """Stall in _tick → OperatorAnt markeert zichzelf ABORTED voor supervisor restart."""
+    import ant_colony.ants.operator_ant as operator_module
+
+    ant = make_ant(tmp_path)
+    monkeypatch.setattr(operator_module, "_OPERATOR_WATCHDOG_SECONDS", 0.01)
+
+    def stalled_tick() -> None:
+        time.sleep(0.05)
+
+    monkeypatch.setattr(ant, "_tick", stalled_tick)
+
+    ant._status = AntStatus.RUNNING
+    ant._run_tick_with_watchdog()
+
+    assert ant._status == AntStatus.ABORTED
+    assert ant._watchdog_restarts == 1
+    assert ant._last_action == "tick_watchdog_restart"
+    records = read_operator_log(tmp_path)
+    assert any(r["payload"]["action"] == "operator_watchdog_restart" for r in records)
+    assert "OperatorAnt herstart" in caplog.text
 
 
 def test_operator_log_written(tmp_path: Path) -> None:

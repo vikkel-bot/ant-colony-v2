@@ -26,6 +26,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -58,6 +59,16 @@ _ALL_KEYWORDS = _ENTRY_KEYWORDS | _EXIT_KEYWORDS
 _KEYWORD_OVERLAP_THRESHOLD = 3
 
 
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+_OPERATOR_WATCHDOG_SECONDS = _env_float("OPERATOR_ANT_WATCHDOG_SECONDS", 600.0)
+
+
 class OperatorAnt:
     """
     Verwerkt menselijke input naar StrategyCandidate ingestion-events.
@@ -88,6 +99,9 @@ class OperatorAnt:
         self._log_seq: int = 0
         self._status: AntStatus = AntStatus.IDLE
         self._last_action: str = "init"
+        self._last_tick_started_monotonic: float | None = None
+        self._last_tick_completed_monotonic: float = time.monotonic()
+        self._watchdog_restarts: int = 0
 
         self._log = logging.getLogger(f"ant.operator.{ant_id[:8]}")
 
@@ -126,7 +140,7 @@ class OperatorAnt:
                     self._status = AntStatus.COMPLETED
                     break
 
-                self._tick()
+                self._run_tick_with_watchdog()
 
                 time.sleep(1.0)
 
@@ -146,6 +160,67 @@ class OperatorAnt:
     # ------------------------------------------------------------------
     # Tick
     # ------------------------------------------------------------------
+
+    def _run_tick_with_watchdog(self) -> None:
+        """
+        Voer één operator tick uit met een harde liveness watchdog.
+
+        Bij timeout markeren we de ant als ABORTED zodat de externe supervisor
+        een nieuwe OperatorAnt met fresh TTL kan starten. De geblokkeerde worker
+        blijft daemonized achter en blokkeert de Colony niet.
+        """
+        timeout = max(0.0, float(_OPERATOR_WATCHDOG_SECONDS))
+        if timeout <= 0:
+            self._tick()
+            self._last_tick_completed_monotonic = time.monotonic()
+            return
+
+        completed = threading.Event()
+        errors: list[BaseException] = []
+        started = time.monotonic()
+        self._last_tick_started_monotonic = started
+
+        def worker() -> None:
+            try:
+                self._tick()
+            except BaseException as exc:  # pragma: no cover - opnieuw gegooid in hoofdthread
+                errors.append(exc)
+            finally:
+                completed.set()
+
+        tick_thread = threading.Thread(
+            target=worker,
+            name=f"operator-cycle-{self.ant_id[:8]}",
+            daemon=True,
+        )
+        tick_thread.start()
+
+        if not completed.wait(timeout=timeout):
+            age = time.monotonic() - started
+            self._watchdog_restarts += 1
+            self._last_action = "tick_watchdog_restart"
+            self._status = AntStatus.ABORTED
+            self._log.error(
+                "OperatorAnt herstart | restart=%d | geen tick voltooid in %.1fs (> %.1fs)",
+                self._watchdog_restarts,
+                age,
+                timeout,
+            )
+            self._write_operator_log(
+                "operator_watchdog_restart",
+                {
+                    "duration_seconds": round(age, 3),
+                    "threshold_seconds": timeout,
+                    "watchdog_restarts": self._watchdog_restarts,
+                },
+            )
+            self._send_heartbeat()
+            return
+
+        if errors:
+            raise errors[0]
+
+        self._last_tick_completed_monotonic = time.monotonic()
 
     def _tick(self) -> None:
         """Één verwerkingscyclus: lees input bestanden, verwerk elk."""

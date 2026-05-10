@@ -574,6 +574,7 @@ def test_register_watchtower_signal_persists_state(tmp_path: Path) -> None:
         "timestamp": ts,
         "queen_accepted": True,
     })
+    queen.flush_watchtower_state()
 
     state = json.loads((tmp_path / "queen" / "watchtower_state.json").read_text())
     assert state["last_asset"] == "AAPL"

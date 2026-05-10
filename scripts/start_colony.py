@@ -305,6 +305,8 @@ def _start_supervised_ant(
         while True:
             ant_id = f"{id_prefix}-{uuid.uuid4().hex[:12]}"
             try:
+                if restart_count > 0:
+                    log.warning("%s herstart | restart=%d", label, restart_count)
                 ant = make_ant(ant_id)
                 if on_start is not None:
                     on_start(ant)
@@ -1236,7 +1238,6 @@ def main() -> None:
     # --- Stap 8e: OperatorAnt (eigen try-blok) ---
     try:
         from ant_colony.ants.operator_ant import OperatorAnt
-        from ant_colony.colony.scheduler.colony_scheduler import AgentRecord
         from ant_colony.schemas.mission import (
             AbortConditions,
             MarketScope,
@@ -1255,7 +1256,6 @@ def main() -> None:
             symbols=["BTC-EUR", "ETH-EUR", "SOL-EUR", "XRP-EUR", "ADA-EUR", "LINK-EUR", "DOT-EUR", "LTC-EUR"],
             timeframes=["1h"],
         )
-        operator_ant_id  = f"ant-operator-{_ts_op}"
         operator_mission = Mission(
             mission_id=f"operator-{_ts_op}",
             ant_type="operator_ant",
@@ -1283,27 +1283,23 @@ def main() -> None:
                 op_result.rejection_reason, op_result.rejection_detail,
             )
         else:
-            operator_ant = OperatorAnt(
-                ant_id=operator_ant_id,
+            _start_supervised_ant(
+                label="OperatorAnt",
+                ant_type="operator_ant",
+                id_prefix="operator",
                 mission=operator_mission,
                 scheduler=scheduler,
-                logs_root=logs_root,
                 node_id=args.node_id,
+                make_ant=lambda ant_id: OperatorAnt(
+                    ant_id=ant_id,
+                    mission=operator_mission,
+                    scheduler=scheduler,
+                    logs_root=logs_root,
+                    node_id=args.node_id,
+                ),
+                log=log,
             )
-            threading.Thread(
-                target=operator_ant.run,
-                name=f"operator-{operator_ant_id[:20]}",
-                daemon=True,
-            ).start()
-            scheduler.register_agent(AgentRecord(
-                ant_id=operator_ant_id,
-                mission_id=operator_mission.mission_id,
-                node_id=args.node_id,
-                ant_type="operator_ant",
-                ttl=operator_mission.ttl,
-                heartbeat_interval=operator_mission.heartbeat_interval,
-            ))
-            log.info("OperatorAnt gestart | ant_id=%s  ttl=%ds", operator_ant_id, operator_mission.ttl)
+            log.info("OperatorAnt supervisor gestart | ttl=%ds", operator_mission.ttl)
     except Exception:
         log.exception("OperatorAnt bootstrap mislukt — colony draait door zonder OperatorAnt.")
 

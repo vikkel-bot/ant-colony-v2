@@ -44,7 +44,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
-from threading import RLock
+from threading import Event, RLock, Thread
 
 from ant_colony.colony.node_registry import NodeRegistry
 from ant_colony.colony.scheduler.colony_scheduler import ColonyScheduler, KillLevel
@@ -178,6 +178,8 @@ class Queen:
         self._log_sequence: int = 0
         self._watchtower_lock = RLock()
         self._watchtower_state: dict = self._load_watchtower_state()
+        self._watchtower_persist_event = Event()
+        self._watchtower_persist_thread: Thread | None = None
 
     # ------------------------------------------------------------------
     # Kapitaal
@@ -721,7 +723,7 @@ class Queen:
                 "updated_at": now.isoformat(),
             })
             self._watchtower_state = state
-            self._persist_watchtower_state()
+        self._request_watchtower_persist()
 
     def get_watchtower_context(self) -> dict:
         """Geef de laatst bekende Watchtower-context terug."""
@@ -812,14 +814,44 @@ class Queen:
         path = self._watchtower_state_path()
         if path is None:
             return
+        with self._watchtower_lock:
+            snapshot = dict(self._watchtower_state or {})
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(
-                json.dumps(self._watchtower_state, ensure_ascii=False, indent=2, default=str),
+                json.dumps(snapshot, ensure_ascii=False, indent=2, default=str),
                 encoding="utf-8",
             )
         except OSError:
             logger.exception("Watchtower Queen-state kon niet geschreven worden: %s", path)
+
+    def _request_watchtower_persist(self) -> None:
+        if self._logs_root is None:
+            return
+        self._ensure_watchtower_persist_thread()
+        self._watchtower_persist_event.set()
+
+    def _ensure_watchtower_persist_thread(self) -> None:
+        thread = self._watchtower_persist_thread
+        if thread is not None and thread.is_alive():
+            return
+        thread = Thread(
+            target=self._watchtower_persist_loop,
+            name="queen-watchtower-state-writer",
+            daemon=True,
+        )
+        self._watchtower_persist_thread = thread
+        thread.start()
+
+    def _watchtower_persist_loop(self) -> None:
+        while True:
+            self._watchtower_persist_event.wait()
+            self._watchtower_persist_event.clear()
+            self._persist_watchtower_state()
+
+    def flush_watchtower_state(self) -> None:
+        """Forceer een synchrone state-write voor tests en shutdown hooks."""
+        self._persist_watchtower_state()
 
     # ------------------------------------------------------------------
     # Kill-switch

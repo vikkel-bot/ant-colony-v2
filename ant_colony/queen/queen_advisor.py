@@ -33,6 +33,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import threading
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -118,6 +120,13 @@ def _safe_float(value: object) -> float:
         return float(value)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
 
 
 def _parse_context_ts(value: object) -> datetime | None:
@@ -316,6 +325,11 @@ class QueenAdvisor:
         self._stats_window      = timedelta(days=stats_window_days)
         self._log               = logging.getLogger(f"{__name__}.advisor")
         self._stats_window_logged = False   # one-time startup log guard
+        self._cache_ttl = timedelta(seconds=max(1, _env_int("QUEEN_ADVISOR_CACHE_SECONDS", 60)))
+        self._io_cache_lock = threading.RLock()
+        self._io_cache: dict[str, tuple[datetime, tuple[int, int, int], object]] = {}
+        self._stagnant_cache_lock = threading.RLock()
+        self._stagnant_cache: tuple[datetime, tuple, list[dict]] | None = None
 
         # Weekend protocol state
         self._last_weekend_log: datetime | None = None
@@ -466,6 +480,41 @@ class QueenAdvisor:
     # Bronnen lezen
     # ------------------------------------------------------------------
 
+    def _paths_fingerprint(self, paths: list[Path]) -> tuple[int, int, int]:
+        """
+        Compacte fingerprint voor logbestanden.
+
+        De cache blijft maximaal 60s geldig, maar wordt direct ongeldig zodra
+        het aantal bestanden, de nieuwste mtime of de totale grootte wijzigt.
+        """
+        count = 0
+        newest_mtime_ns = 0
+        total_size = 0
+        for path in paths:
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            count += 1
+            newest_mtime_ns = max(newest_mtime_ns, stat.st_mtime_ns)
+            total_size += stat.st_size
+        return count, newest_mtime_ns, total_size
+
+    def _cached_log_read(self, key: str, paths: list[Path], loader):
+        fingerprint = self._paths_fingerprint(paths)
+        now = datetime.now(tz=timezone.utc)
+        with self._io_cache_lock:
+            cached = self._io_cache.get(key)
+            if cached is not None:
+                cached_at, cached_fingerprint, cached_value = cached
+                if cached_fingerprint == fingerprint and now - cached_at <= self._cache_ttl:
+                    return cached_value
+
+        value = loader(paths)
+        with self._io_cache_lock:
+            self._io_cache[key] = (now, fingerprint, value)
+        return value
+
     def _read_research_candidates(self) -> list[dict]:
         """Lees geaccepteerde kandidaten uit ANT_LOGS/research/*.jsonl."""
         if self._logs_root is None:
@@ -474,8 +523,16 @@ class QueenAdvisor:
         if not research_dir.exists():
             return []
 
+        paths = list(research_dir.glob("*.jsonl"))
+        return self._cached_log_read(
+            "research_candidates",
+            paths,
+            self._load_research_candidates,
+        )
+
+    def _load_research_candidates(self, paths: list[Path]) -> list[dict]:
         candidates: list[dict] = []
-        for path in research_dir.glob("*.jsonl"):
+        for path in paths:
             try:
                 for line in path.read_text(encoding="utf-8").splitlines():
                     if not line.strip():
@@ -519,11 +576,22 @@ class QueenAdvisor:
         if not paper_dir.exists():
             return {}
 
+        paths = list(paper_dir.glob("*_trades.jsonl"))
+        return self._cached_log_read(
+            "paper_stats",
+            paths,
+            self._load_paper_stats,
+        )
+
+    def _load_paper_stats(self, paths: list[Path]) -> dict[str, dict]:
+        """
+        Werkelijke paper-statistiek loader achter de I/O-cache.
+        """
         cutoff = datetime.now(tz=timezone.utc) - self._stats_window
         stats: dict[str, dict] = {}
         skipped_per_symbol: dict[str, int] = {}
 
-        for path in paper_dir.glob("*_trades.jsonl"):
+        for path in paths:
             try:
                 for line in path.read_text(encoding="utf-8").splitlines():
                     if not line.strip():
@@ -597,10 +665,18 @@ class QueenAdvisor:
         if not advice_dir.exists():
             return []
 
+        paths = list(advice_dir.glob("*.json"))
+        return self._cached_log_read(
+            "claude_advices",
+            paths,
+            self._load_claude_advices,
+        )
+
+    def _load_claude_advices(self, paths: list[Path]) -> list[dict]:
         now   = datetime.now(tz=timezone.utc)
         valid: list[dict] = []
 
-        for path in advice_dir.glob("*.json"):
+        for path in paths:
             try:
                 advice = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
@@ -779,7 +855,18 @@ class QueenAdvisor:
         news_dir = self._logs_root / "news"
         if not news_dir.exists():
             return None
-        snapshots = sorted(news_dir.glob("*.json"), key=lambda p: p.stat().st_mtime)
+        snapshots = list(news_dir.glob("*.json"))
+        return self._cached_log_read(
+            "latest_news_snapshot",
+            snapshots,
+            self._load_latest_news_snapshot,
+        )
+
+    def _load_latest_news_snapshot(self, snapshots: list[Path]) -> dict | None:
+        try:
+            snapshots = sorted(snapshots, key=lambda p: p.stat().st_mtime)
+        except OSError:
+            snapshots = []
         if not snapshots:
             return None
         try:
@@ -799,8 +886,16 @@ class QueenAdvisor:
         if not scouts_dir.exists():
             return []
 
+        paths = list(scouts_dir.glob("*.jsonl"))
+        return self._cached_log_read(
+            f"top_sector_signals:{n}",
+            paths,
+            lambda cached_paths: self._load_top_sector_signals(cached_paths, n=n),
+        )
+
+    def _load_top_sector_signals(self, paths: list[Path], n: int = 3) -> list[str]:
         signals: list[dict] = []
-        for path in scouts_dir.glob("*.jsonl"):
+        for path in paths:
             try:
                 for line in path.read_text(encoding="utf-8").splitlines():
                     if not line.strip():
@@ -832,6 +927,15 @@ class QueenAdvisor:
         """Lees het RS-regime uit ANT_LOGS/rs_regime/*.jsonl via RSRegimeAnt reader."""
         if self._logs_root is None:
             return None
+        rs_dir = self._logs_root / "rs_regime"
+        paths = list(rs_dir.glob("*.jsonl")) if rs_dir.exists() else []
+        return self._cached_log_read(
+            "rs_regime",
+            paths,
+            lambda _paths: self._load_rs_regime(),
+        )
+
+    def _load_rs_regime(self) -> str | None:
         try:
             from ant_colony.ants.equities.rs_regime_ant import read_latest_rs_regime
             payload = read_latest_rs_regime(self._logs_root)
@@ -969,11 +1073,52 @@ class QueenAdvisor:
         if not candidates:
             return
 
+        adjustments = self._get_stagnant_top3_adjustments(candidates, paper_stats)
+        for adjustment in adjustments:
+            for cid in adjustment.get("candidate_ids", []):
+                if cid and cid not in decision.deprioriteer_kandidaten:
+                    decision.deprioriteer_kandidaten.append(cid)
+            strategy_type = adjustment.get("strategy_type") or "unknown"
+            decision.adviezen_gevolgd.append(
+                f"stagnant:{strategy_type} al >=14d in top-3 zonder paper trade → prioriteit verlaagd"
+            )
+
+    def _get_stagnant_top3_adjustments(
+        self,
+        candidates: list[dict],
+        paper_stats: dict[str, dict],
+    ) -> list[dict]:
+        paper_totals = tuple(
+            sorted(
+                (str(symbol), int((stats or {}).get("total_trades", 0)))
+                for symbol, stats in paper_stats.items()
+            )
+        )
+        cache_key = (id(candidates), len(candidates), id(paper_stats), paper_totals)
+        now = datetime.now(tz=timezone.utc)
+        with self._stagnant_cache_lock:
+            cached = self._stagnant_cache
+            if cached is not None:
+                cached_at, cached_key, cached_value = cached
+                if cached_key == cache_key and now - cached_at <= self._cache_ttl:
+                    return list(cached_value)
+
+        adjustments = self._compute_stagnant_top3_adjustments(candidates, paper_stats)
+        with self._stagnant_cache_lock:
+            self._stagnant_cache = (now, cache_key, list(adjustments))
+        return adjustments
+
+    def _compute_stagnant_top3_adjustments(
+        self,
+        candidates: list[dict],
+        paper_stats: dict[str, dict],
+    ) -> list[dict]:
         top3 = select_diverse_top_n(candidates, n=3)
         if not top3:
-            return
+            return []
 
         now = datetime.now(tz=timezone.utc)
+        adjustments: list[dict] = []
         by_type: dict[str, list[dict]] = {}
         for candidate in candidates:
             strategy_type = _candidate_strategy_type_key(candidate)
@@ -1007,12 +1152,11 @@ class QueenAdvisor:
             if has_paper_trade:
                 continue
 
-            for cid in cids:
-                if cid and cid not in decision.deprioriteer_kandidaten:
-                    decision.deprioriteer_kandidaten.append(cid)
-            decision.adviezen_gevolgd.append(
-                f"stagnant:{strategy_type} al >=14d in top-3 zonder paper trade → prioriteit verlaagd"
-            )
+            adjustments.append({
+                "strategy_type": strategy_type,
+                "candidate_ids": list(dict.fromkeys(cids)),
+            })
+        return adjustments
 
     def _apply_claude_logic(
         self,
