@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -53,6 +54,30 @@ _BIOME_REFERENCE_MARKET: dict[str, str] = {
 
 logger = logging.getLogger(__name__)
 _RUNTIME_ENV_LOADED = False
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+_DASHBOARD_JSONL_TAIL_LINES = max(1, _env_int("DASHBOARD_JSONL_TAIL_LINES", 100))
+_DASHBOARD_LOG_CACHE_SECONDS = max(1.0, _env_float("DASHBOARD_LOG_CACHE_SECONDS", 30.0))
+_DASHBOARD_LOG_CACHE_LOCK = threading.RLock()
+_DASHBOARD_JSONL_CACHE: dict[tuple[str, int], tuple[float, tuple[int, int], list[dict]]] = {}
+_DASHBOARD_ANT_DIR_CACHE: dict[
+    tuple[str, str, int],
+    tuple[float, tuple[tuple[str, int, int], ...], list[dict], bool],
+] = {}
 
 
 def _ensure_runtime_env_loaded() -> None:
@@ -1969,22 +1994,12 @@ def _read_open_positions_from_logs(logs_root: Path) -> list[dict]:
     for path in paper_dir.glob("*.jsonl"):
         if "_trades" in path.name:
             continue
-        try:
-            for line in path.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    r = json.loads(line)
-                    biome = str((r.get("payload") or {}).get("biome") or "")
-                    if biome == "equities":
-                        equities_records.append(r)
-                    else:
-                        crypto_records.append(r)
-                except json.JSONDecodeError:
-                    pass
-        except OSError:
-            pass
+        for r in _read_jsonl_tail_cached(path):
+            biome = str((r.get("payload") or {}).get("biome") or "")
+            if biome == "equities":
+                equities_records.append(r)
+            else:
+                crypto_records.append(r)
 
     now = time.time()
 
@@ -2198,40 +2213,20 @@ def _last_event_timestamp_in_file(path: Path, event_type: str) -> datetime | Non
     if not path.exists():
         return None
     found: datetime | None = None
-    try:
-        with path.open("r", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if record.get("event_type") == event_type:
-                    found = _parse_ts(record.get("timestamp"))
-        return found
-    except OSError:
-        return None
+    for record in _read_jsonl_tail_cached(path):
+        if record.get("event_type") == event_type:
+            found = _parse_ts(record.get("timestamp"))
+    return found
 
 
 def _last_timestamp_in_file(path: Path) -> datetime | None:
     """Lees de laatste niet-lege regel van een JSONL bestand en parseer timestamp."""
     if not path.exists():
         return None
-    try:
-        with path.open("r", encoding="utf-8") as fh:
-            last_line = None
-            for line in fh:
-                line = line.strip()
-                if line:
-                    last_line = line
-        if last_line is None:
-            return None
-        record = json.loads(last_line)
-        return _parse_ts(record.get("timestamp"))
-    except (OSError, json.JSONDecodeError, KeyError):
+    records = _read_jsonl_tail_cached(path, limit=1)
+    if not records:
         return None
+    return _parse_ts(records[-1].get("timestamp"))
 
 
 def _read_all_trades(logs_root: Path) -> list[dict]:
@@ -2255,31 +2250,95 @@ def _read_all_trades(logs_root: Path) -> list[dict]:
     return trades
 
 
+def _path_fingerprint(path: Path) -> tuple[int, int]:
+    try:
+        stat = path.stat()
+        return stat.st_size, stat.st_mtime_ns
+    except OSError:
+        return 0, 0
+
+
+def _dir_fingerprint(paths: list[Path]) -> tuple[tuple[str, int, int], ...]:
+    result: list[tuple[str, int, int]] = []
+    for path in paths:
+        size, mtime_ns = _path_fingerprint(path)
+        result.append((path.name, size, mtime_ns))
+    return tuple(sorted(result))
+
+
+def _tail_text_lines(path: Path, limit: int = _DASHBOARD_JSONL_TAIL_LINES) -> list[str]:
+    """Lees maximaal de laatste `limit` regels zonder het hele bestand te laden."""
+    if limit <= 0:
+        return []
+    try:
+        with path.open("rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            end = fh.tell()
+            if end <= 0:
+                return []
+
+            blocks: list[bytes] = []
+            cursor = end
+            newline_count = 0
+            block_size = 8192
+            while cursor > 0 and newline_count <= limit:
+                read_size = min(block_size, cursor)
+                cursor -= read_size
+                fh.seek(cursor)
+                block = fh.read(read_size)
+                blocks.insert(0, block)
+                newline_count += block.count(b"\n")
+
+            data = b"".join(blocks)
+            raw_lines = data.splitlines()[-limit:]
+            return [line.decode("utf-8", errors="replace").strip() for line in raw_lines]
+    except OSError:
+        return []
+
+
+def _read_jsonl_tail_cached(path: Path, limit: int = _DASHBOARD_JSONL_TAIL_LINES) -> list[dict]:
+    """Parseer de laatste JSONL regels met 30s per-file cache."""
+    key = (str(path), limit)
+    fingerprint = _path_fingerprint(path)
+    now_monotonic = time.monotonic()
+    with _DASHBOARD_LOG_CACHE_LOCK:
+        cached = _DASHBOARD_JSONL_CACHE.get(key)
+        if cached is not None:
+            cached_at, cached_fingerprint, cached_records = cached
+            if (
+                cached_fingerprint == fingerprint
+                and now_monotonic - cached_at <= _DASHBOARD_LOG_CACHE_SECONDS
+            ):
+                return list(cached_records)
+
+    records: list[dict] = []
+    for line in _tail_text_lines(path, limit=limit):
+        if not line:
+            continue
+        try:
+            records.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+
+    with _DASHBOARD_LOG_CACHE_LOCK:
+        _DASHBOARD_JSONL_CACHE[key] = (now_monotonic, fingerprint, list(records))
+    return records
+
+
 def _read_recent_events(logs_root: Path, limit: int = 20) -> list[TickerEvent]:
     """
     Lees de meest recente audit events uit alle JSONL logs.
 
-    Scant recursief alle *.jsonl bestanden in logs_root, verzamelt alle
-    events, sorteert op timestamp en retourneert de laatste `limit` events.
+    Leest per bestand alleen de laatste DASHBOARD_JSONL_TAIL_LINES regels,
+    sorteert op timestamp en retourneert de laatste `limit` events.
     """
     records: list[tuple[datetime, dict]] = []
 
     for path in logs_root.rglob("*.jsonl"):
-        try:
-            with path.open("r", encoding="utf-8") as fh:
-                for line in fh:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        record = json.loads(line)
-                        ts = _parse_ts(record.get("timestamp"))
-                        if ts is not None:
-                            records.append((ts, record))
-                    except json.JSONDecodeError:
-                        pass
-        except OSError:
-            pass
+        for record in _read_jsonl_tail_cached(path):
+            ts = _parse_ts(record.get("timestamp"))
+            if ts is not None:
+                records.append((ts, record))
 
     records.sort(key=lambda x: x[0])
     recent = records[-limit:]
@@ -2366,7 +2425,7 @@ def _today_cutoff() -> datetime:
 
 def _read_ant_dir(logs_root: Path, subdir: str) -> tuple[list[dict], bool]:
     """
-    Lees alle niet-trades JSONL records uit een ant-subdir.
+    Lees de laatste JSONL records uit een ant-subdir.
 
     Returns:
         (records, dir_exists) — dir_exists=False als de map nog niet bestaat.
@@ -2375,22 +2434,31 @@ def _read_ant_dir(logs_root: Path, subdir: str) -> tuple[list[dict], bool]:
     ant_dir = logs_root / subdir
     if not ant_dir.exists():
         return [], False
+    paths = [p for p in ant_dir.glob("*.jsonl") if "_trades" not in p.name]
+    fingerprint = _dir_fingerprint(paths)
+    cache_key = (str(logs_root), subdir, _DASHBOARD_JSONL_TAIL_LINES)
+    now_monotonic = time.monotonic()
+    with _DASHBOARD_LOG_CACHE_LOCK:
+        cached = _DASHBOARD_ANT_DIR_CACHE.get(cache_key)
+        if cached is not None:
+            cached_at, cached_fingerprint, cached_records, dir_exists = cached
+            if (
+                cached_fingerprint == fingerprint
+                and now_monotonic - cached_at <= _DASHBOARD_LOG_CACHE_SECONDS
+            ):
+                return list(cached_records), dir_exists
+
     records: list[dict] = []
-    for path in ant_dir.glob("*.jsonl"):
-        if "_trades" in path.name:
-            continue
-        try:
-            with path.open("r", encoding="utf-8") as fh:
-                for line in fh:
-                    line = line.strip()
-                    if line:
-                        try:
-                            records.append(json.loads(line))
-                        except json.JSONDecodeError:
-                            pass
-        except OSError:
-            pass
+    for path in paths:
+        records.extend(_read_jsonl_tail_cached(path))
     records.sort(key=lambda r: r.get("timestamp", ""))
+    with _DASHBOARD_LOG_CACHE_LOCK:
+        _DASHBOARD_ANT_DIR_CACHE[cache_key] = (
+            now_monotonic,
+            fingerprint,
+            list(records),
+            True,
+        )
     return records, True
 
 
@@ -2672,17 +2740,7 @@ def _read_paper_capital_in_use(logs_root: Path) -> float:
     for path in paper_dir.glob("*.jsonl"):
         if "_trades" in path.name:
             continue
-        try:
-            with path.open("r", encoding="utf-8") as fh:
-                for line in fh:
-                    line = line.strip()
-                    if line:
-                        try:
-                            records.append(json.loads(line))
-                        except json.JSONDecodeError:
-                            pass
-        except OSError:
-            pass
+        records.extend(_read_jsonl_tail_cached(path))
 
     today = _today_cutoff()
     today_recs = [
@@ -2724,21 +2782,10 @@ def _read_queen_status_data(logs_root: Path) -> dict:
     candidates: list[dict] = []
     if research_dir.exists():
         for path in research_dir.glob("*.jsonl"):
-            try:
-                with path.open("r", encoding="utf-8") as fh:
-                    for line in fh:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            rec = json.loads(line)
-                            payload = rec.get("payload") or {}
-                            if payload.get("action") == "candidate_accepted":
-                                candidates.append(payload)
-                        except json.JSONDecodeError:
-                            pass
-            except OSError:
-                pass
+            for rec in _read_jsonl_tail_cached(path):
+                payload = rec.get("payload") or {}
+                if payload.get("action") == "candidate_accepted":
+                    candidates.append(payload)
 
     # Regime: meest voorkomend best_regime
     regime: str | None = None
@@ -2764,14 +2811,9 @@ def _read_queen_status_data(logs_root: Path) -> dict:
     decisions_path = logs_root / "queen" / "decisions.jsonl"
     if decisions_path.exists():
         try:
-            last_line: str | None = None
-            with decisions_path.open("r", encoding="utf-8") as fh:
-                for line in fh:
-                    line = line.strip()
-                    if line:
-                        last_line = line
-            if last_line:
-                rec = json.loads(last_line)
+            records = _read_jsonl_tail_cached(decisions_path, limit=1)
+            if records:
+                rec = records[-1]
                 verhogen   = rec.get("kapitaal_verhogen") or []
                 verlagen   = rec.get("kapitaal_verlagen") or []
                 prioriteit = rec.get("prioriteit_kandidaten") or []
@@ -2880,22 +2922,11 @@ def _read_queen_decisions(logs_root: Path, limit: int) -> QueenDecisionsResponse
 
     cutoff = datetime.now(tz=timezone.utc) - timedelta(days=7)
     raw: list[dict] = []
-    try:
-        with decisions_path.open("r", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                ts = _parse_ts(rec.get("timestamp"))
-                if ts is None or ts < cutoff:
-                    continue
-                raw.append(rec)
-    except OSError:
-        return QueenDecisionsResponse(decisions=[], count=0, has_more=False)
+    for rec in _read_jsonl_tail_cached(decisions_path):
+        ts = _parse_ts(rec.get("timestamp"))
+        if ts is None or ts < cutoff:
+            continue
+        raw.append(rec)
 
     # Sorteer descending op timestamp
     raw.sort(key=lambda r: r.get("timestamp") or "", reverse=True)
@@ -2936,17 +2967,7 @@ def _read_ant_dir_recent(logs_root: Path, subdir: str, n_files: int = 2) -> list
     )[:n_files]
     records: list[dict] = []
     for path in files:
-        try:
-            with path.open("r", encoding="utf-8") as fh:
-                for line in fh:
-                    line = line.strip()
-                    if line:
-                        try:
-                            records.append(json.loads(line))
-                        except json.JSONDecodeError:
-                            pass
-        except OSError:
-            pass
+        records.extend(_read_jsonl_tail_cached(path))
     return records
 
 
@@ -3029,21 +3050,10 @@ def _scan_jsonl_dir(log_dir: Path, action: str) -> list[dict]:
         return results
     try:
         for path in sorted(log_dir.glob("*.jsonl")):
-            try:
-                with path.open("r", encoding="utf-8") as fh:
-                    for line in fh:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            rec = json.loads(line)
-                            payload = rec.get("payload") or {}
-                            if payload.get("action") == action:
-                                results.append(payload)
-                        except json.JSONDecodeError:
-                            pass
-            except OSError:
-                pass
+            for rec in _read_jsonl_tail_cached(path):
+                payload = rec.get("payload") or {}
+                if payload.get("action") == action:
+                    results.append(payload)
     except Exception:
         pass
     return results
@@ -3225,36 +3235,26 @@ def _read_equities_paper_stats(logs_root: Path) -> dict:
         for path in paper_dir.glob("*.jsonl"):
             if "_trades" in path.name:
                 continue
-            try:
-                for line in path.read_text(encoding="utf-8").splitlines():
-                    line = line.strip()
-                    if not line:
-                        continue
+            for rec in _read_jsonl_tail_cached(path):
+                p = rec.get("payload") or {}
+                if str(p.get("biome") or "") != "equities":
+                    continue
+                action = p.get("action")
+                pos_id = str(p.get("position_id") or "")
+                if not pos_id:
+                    continue
+                if action == "trade_opened":
+                    opened_ids.add(pos_id)
+                elif action == "trade_closed":
+                    closed_ids.add(pos_id)
                     try:
-                        rec = json.loads(line)
-                        p   = rec.get("payload") or {}
-                        if str(p.get("biome") or "") != "equities":
-                            continue
-                        action = p.get("action")
-                        pos_id = str(p.get("position_id") or "")
-                        if not pos_id:
-                            continue
-                        if action == "trade_opened":
-                            opened_ids.add(pos_id)
-                        elif action == "trade_closed":
-                            closed_ids.add(pos_id)
-                            try:
-                                pnl = float(p.get("realized_pnl") or 0)
-                                total_pnl    += pnl
-                                closed_count += 1
-                                if pnl > 0:
-                                    win_count += 1
-                            except (TypeError, ValueError):
-                                pass
-                    except json.JSONDecodeError:
+                        pnl = float(p.get("realized_pnl") or 0)
+                        total_pnl    += pnl
+                        closed_count += 1
+                        if pnl > 0:
+                            win_count += 1
+                    except (TypeError, ValueError):
                         pass
-            except OSError:
-                pass
     except Exception:
         pass
 
@@ -3395,22 +3395,11 @@ def _read_equities_position_records(logs_root: Path | None) -> list[tuple[dateti
     for path in sorted(paper_dir.glob("*.jsonl")):
         if "_trades" in path.name:
             continue
-        try:
-            with path.open("r", encoding="utf-8") as fh:
-                for line in fh:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        rec = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    payload = rec.get("payload") or {}
-                    if str(payload.get("biome") or "") != "equities":
-                        continue
-                    records.append((_parse_ts(rec.get("timestamp")), rec))
-        except OSError:
-            continue
+        for rec in _read_jsonl_tail_cached(path):
+            payload = rec.get("payload") or {}
+            if str(payload.get("biome") or "") != "equities":
+                continue
+            records.append((_parse_ts(rec.get("timestamp")), rec))
     records.sort(key=lambda item: item[0] or datetime.min.replace(tzinfo=timezone.utc))
     return records
 
@@ -3687,15 +3676,10 @@ def _read_latest_briefing(logs_root: Path) -> dict:
     if not briefing_file.exists():
         return {"available": False}
     try:
-        last_line: str | None = None
-        with briefing_file.open("r", encoding="utf-8") as fh:
-            for line in fh:
-                stripped = line.strip()
-                if stripped:
-                    last_line = stripped
-        if last_line is None:
+        records = _read_jsonl_tail_cached(briefing_file, limit=1)
+        if not records:
             return {"available": False}
-        data = json.loads(last_line)
+        data = records[-1]
         ts   = _parse_ts(data.get("timestamp"))
         if ts is None:
             return {"available": False}
@@ -3733,27 +3717,15 @@ def _read_watchtower_stats(logs_root: Path) -> dict:
     signals_hour = 0
     passed_hour  = 0
 
-    try:
-        with signal_path.open("r", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                    ts_str = rec.get("timestamp", "")
-                    ts = datetime.fromisoformat(ts_str)
-                    if ts.tzinfo is None:
-                        ts = ts.replace(tzinfo=timezone.utc)
-                    if last_ts is None or ts > last_ts:
-                        last_ts = ts
-                    if ts >= cutoff:
-                        signals_hour += int(rec.get("received", 0))
-                        passed_hour  += int(rec.get("passed_filter", 0))
-                except (json.JSONDecodeError, ValueError):
-                    continue
-    except OSError:
-        pass
+    for rec in _read_jsonl_tail_cached(signal_path):
+        ts = _parse_ts(rec.get("timestamp"))
+        if ts is None:
+            continue
+        if last_ts is None or ts > last_ts:
+            last_ts = ts
+        if ts >= cutoff:
+            signals_hour += int(rec.get("received", 0))
+            passed_hour  += int(rec.get("passed_filter", 0))
 
     return {
         "last_signal_ts":          last_ts.isoformat() if last_ts else None,
@@ -3879,28 +3851,17 @@ def _read_watchtower_candidate_rows(
         return [], 0
 
     rows: list[dict[str, Any]] = []
-    try:
-        with candidate_path.open("r", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                rec_ts = _parse_ts(rec.get("timestamp"))
-                payload = rec.get("payload") if isinstance(rec, dict) else None
-                if not isinstance(payload, dict):
-                    payload = rec if isinstance(rec, dict) else {}
-                row = _watchtower_signal_row(payload, fallback_ts=rec_ts, accepted=True)
-                if row is None:
-                    continue
-                ts = _parse_ts(row["timestamp"])
-                if ts is not None and ts >= cutoff:
-                    rows.append(row)
-    except OSError:
-        return [], 0
+    for rec in _read_jsonl_tail_cached(candidate_path):
+        rec_ts = _parse_ts(rec.get("timestamp"))
+        payload = rec.get("payload") if isinstance(rec, dict) else None
+        if not isinstance(payload, dict):
+            payload = rec if isinstance(rec, dict) else {}
+        row = _watchtower_signal_row(payload, fallback_ts=rec_ts, accepted=True)
+        if row is None:
+            continue
+        ts = _parse_ts(row["timestamp"])
+        if ts is not None and ts >= cutoff:
+            rows.append(row)
 
     return rows, len(rows)
 
@@ -3930,73 +3891,61 @@ def _read_watchtower_received_signals(logs_root: Path, limit: int = 50) -> dict[
         _apply_queen_watchtower_state(summary, queen_wt_state)
         return {"signals": rows[: max(1, min(limit, 200))], "summary": summary}
 
-    try:
-        with signal_path.open("r", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
+    for rec in _read_jsonl_tail_cached(signal_path):
+        rec_ts = _parse_ts(rec.get("timestamp"))
+        signals = [s for s in (rec.get("signals") or []) if isinstance(s, dict)]
+        candidate_rejections = [
+            s for s in (rec.get("candidate_rejections") or []) if isinstance(s, dict)
+        ]
+        legacy_rejections = _iter_watchtower_rejections(rec)
+        has_candidate_flow = (
+            "candidate_rejections" in rec or "candidates_accepted" in rec
+        )
+        rejections = candidate_rejections if has_candidate_flow else legacy_rejections
+
+        if rec_ts is not None and rec_ts >= cutoff:
+            received = _float_or_none(rec.get("received"))
+            if received is None:
+                received = float(len(signals) + len(rejections))
+            summary["received_24h"] += int(received)
+
+            if has_candidate_flow:
+                if candidate_accepts == 0:
+                    summary["accepted_24h"] += int(rec.get("candidates_accepted") or 0)
+                rejected_count = len(candidate_rejections)
+                if rejected_count == 0:
+                    rejected_count = max(
+                        0,
+                        int(received) - int(rec.get("candidates_accepted") or 0),
+                    )
+            else:
+                accepted = _float_or_none(rec.get("passed_filter"))
+                if accepted is None:
+                    accepted = float(len(signals))
+                summary["accepted_24h"] += int(accepted)
+                rejected_count = max(0, int(received) - int(accepted))
+            summary["rejected_24h"] += rejected_count
+            if not rejections and rejected_count > 0:
+                summary["rejection_reasons"]["other"] += rejected_count
+
+        if not has_candidate_flow:
+            for sig in signals:
+                row = _watchtower_signal_row(sig, fallback_ts=rec_ts, accepted=True)
+                if row is None:
                     continue
-                try:
-                    rec = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                rec_ts = _parse_ts(rec.get("timestamp"))
-                signals = [s for s in (rec.get("signals") or []) if isinstance(s, dict)]
-                candidate_rejections = [
-                    s for s in (rec.get("candidate_rejections") or []) if isinstance(s, dict)
-                ]
-                legacy_rejections = _iter_watchtower_rejections(rec)
-                has_candidate_flow = (
-                    "candidate_rejections" in rec or "candidates_accepted" in rec
-                )
-                rejections = candidate_rejections if has_candidate_flow else legacy_rejections
+                ts = _parse_ts(row["timestamp"])
+                if ts is not None and ts >= cutoff:
+                    rows.append(row)
 
-                if rec_ts is not None and rec_ts >= cutoff:
-                    received = _float_or_none(rec.get("received"))
-                    if received is None:
-                        received = float(len(signals) + len(rejections))
-                    summary["received_24h"] += int(received)
-
-                    if has_candidate_flow:
-                        if candidate_accepts == 0:
-                            summary["accepted_24h"] += int(rec.get("candidates_accepted") or 0)
-                        rejected_count = len(candidate_rejections)
-                        if rejected_count == 0:
-                            rejected_count = max(
-                                0,
-                                int(received) - int(rec.get("candidates_accepted") or 0),
-                            )
-                    else:
-                        accepted = _float_or_none(rec.get("passed_filter"))
-                        if accepted is None:
-                            accepted = float(len(signals))
-                        summary["accepted_24h"] += int(accepted)
-                        rejected_count = max(0, int(received) - int(accepted))
-                    summary["rejected_24h"] += rejected_count
-                    if not rejections and rejected_count > 0:
-                        summary["rejection_reasons"]["other"] += rejected_count
-
-                if not has_candidate_flow:
-                    for sig in signals:
-                        row = _watchtower_signal_row(sig, fallback_ts=rec_ts, accepted=True)
-                        if row is None:
-                            continue
-                        ts = _parse_ts(row["timestamp"])
-                        if ts is not None and ts >= cutoff:
-                            rows.append(row)
-
-                for rej in rejections:
-                    row = _watchtower_signal_row(rej, fallback_ts=rec_ts, accepted=False)
-                    if row is None:
-                        continue
-                    ts = _parse_ts(row["timestamp"])
-                    if ts is not None and ts >= cutoff:
-                        rows.append(row)
-                        cls = _classify_watchtower_rejection(row.get("rejection_reason"))
-                        summary["rejection_reasons"][cls] = summary["rejection_reasons"].get(cls, 0) + 1
-    except OSError:
-        _apply_queen_watchtower_state(summary, queen_wt_state)
-        return {"signals": [], "summary": summary}
+        for rej in rejections:
+            row = _watchtower_signal_row(rej, fallback_ts=rec_ts, accepted=False)
+            if row is None:
+                continue
+            ts = _parse_ts(row["timestamp"])
+            if ts is not None and ts >= cutoff:
+                rows.append(row)
+                cls = _classify_watchtower_rejection(row.get("rejection_reason"))
+                summary["rejection_reasons"][cls] = summary["rejection_reasons"].get(cls, 0) + 1
 
     rows.sort(
         key=lambda r: _parse_ts(r.get("timestamp")) or datetime.min.replace(tzinfo=timezone.utc),

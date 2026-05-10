@@ -1037,6 +1037,20 @@ class TestAntEventsEndpoint:
         assert "ETH-EUR" in ev["summary"]
         assert ev["action"] == "trade_opened"
 
+    def test_events_tail_limited_to_last_100_lines(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "research" / "ant-1.jsonl"
+            now = datetime.now(tz=timezone.utc) - timedelta(minutes=5)
+            for i in range(150):
+                ts = (now + timedelta(seconds=i)).isoformat()
+                self._write_event(p, "candidate_accepted", {"symbol": f"S{i}"}, ts=ts)
+            ctx = ColonyContext(logs_root=Path(tmp))
+            r = _client(ctx).get("/api/ants/research/events?limit=100")
+        events = r.json()["events"]
+        assert len(events) == 100
+        assert events[0]["payload"]["symbol"] == "S149"
+        assert events[-1]["payload"]["symbol"] == "S50"
+
 
 # ---------------------------------------------------------------------------
 # TestTickerEndpoint
@@ -1098,6 +1112,24 @@ class TestTickerEndpoint:
             events = r.json()["events"]
             assert len(events) == 1
             assert events[0]["event_type"] == "ok"
+
+    def test_ticker_reads_only_tail_per_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            logs = Path(tmp)
+            now = datetime.now(tz=timezone.utc)
+            events = [
+                {"event_type": f"ev_{i}", "source": "test",
+                 "timestamp": (now + timedelta(seconds=i)).isoformat(),
+                 "mission_id": None, "payload": {}}
+                for i in range(150)
+            ]
+            _write_jsonl(logs / "colony" / "test.jsonl", events)
+            ctx = ColonyContext(logs_root=logs)
+            r = _client(ctx).get("/api/ticker")
+            result = r.json()["events"]
+            assert len(result) == 20
+            assert result[0]["event_type"] == "ev_130"
+            assert result[-1]["event_type"] == "ev_149"
 
 
 # ---------------------------------------------------------------------------
