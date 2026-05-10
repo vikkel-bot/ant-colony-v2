@@ -74,6 +74,7 @@ _PAPER_CANDIDATE_WATCHDOG_SECONDS = 15 * 60
 _PAPER_TICK_WATCHDOG_SECONDS = float(os.getenv("PAPER_ANT_WATCHDOG_SECONDS", "600"))
 _MIN_ENTRY_SHARPE = 0.15
 _MIN_ENTRY_WIN_RATE = 0.45
+_BIOME_MISMATCH_LOG_INTERVAL_SECONDS = 60.0
 
 # --- Regime-gebaseerde entry filtering ---
 _SIDEWAYS_ALLOWED_STRATEGY_TYPES = frozenset(["mean_reversion", "rsi_based"])
@@ -138,6 +139,7 @@ class PaperAnt:
         self._last_tick_completed_monotonic = monotonic()
         self._last_tick_started_monotonic: float | None = None
         self._tick_watchdog_restarts = 0
+        self._biome_mismatch_log_times: dict[str, float] = {}
 
         # Scout-posities: per symbool (1 per symbool tegelijk).
         self._open_symbols: set[str] = self._load_open_symbols_from_logs()
@@ -1359,12 +1361,7 @@ class PaperAnt:
                     signal_biome = payload.get("biome")
                     if signal_biome and signal_biome != self.mission.market_scope.biome:
                         self._processed_signals.add(signal_id)
-                        self._log.info(
-                            "Scout-signaal gefilterd | symbol=%s biome=%s reden=biome_mismatch expected=%s",
-                            symbol or "?",
-                            signal_biome,
-                            self.mission.market_scope.biome,
-                        )
+                        self._log_biome_mismatch(symbol or "?", str(signal_biome))
                         continue
 
                     allowed_symbols = set(self.mission.market_scope.symbols or [])
@@ -1392,6 +1389,21 @@ class PaperAnt:
                 self._log.warning("Kan scout-log niet lezen: %s", jsonl_path)
 
         return new_signals
+
+    def _log_biome_mismatch(self, symbol: str, signal_biome: str) -> None:
+        """Rate-limit cross-biome filter logs tot maximaal 1 regel per symbool/minuut."""
+        key = symbol.upper() or "UNKNOWN"
+        now = monotonic()
+        last = self._biome_mismatch_log_times.get(key, 0.0)
+        if now - last < _BIOME_MISMATCH_LOG_INTERVAL_SECONDS:
+            return
+        self._biome_mismatch_log_times[key] = now
+        self._log.info(
+            "Scout-signaal gefilterd | symbol=%s biome=%s reden=biome_mismatch expected=%s",
+            key,
+            signal_biome,
+            self.mission.market_scope.biome,
+        )
 
     # ------------------------------------------------------------------
     # Live prijs ophalen

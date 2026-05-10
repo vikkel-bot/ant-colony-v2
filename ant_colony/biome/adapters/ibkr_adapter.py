@@ -182,6 +182,7 @@ class IBKRAdapter:
         self._reconnect_lock = threading.Lock()
         self._reconnect_thread: threading.Thread | None = None
         self._last_connect_error: BaseException | None = None
+        self._ibkr_available: bool | None = None
         self._log        = logging.getLogger(
             f"adapter.ibkr.{'paper' if paper else 'live'}"
         )
@@ -382,6 +383,7 @@ class IBKRAdapter:
                     try:
                         if self._ib.isConnected():
                             self._last_connect_error = None
+                            self._ibkr_available = True
                             return True
                     except Exception:
                         pass
@@ -396,6 +398,7 @@ class IBKRAdapter:
                     ib.connect(host_, port_, clientId=client_id_, timeout=10, readonly=False)
                 except Exception as exc:
                     self._last_connect_error = exc
+                    self._ibkr_available = False
                     if not _is_connection_refused(exc):
                         raise
                     self._log.warning(
@@ -410,6 +413,7 @@ class IBKRAdapter:
                     return False
                 self._ib = ib
                 self._last_connect_error = None
+                self._ibkr_available = True
                 self._log.info(
                     "IBKR verbonden | %s:%d clientId=%d paper=%s",
                     host_, port_, client_id_, self._paper_mode,
@@ -418,6 +422,7 @@ class IBKRAdapter:
 
         except Exception as exc:
             self._last_connect_error = exc
+            self._ibkr_available = False
             self._log.exception(
                 "IBKR verbinding mislukt | %s:%d", host or self._host, port or self._port
             )
@@ -434,6 +439,7 @@ class IBKRAdapter:
                 pass
             finally:
                 self._ib = None
+                self._ibkr_available = False
 
     # ------------------------------------------------------------------
     # OHLCV candles
@@ -465,6 +471,14 @@ class IBKRAdapter:
 
             bars = []
             fallback_reason: str | None = None
+            if self._ibkr_available is False:
+                self._start_reconnect_loop()
+                return self._get_yfinance_fallback_candles(
+                    symbol,
+                    period=period,
+                    interval=interval,
+                    reason="omdat IBKR bij startup/offline-check niet beschikbaar is",
+                )
             lock_acquired = self._ib_lock.acquire(timeout=_CANDLE_LOCK_WAIT_SECONDS)
             if not lock_acquired:
                 fallback_reason = "omdat IBKR candle lock bezet is"
@@ -503,6 +517,7 @@ class IBKRAdapter:
                     except Exception as exc:
                         if _is_connection_lost_error(exc):
                             self._ib = None
+                            self._ibkr_available = False
                             self._start_reconnect_loop()
                             fallback_reason = "omdat IBKR verbinding verbroken is"
                         elif not _is_historical_data_fallback_error(exc):
@@ -726,11 +741,17 @@ class IBKRAdapter:
         if self._ib is not None:
             try:
                 if self._ib.isConnected():
+                    self._ibkr_available = True
                     return True
             except Exception:
                 pass
             self._ib = None  # sessie verloren, opnieuw verbinden
+            self._ibkr_available = False
+            self._last_connect_error = ConnectionError("IBKR sessie niet verbonden")
+            return False
 
+        if self._ibkr_available is False:
+            return False
         return self.connect()
 
     def _start_reconnect_loop(self) -> None:

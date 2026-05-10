@@ -94,6 +94,7 @@ _MOMENTUM_EXIT_CONSECUTIVE_TICKS = _env_int(
 _MOMENTUM_EXIT_MIN_HOLD_SECONDS = 4 * 3600
 _MOMENTUM_EXIT_COOLDOWN_SECONDS = 24 * 3600
 _MOMENTUM_EXIT_TYPE       = "EXIT_MOMENTUM_LOST"
+_BIOME_MISMATCH_LOG_INTERVAL_SECONDS = 60.0
 
 _CONFIDENCE_THRESHOLD    = 0.6
 _WATCHTOWER_POSITION_SCALE = min(
@@ -159,6 +160,7 @@ class EquitiesPaperAnt:
         self._momentum_miss_counts: dict[str, int] = {}
         self._momentum_exit_pending: set[str] = set()
         self._momentum_cooldowns: dict[str, datetime] = {}
+        self._biome_mismatch_log_times: dict[str, float] = {}
 
         # Ledger-herstel bij herstart
         self._restore_from_logs()
@@ -925,6 +927,13 @@ class EquitiesPaperAnt:
         return "UNKNOWN"
 
     def _log_equity_evaluation(self, symbol: str, decision: str, reason: str) -> None:
+        if reason.startswith("biome_mismatch"):
+            key = (symbol or "UNKNOWN").upper()
+            now = time.monotonic()
+            last = self._biome_mismatch_log_times.get(key, 0.0)
+            if now - last < _BIOME_MISMATCH_LOG_INTERVAL_SECONDS:
+                return
+            self._biome_mismatch_log_times[key] = now
         self._log.info(
             "EqPaper evaluatie | symbol=%s regime=%s kapitaal=%.2f open_posities=%d max_posities=%d beslissing=%s reden=%s",
             symbol or "UNKNOWN",

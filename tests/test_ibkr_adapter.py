@@ -218,6 +218,7 @@ class TestConnect:
             result  = adapter.connect()
         assert result is True
         assert adapter._ib is ib
+        assert adapter._ibkr_available is True
 
     def test_connect_failure_returns_false(self, caplog) -> None:
         ib = MagicMock()
@@ -227,6 +228,7 @@ class TestConnect:
             result  = adapter.connect()
         assert result is False
         assert adapter._ib is None
+        assert adapter._ibkr_available is False
         assert "IBKR niet bereikbaar" in caplog.text
 
     def test_connect_uses_paper_port(self) -> None:
@@ -434,6 +436,38 @@ class TestGetCandles:
         assert result == fallback
         reconnect.assert_called_once()
         yf_get.assert_called_once_with("AAPL", period="3mo", interval="1d")
+
+    def test_known_offline_skips_historical_request_and_uses_yfinance(self) -> None:
+        ib = MagicMock()
+        ib.connect.side_effect = ConnectionRefusedError("IB Gateway niet actief")
+        fallback = [
+            MarketData(
+                symbol="XLK",
+                timeframe="1d",
+                timestamp=datetime.now(tz=timezone.utc),
+                open=100.0,
+                high=102.0,
+                low=99.0,
+                close=101.0,
+                volume=1_000_000,
+                biome_id="equities",
+            )
+        ]
+        with patched_ib(ib):
+            adapter = IBKRAdapter()
+            assert adapter.connect() is False
+            with patch.object(adapter, "_start_reconnect_loop") as reconnect:
+                with patch(
+                    "ant_colony.biome.adapters.yahoo_finance_adapter.YahooFinanceAdapter.get_candles",
+                    return_value=fallback,
+                ) as yf_get:
+                    result = adapter.get_candles("XLK", period="3mo", interval="1d")
+
+        assert result == fallback
+        assert ib.connect.call_count == 1
+        ib.reqHistoricalData.assert_not_called()
+        reconnect.assert_called_once()
+        yf_get.assert_called_once_with("XLK", period="3mo", interval="1d")
 
     def test_historical_connection_refused_starts_reconnect_loop(self) -> None:
         ib = MagicMock()

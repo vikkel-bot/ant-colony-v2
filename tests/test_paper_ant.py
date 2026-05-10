@@ -1584,6 +1584,33 @@ class TestScoutSignalBiomeFilter:
         assert sid in ant._processed_signals
         assert any("biome_mismatch" in record.message for record in caplog.records)
 
+    def test_biome_mismatch_log_wordt_per_symbol_gethrottled(self, tmp_path: Path, caplog) -> None:
+        scout_dir = tmp_path / "scouts"
+        write_scout_signal(
+            scout_dir,
+            signal_id="natgas-1",
+            symbol="NATGAS",
+            biome="commodities",
+            filename="commodity_scout.jsonl",
+        )
+        write_scout_signal(
+            scout_dir,
+            signal_id="natgas-2",
+            symbol="NATGAS",
+            biome="commodities",
+            filename="commodity_scout.jsonl",
+        )
+
+        ant = make_ant(logs_root=tmp_path)
+        with caplog.at_level(logging.INFO, logger=f"ant.paper.{ant.ant_id[:8]}"):
+            signals = ant._read_new_scout_signals()
+
+        assert signals == []
+        mismatch_logs = [
+            record for record in caplog.records if "biome_mismatch" in record.message
+        ]
+        assert len(mismatch_logs) == 1
+
     def test_symbol_buiten_mission_scope_wordt_gefilterd(self, tmp_path: Path, caplog) -> None:
         """Fail-closed: onbekende symbolen zonder biome worden niet stil verhandeld."""
         scout_dir = tmp_path / "scouts"
