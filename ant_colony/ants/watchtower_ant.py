@@ -40,6 +40,8 @@ from ant_colony.schemas.mission import Mission
 _POLL_INTERVAL  = int(os.getenv("WATCHTOWER_POLL_INTERVAL", "300"))
 _MIN_ENTRY_SCORE = float(os.getenv("WATCHTOWER_MIN_ENTRY_SCORE", "0.6"))
 _MIN_CONFIDENCE  = float(os.getenv("WATCHTOWER_MIN_CONFIDENCE", "0.5"))
+_MIN_ENTRY_SCORE_COMMODITY = float(os.getenv("WATCHTOWER_MIN_ENTRY_SCORE_COMMODITY", "0.35"))
+_MIN_CONFIDENCE_COMMODITY  = float(os.getenv("WATCHTOWER_MIN_CONFIDENCE_COMMODITY", "0.30"))
 
 _MAX_SIGNAL_AGE_SECONDS = 2 * 3600
 _MAX_DAILY_WATCHTOWER_ENTRIES = 3
@@ -275,11 +277,13 @@ class WatchtowerAnt:
             return None, "asset_blocked"
 
         entry_score = _safe_float(signal.get("entry_score"))
-        if entry_score < _MIN_ENTRY_SCORE:
+        min_score = _MIN_ENTRY_SCORE_COMMODITY if biome == "commodity" else _MIN_ENTRY_SCORE
+        if entry_score < min_score:
             return None, "score_too_low"
 
         confidence = _safe_float(signal.get("confidence"))
-        if confidence < _MIN_CONFIDENCE:
+        min_conf = _MIN_CONFIDENCE_COMMODITY if biome == "commodity" else _MIN_CONFIDENCE
+        if confidence < min_conf:
             return None, "score_too_low"
 
         signal_id = str(signal.get("signal_id") or signal.get("id") or "").strip()
