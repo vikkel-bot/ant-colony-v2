@@ -20,6 +20,8 @@ import pytest
 from ant_colony.ants.paper_ant import (
     BROKER_FEE_PCT,
     PaperAnt,
+    _COMMODITY_CAPITAL_FRACTION,
+    _COMMODITY_YFINANCE_TICKERS,
     _MAX_OPEN_SHORT_POSITIONS,
     _MAX_OPEN_POSITIONS,
     _PAPER_CANDIDATE_WATCHDOG_SECONDS,
@@ -1694,3 +1696,226 @@ class TestScoutSignalBiomeFilter:
 
         # Na eerste read: signal_id staat in _processed_signals
         assert sid in ant._processed_signals
+
+
+# ---------------------------------------------------------------------------
+# Commodity paper trading
+# ---------------------------------------------------------------------------
+
+def _write_commodity_research_candidate(
+    logs_root: Path,
+    *,
+    symbol: str = "NATGAS",
+    candidate_id: str | None = None,
+    sharpe: float = 0.35,
+    win_rate: float = 0.52,
+    tp_pct: float = 0.04,
+    sl_pct: float = 0.02,
+    biome: str = "commodity",
+    strategy_type: str = "watchtower_signal",
+) -> str:
+    candidate_id = candidate_id or str(uuid.uuid4())
+    research_dir = logs_root / "research"
+    research_dir.mkdir(parents=True, exist_ok=True)
+    record = {
+        "event_type": "action_executed",
+        "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+        "source": "ant-research-commodity",
+        "payload": {
+            "action": "candidate_accepted",
+            "candidate_id": candidate_id,
+            "symbol": symbol,
+            "biome": biome,
+            "strategy_type": strategy_type,
+            "direction": "long",
+            "sharpe": sharpe,
+            "win_rate": win_rate,
+            "tp_pct": tp_pct,
+            "sl_pct": sl_pct,
+        },
+    }
+    (research_dir / "commodity_research.jsonl").write_text(
+        json.dumps(record) + "\n", encoding="utf-8"
+    )
+    return candidate_id
+
+
+def _make_commodity_paper_ant(
+    tmp_path: Path,
+    *,
+    capital: float = 10_000.0,
+    natgas_price: float = 3.50,
+) -> PaperAnt:
+    """PaperAnt geconfigureerd voor commodity biome met yfinance-mock voor NATGAS prijs."""
+    mission = Mission(
+        mission_id=str(uuid.uuid4()),
+        ant_type="paper_ant",
+        allowed_node="pc2",
+        allowed_actions=["open_position", "close_position"],
+        market_scope=MarketScope(biome="commodity", symbols=["NATGAS", "COPPER", "SILVER"]),
+        capital_limit=capital,
+        risk_limits=RiskLimits(
+            max_drawdown_pct=0.10,
+            max_position_size=5_000.0,
+            daily_loss_limit=500.0,
+            stop_loss_required=True,
+        ),
+        ttl=300,
+        heartbeat_interval=10,
+        success_conditions=SuccessConditions(description="commodity paper test"),
+    )
+    scheduler = MagicMock()
+    biome_registry = MagicMock()
+    biome_registry.get.return_value = None  # geen commodity adapter
+    ant = PaperAnt(
+        ant_id=str(uuid.uuid4()),
+        mission=mission,
+        scheduler=scheduler,
+        biome_registry=biome_registry,
+        logs_root=tmp_path,
+    )
+    return ant
+
+
+class TestCommodityPaperTrading:
+
+    def test_commodity_ticker_map_constants(self) -> None:
+        assert _COMMODITY_YFINANCE_TICKERS["NATGAS"] == "NG=F"
+        assert _COMMODITY_YFINANCE_TICKERS["COPPER"] == "HG=F"
+        assert _COMMODITY_YFINANCE_TICKERS["SILVER"] == "SI=F"
+        assert _COMMODITY_CAPITAL_FRACTION == 0.05
+
+    def test_commodity_biome_exempt_from_kill_zone(self, tmp_path: Path) -> None:
+        """Commodity biome is vrijgesteld van de ICT Kill Zone filter."""
+        ant = _make_commodity_paper_ant(tmp_path)
+        # Simuleer actief time-filter signaal dat normaal zou blokkeren
+        time_dir = tmp_path / "queen"
+        time_dir.mkdir(parents=True, exist_ok=True)
+        signal = {
+            "trade_allowed": False,
+            "session": "NY_PM",
+            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+        }
+        (tmp_path / "time_filter.jsonl").write_text(json.dumps(signal) + "\n", encoding="utf-8")
+        # commodity biome → altijd toegestaan ongeacht kill zone
+        assert ant._is_trading_allowed() is True
+
+    def test_commodity_candidate_opens_paper_trade(self, tmp_path: Path) -> None:
+        """Commodity research kandidaat resulteert in een open positie."""
+        import sys
+
+        natgas_price = 3.50
+        import pandas as pd
+        from datetime import timedelta as td
+        base = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        df = pd.DataFrame(
+            {"Close": [natgas_price]},
+            index=[base],
+        )
+        mock_ticker = MagicMock()
+        mock_ticker.history.return_value = df
+        mock_yf = MagicMock()
+        mock_yf.Ticker.return_value = mock_ticker
+
+        ant = _make_commodity_paper_ant(tmp_path, natgas_price=natgas_price)
+        _write_commodity_research_candidate(tmp_path, symbol="NATGAS")
+
+        with patch.dict(sys.modules, {"yfinance": mock_yf}):
+            ant._process_research_candidates()
+
+        assert len(ant._ledger.open_positions) == 1
+        pos = ant._ledger.open_positions[0]
+        assert pos.symbol == "NATGAS"
+
+    def test_commodity_trade_uses_5pct_capital(self, tmp_path: Path) -> None:
+        """Commodity posities gebruiken 5% kapitaalfractie, niet de standaard 10%."""
+        import sys
+        import pandas as pd
+
+        capital = 10_000.0
+        natgas_price = 3.50
+        base = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        df = pd.DataFrame({"Close": [natgas_price]}, index=[base])
+        mock_ticker = MagicMock()
+        mock_ticker.history.return_value = df
+        mock_yf = MagicMock()
+        mock_yf.Ticker.return_value = mock_ticker
+
+        ant = _make_commodity_paper_ant(tmp_path, capital=capital, natgas_price=natgas_price)
+        _write_commodity_research_candidate(tmp_path, symbol="NATGAS")
+
+        with patch.dict(sys.modules, {"yfinance": mock_yf}):
+            ant._process_research_candidates()
+
+        assert len(ant._ledger.open_positions) == 1
+        pos = ant._ledger.open_positions[0]
+        expected_qty = (capital * _COMMODITY_CAPITAL_FRACTION) / natgas_price
+        assert abs(pos.quantity - expected_qty) < 0.01
+
+    def test_commodity_trade_opened_log_has_asset_type_and_broker(self, tmp_path: Path) -> None:
+        """Het trade_opened log bevat asset_type='commodity' en broker='paper_commodity'."""
+        import sys
+        import pandas as pd
+
+        base = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        df = pd.DataFrame({"Close": [3.50]}, index=[base])
+        mock_ticker = MagicMock()
+        mock_ticker.history.return_value = df
+        mock_yf = MagicMock()
+        mock_yf.Ticker.return_value = mock_ticker
+
+        ant = _make_commodity_paper_ant(tmp_path)
+        _write_commodity_research_candidate(tmp_path, symbol="NATGAS")
+
+        with patch.dict(sys.modules, {"yfinance": mock_yf}):
+            ant._process_research_candidates()
+
+        log_path = tmp_path / "paper" / f"{ant.ant_id}.jsonl"
+        assert log_path.exists()
+        records = [json.loads(l) for l in log_path.read_text(encoding="utf-8").splitlines() if l.strip()]
+        trade_opened = next(
+            (r for r in records if (r.get("payload") or {}).get("action") == "trade_opened"),
+            None,
+        )
+        assert trade_opened is not None
+        payload = trade_opened["payload"]
+        assert payload["asset_type"] == "commodity"
+        assert payload["broker"] == "paper_commodity"
+
+    def test_fetch_commodity_price_uses_yfinance(self, tmp_path: Path) -> None:
+        """_fetch_price('NATGAS') routeert naar yfinance, niet naar de biome adapter."""
+        import sys
+        import pandas as pd
+
+        price = 3.75
+        base = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        df = pd.DataFrame({"Close": [price]}, index=[base])
+        mock_ticker = MagicMock()
+        mock_ticker.history.return_value = df
+        mock_yf = MagicMock()
+        mock_yf.Ticker.return_value = mock_ticker
+
+        ant = _make_commodity_paper_ant(tmp_path)
+
+        with patch.dict(sys.modules, {"yfinance": mock_yf}):
+            result = ant._fetch_price("NATGAS")
+
+        assert result == pytest.approx(price)
+        # biome adapter mag NIET aangeroepen zijn voor commodity symbolen
+        ant.biome_registry.get.assert_not_called()
+
+    def test_fetch_commodity_price_returns_none_on_import_error(self, tmp_path: Path) -> None:
+        """Geen yfinance → None, geen crash."""
+        import sys
+
+        ant = _make_commodity_paper_ant(tmp_path)
+        with patch.dict(sys.modules, {"yfinance": None}):
+            result = ant._fetch_price("NATGAS")
+        assert result is None
+
+    def test_non_commodity_symbol_still_uses_adapter(self, tmp_path: Path) -> None:
+        """Niet-commodity symbolen gaan nog steeds via de biome adapter."""
+        ant = make_ant(logs_root=tmp_path)  # crypto ant
+        price = ant._fetch_price(_SYMBOL)   # BTC-EUR → adapter
+        assert price is not None
+        ant.biome_registry.get.assert_called()

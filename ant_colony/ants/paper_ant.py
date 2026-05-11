@@ -61,6 +61,7 @@ from ant_colony.schemas.heartbeat import Heartbeat, HeartbeatStatus
 from ant_colony.schemas.mission import Mission
 
 _TRADE_CAPITAL_FRACTION = 0.10   # 10% van beschikbaar kapitaal per trade
+_COMMODITY_CAPITAL_FRACTION = 0.05  # 5% van beschikbaar kapitaal per commodity trade
 _SL_PCT  = 0.02                  # 2% stop-loss onder entry
 _TP_PCT  = 0.03                  # 3% take-profit boven entry
 _SHORT_SL_PCT = 0.03             # shorts: 3% stop-loss boven entry
@@ -75,6 +76,13 @@ _PAPER_TICK_WATCHDOG_SECONDS = float(os.getenv("PAPER_ANT_WATCHDOG_SECONDS", "60
 _MIN_ENTRY_SHARPE = 0.15
 _MIN_ENTRY_WIN_RATE = 0.45
 _BIOME_MISMATCH_LOG_INTERVAL_SECONDS = 60.0
+
+# Commodity symbool → yfinance ticker mapping (analoog aan research_ant)
+_COMMODITY_YFINANCE_TICKERS: dict[str, str] = {
+    "NATGAS": "NG=F",
+    "COPPER": "HG=F",
+    "SILVER": "SI=F",
+}
 
 # --- Regime-gebaseerde entry filtering ---
 _SIDEWAYS_ALLOWED_STRATEGY_TYPES = frozenset(["mean_reversion", "rsi_based"])
@@ -377,6 +385,8 @@ class PaperAnt:
         symbols = list(self.mission.market_scope.symbols or [])
         if symbols and all(s.endswith(("-EUR", "-USD")) for s in symbols):
             return True  # crypto handelt 24/7 — geen kill zone beperking
+        if self.mission.market_scope.biome == "commodity":
+            return True  # commodity futures handelen bijna 24/7 — geen ICT kill zone
 
         if self.logs_root is None:
             return True
@@ -1002,6 +1012,7 @@ class PaperAnt:
             "biome":         biome,
             "signal_id":     payload.get("candidate_id"),
         }
+        commodity_fraction = _COMMODITY_CAPITAL_FRACTION if biome == "commodity" else None
         self._try_open_position(
             sig,
             strategy_type=strategy_type,
@@ -1010,6 +1021,7 @@ class PaperAnt:
             regime=regime,
             side=direction,
             sharpe=sharpe,
+            capital_fraction=commodity_fraction,
         )
 
     def _try_open_position(
@@ -1022,6 +1034,7 @@ class PaperAnt:
         regime: str | None = None,
         side: str = "long",
         sharpe: float | None = None,
+        capital_fraction: float | None = None,
     ) -> None:
         """Bouw een EntrySignal en probeer een positie te openen via PaperBroker.
 
@@ -1029,6 +1042,8 @@ class PaperAnt:
                        (dedup via _open_research_keys). Zonder strategy_type: scout-pad.
         sl_pct/tp_pct: override voor stop-loss / take-profit percentages.
                        Valt terug op module-defaults als None.
+        capital_fraction: override voor positiegrootte als fractie van kapitaal.
+                          Valt terug op _TRADE_CAPITAL_FRACTION als None.
         """
         symbol = sig.get("symbol", "")
         if not symbol:
@@ -1073,7 +1088,7 @@ class PaperAnt:
 
         used_sl_pct = sl_pct if sl_pct is not None else (_SHORT_SL_PCT if side == "short" else _SL_PCT)
         used_tp_pct = tp_pct if tp_pct is not None else (_SHORT_TP_PCT if side == "short" else _TP_PCT)
-        capital_fraction = _TRADE_CAPITAL_FRACTION
+        capital_fraction = capital_fraction if capital_fraction is not None else _TRADE_CAPITAL_FRACTION
 
         # Market signal: nieuws + regime gecombineerd — komt bovenop VOLATILE aanpassing
         mkt = read_latest_market_signal(self.logs_root) if self.logs_root else None
@@ -1410,7 +1425,13 @@ class PaperAnt:
     # ------------------------------------------------------------------
 
     def _fetch_price(self, symbol: str) -> float | None:
-        """Haal de actuele marktprijs op via de BiomeAdapter (fail-closed)."""
+        """Haal de actuele marktprijs op via de BiomeAdapter (fail-closed).
+
+        Commodity symbolen (NATGAS/COPPER/SILVER) worden via yfinance opgehaald
+        omdat er geen live commodity adapter is.
+        """
+        if symbol in _COMMODITY_YFINANCE_TICKERS:
+            return self._fetch_commodity_price(symbol)
         try:
             adapter = self.biome_registry.get(self.mission.market_scope.biome)
             if adapter is None or not adapter.is_available():
@@ -1421,6 +1442,29 @@ class PaperAnt:
             return md.close
         except Exception:
             self._log.exception("Fout bij ophalen prijs voor %s", symbol)
+            return None
+
+    def _fetch_commodity_price(self, symbol: str) -> float | None:
+        """Haal de actuele prijs voor een commodity op via yfinance (lazy import).
+
+        Uitsluitend paper — geen live broker koppeling (fail-closed P2).
+        """
+        yf_ticker = _COMMODITY_YFINANCE_TICKERS.get(symbol)
+        if not yf_ticker:
+            return None
+        try:
+            import yfinance as yf  # lazy import — niet verplicht geïnstalleerd
+            df = yf.Ticker(yf_ticker).history(period="5d", interval="1d", auto_adjust=True)
+            if df is None or df.empty:
+                self._log.warning("Geen yfinance prijs voor commodity %s (%s)", symbol, yf_ticker)
+                return None
+            close = float(df["Close"].iloc[-1])
+            return close if close > 0 else None
+        except ImportError:
+            self._log.warning("yfinance niet geïnstalleerd — commodity prijs niet beschikbaar")
+            return None
+        except Exception:
+            self._log.exception("Fout bij ophalen commodity prijs voor %s (%s)", symbol, yf_ticker)
             return None
 
     # ------------------------------------------------------------------
@@ -1439,11 +1483,14 @@ class PaperAnt:
         """Log een trade_opened event naar ANT_LOGS/paper/{ant_id}.jsonl."""
         entry_fee_cost = round(position.entry_price * position.quantity * BROKER_FEE_PCT, 6)
         effective_entry = round(position.entry_price * (1.0 + BROKER_FEE_PCT), 8)
+        biome = position.biome or ""
         self._write_log({
             "action":           "trade_opened",
             "position_id":      position.position_id,
             "symbol":           position.symbol,
-            "biome":            position.biome,
+            "biome":            biome,
+            "asset_type":       biome if biome else None,
+            "broker":           "paper_commodity" if biome == "commodity" else "paper",
             "side":             position.side.value,
             "entry_price":      position.entry_price,
             "effective_entry":  effective_entry,

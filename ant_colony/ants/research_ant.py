@@ -59,6 +59,13 @@ _SL_PCT             = 0.03  # 3 % stop-loss voor backtests
 _MAX_BARS_HELD      = 10
 _RESEARCH_WATCHDOG_SECONDS = float(os.getenv("RESEARCH_ANT_WATCHDOG_SECONDS", "600"))
 
+# Commodity symbool → yfinance ticker mapping
+_COMMODITY_YFINANCE_TICKERS: dict[str, str] = {
+    "NATGAS": "NG=F",
+    "COPPER": "HG=F",
+    "SILVER": "SI=F",
+}
+
 # BacktestConfig profielen per keyword-categorie (tp_pct, sl_pct, max_bars_held)
 _KEYWORD_PROFILES: dict[str, tuple[float, float, int]] = {
     "momentum":       (0.08, 0.04, 15),   # langere trend, ruimere TP
@@ -265,6 +272,7 @@ class ResearchAnt:
             self._check_bollinger(symbol, candles, closes)
 
         self._process_ingestion_candidates()
+        self._process_commodity_watchtower_signals()
         self._check_strategy_diversity()
         self._last_action = "tick"
         self._write_activity_log(
@@ -617,6 +625,87 @@ class ResearchAnt:
                 logic_summary=f"{logic_summary} [{symbol}]",
                 backtest_config=bt_config,
             )
+
+    # ------------------------------------------------------------------
+    # Commodity watchtower-signalen (NATGAS / COPPER / SILVER via yfinance)
+    # ------------------------------------------------------------------
+
+    def _process_commodity_watchtower_signals(self) -> None:
+        """Genereer watchtower_signal kandidaten voor commodity symbolen via yfinance.
+
+        Alleen actief als de missie-biome "commodity" is. Per symbool in
+        _COMMODITY_YFINANCE_TICKERS dat ook in de mission.market_scope.symbols staat
+        worden candles opgehaald en een kandidaat geëmitteerd via het bestaande
+        _evaluate_and_emit pad (inclusief backtest en deduplicatie).
+        """
+        if self.mission.market_scope.biome != "commodity":
+            return
+        mission_symbols = set(self.mission.market_scope.symbols or [])
+        for symbol, yf_ticker in _COMMODITY_YFINANCE_TICKERS.items():
+            if mission_symbols and symbol not in mission_symbols:
+                continue
+            candles = self._fetch_commodity_candles(yf_ticker, symbol)
+            if len(candles) < _MIN_CANDLES:
+                self._log.debug(
+                    "Te weinig commodity candles voor %s/%s (%d/%d) — overgeslagen",
+                    symbol, yf_ticker, len(candles), _MIN_CANDLES,
+                )
+                continue
+            closes = [c.close for c in candles]
+            self._evaluate_and_emit(
+                symbol=symbol,
+                candles=candles,
+                signal_type="watchtower_signal",
+                direction="long",
+                parameters={"yf_ticker": yf_ticker, "asset_type": "commodity"},
+                entry_conditions={"asset_type": "commodity", "yf_ticker": yf_ticker},
+                logic_summary=f"Commodity watchtower signal voor {symbol} via {yf_ticker}",
+            )
+
+    def _fetch_commodity_candles(self, yf_ticker: str, symbol: str) -> list[MarketData]:
+        """Haal dagelijkse OHLCV candles voor een commodity op via yfinance (lazy import).
+
+        Gebruikt period="2y" en interval="1d" zodat ≥200 bars beschikbaar zijn
+        voor de backtester. Retourneert [] bij importfout of elke andere fout (P2).
+        """
+        try:
+            import yfinance as yf  # lazy import — niet verplicht geïnstalleerd
+            df = yf.Ticker(yf_ticker).history(period="2y", interval="1d", auto_adjust=True)
+            if df is None or df.empty:
+                self._log.warning("Geen yfinance data voor commodity %s (%s)", symbol, yf_ticker)
+                return []
+            result: list[MarketData] = []
+            for ts, row in df.iterrows():
+                try:
+                    close = float(row.get("Close") or 0.0)
+                    if close <= 0:
+                        continue
+                    if hasattr(ts, "to_pydatetime"):
+                        dt = ts.to_pydatetime()
+                        if dt.tzinfo is None:
+                            dt = dt.replace(tzinfo=timezone.utc)
+                    else:
+                        dt = datetime.now(tz=timezone.utc)
+                    result.append(MarketData(
+                        symbol=symbol,
+                        timeframe="1d",
+                        timestamp=dt,
+                        open=float(row.get("Open") or 0.0),
+                        high=float(row.get("High") or 0.0),
+                        low=float(row.get("Low") or 0.0),
+                        close=close,
+                        volume=float(row.get("Volume") or 0.0),
+                        biome_id="commodity",
+                    ))
+                except Exception:
+                    continue
+            return result
+        except ImportError:
+            self._log.warning("yfinance niet geïnstalleerd — commodity candles niet beschikbaar")
+            return []
+        except Exception:
+            self._log.exception("Fout bij ophalen commodity candles voor %s (%s)", symbol, yf_ticker)
+            return []
 
     # ------------------------------------------------------------------
     # Evaluatie + emissie
@@ -990,6 +1079,10 @@ def _strategy_type_from_signal(
     kw  = {k.lower() for k in (keywords or [])}
     kws = " ".join(sorted(kw))  # voor multi-word substring check
 
+    # --- Commodity watchtower signalen ---
+    if "watchtower" in st:
+        return "watchtower_signal"
+
     # --- Claude Ant varianten: expliciete tp_pct classificatie ---
     if "claude" in kw or "improved" in kw:
         if tp_pct is not None:
@@ -1069,6 +1162,8 @@ def _strategy_type_from_signal_type(signal_type: str) -> str | None:
         return "momentum"
     if "mean_rev" in st or "reversion" in st:
         return "mean_reversion"
+    if "watchtower" in st:
+        return "watchtower_signal"
     return None   # ingested of onbekend → elke bar (veilig fallback)
 
 

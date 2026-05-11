@@ -43,10 +43,12 @@ from ant_colony.ants.research_ant import (
     _MIN_CANDLES,
     _SHARPE_THRESHOLD,
     _WIN_RATE_THRESHOLD,
+    _COMMODITY_YFINANCE_TICKERS,
     _bollinger,
     _rsi,
     _sma,
     _strategy_type_from_signal,
+    _strategy_type_from_signal_type,
 )
 from ant_colony.biome.biome_adapter import MarketData
 from ant_colony.biome.biome_registry import BiomeRegistry
@@ -1089,3 +1091,204 @@ class TestCheckStrategyDiversity:
         warning_msgs = [r for r in caplog.records if r.levelname == "WARNING"
                         and "diversiteit" in r.message.lower()]
         assert not warning_msgs
+
+
+# ---------------------------------------------------------------------------
+# Commodity watchtower signalen
+# ---------------------------------------------------------------------------
+
+def _make_yfinance_df(prices: list[float]):
+    """Bouw een minimaal pandas DataFrame dat yfinance.Ticker.history() imiteert."""
+    import pandas as pd
+    base = datetime(2023, 1, 1, tzinfo=timezone.utc)
+    from datetime import timedelta as td
+    index = [base + td(days=i) for i in range(len(prices))]
+    return pd.DataFrame(
+        {
+            "Open": prices,
+            "High": [p * 1.01 for p in prices],
+            "Low":  [p * 0.99 for p in prices],
+            "Close": prices,
+            "Volume": [1000.0] * len(prices),
+        },
+        index=index,
+    )
+
+
+def _make_commodity_mission(symbols: list[str] | None = None) -> Mission:
+    return Mission(
+        mission_id="m-commodity-001",
+        ant_type="research_ant",
+        allowed_node="pc2-desktop",
+        allowed_actions=["read_data", "backtest", "propose_candidate"],
+        market_scope=MarketScope(
+            biome="commodity",
+            symbols=symbols or ["NATGAS", "COPPER", "SILVER"],
+            timeframes=["1d"],
+        ),
+        capital_limit=0.0,
+        risk_limits=RiskLimits(
+            max_drawdown_pct=0.01,
+            max_position_size=1.0,
+            daily_loss_limit=1.0,
+            stop_loss_required=False,
+        ),
+        ttl=7200,
+        heartbeat_interval=120,
+        success_conditions=SuccessConditions(description="Commodity research missie"),
+        abort_conditions=AbortConditions(),
+    )
+
+
+class TestCommodityWatchtowerSignals:
+
+    def test_non_commodity_biome_skips_processing(self, tmp_path: Path) -> None:
+        """Als biome != 'commodity', doet _process_commodity_watchtower_signals niets."""
+        ant = make_ant(tmp_path, mission=make_mission(symbols=["BTC-EUR"]))
+        ant._process_commodity_watchtower_signals()
+        assert len(ant._last_emitted) == 0
+
+    def test_commodity_ticker_map_contains_expected_symbols(self) -> None:
+        assert _COMMODITY_YFINANCE_TICKERS["NATGAS"] == "NG=F"
+        assert _COMMODITY_YFINANCE_TICKERS["COPPER"] == "HG=F"
+        assert _COMMODITY_YFINANCE_TICKERS["SILVER"] == "SI=F"
+
+    def test_commodity_generates_candidate_via_yfinance(self, tmp_path: Path) -> None:
+        """Met voldoende yfinance candles wordt een watchtower_signal kandidaat geëmitteerd."""
+        import sys
+
+        prices = [3.5 + i * 0.001 for i in range(250)]
+        mock_df = _make_yfinance_df(prices)
+        mock_ticker = MagicMock()
+        mock_ticker.history.return_value = mock_df
+        mock_yf = MagicMock()
+        mock_yf.Ticker.return_value = mock_ticker
+
+        mission = _make_commodity_mission(symbols=["NATGAS"])
+        ant = ResearchAnt(
+            ant_id="ant-commodity-test",
+            mission=mission,
+            scheduler=MagicMock(),
+            biome_registry=BiomeRegistry(),
+            logs_root=tmp_path,
+        )
+        ant._lean_validator = MagicMock()
+        ant._lean_validator.validate.return_value = {
+            "lean_sharpe": None, "lean_max_drawdown": None,
+            "lean_win_rate": None, "lean_trades": None,
+            "lean_status": "unavailable", "lean_reason": "test",
+        }
+
+        with patch.dict(sys.modules, {"yfinance": mock_yf}):
+            ant._process_commodity_watchtower_signals()
+
+        assert ("NATGAS", "watchtower_signal") in ant._last_emitted
+
+    def test_commodity_skips_symbol_not_in_mission(self, tmp_path: Path) -> None:
+        """Symbolen niet in de missie worden overgeslagen."""
+        import sys
+
+        prices = [3.5] * 250
+        mock_df = _make_yfinance_df(prices)
+        mock_ticker = MagicMock()
+        mock_ticker.history.return_value = mock_df
+        mock_yf = MagicMock()
+        mock_yf.Ticker.return_value = mock_ticker
+
+        mission = _make_commodity_mission(symbols=["SILVER"])  # alleen SILVER
+        ant = ResearchAnt(
+            ant_id="ant-commodity-scope",
+            mission=mission,
+            scheduler=MagicMock(),
+            biome_registry=BiomeRegistry(),
+            logs_root=tmp_path,
+        )
+        ant._lean_validator = MagicMock()
+        ant._lean_validator.validate.return_value = {
+            "lean_sharpe": None, "lean_max_drawdown": None,
+            "lean_win_rate": None, "lean_trades": None,
+            "lean_status": "unavailable", "lean_reason": "test",
+        }
+
+        with patch.dict(sys.modules, {"yfinance": mock_yf}):
+            ant._process_commodity_watchtower_signals()
+
+        assert ("NATGAS", "watchtower_signal") not in ant._last_emitted
+        assert ("COPPER", "watchtower_signal") not in ant._last_emitted
+
+    def test_fetch_commodity_candles_returns_empty_on_import_error(self, tmp_path: Path) -> None:
+        """Als yfinance niet geïnstalleerd is, retourneert _fetch_commodity_candles []."""
+        import sys
+
+        ant = ResearchAnt(
+            ant_id="ant-commodity-noyf",
+            mission=_make_commodity_mission(),
+            scheduler=MagicMock(),
+            biome_registry=BiomeRegistry(),
+            logs_root=tmp_path,
+        )
+        # Simuleer ImportError door yfinance op None te zetten in sys.modules
+        with patch.dict(sys.modules, {"yfinance": None}):
+            result = ant._fetch_commodity_candles("NG=F", "NATGAS")
+        assert result == []
+
+    def test_fetch_commodity_candles_returns_empty_when_no_data(self, tmp_path: Path) -> None:
+        """Leeg DataFrame → lege lijst, geen crash."""
+        import sys
+        import pandas as pd
+
+        mock_ticker = MagicMock()
+        mock_ticker.history.return_value = pd.DataFrame()
+        mock_yf = MagicMock()
+        mock_yf.Ticker.return_value = mock_ticker
+
+        ant = ResearchAnt(
+            ant_id="ant-commodity-empty",
+            mission=_make_commodity_mission(),
+            scheduler=MagicMock(),
+            biome_registry=BiomeRegistry(),
+            logs_root=tmp_path,
+        )
+        with patch.dict(sys.modules, {"yfinance": mock_yf}):
+            result = ant._fetch_commodity_candles("NG=F", "NATGAS")
+        assert result == []
+
+    def test_commodity_too_few_candles_skipped(self, tmp_path: Path) -> None:
+        """Met te weinig candles (<200) wordt geen kandidaat geëmitteerd."""
+        import sys
+
+        prices = [3.5] * 50  # slechts 50 bars — onder _MIN_CANDLES
+        mock_df = _make_yfinance_df(prices)
+        mock_ticker = MagicMock()
+        mock_ticker.history.return_value = mock_df
+        mock_yf = MagicMock()
+        mock_yf.Ticker.return_value = mock_ticker
+
+        ant = ResearchAnt(
+            ant_id="ant-commodity-fewbars",
+            mission=_make_commodity_mission(symbols=["NATGAS"]),
+            scheduler=MagicMock(),
+            biome_registry=BiomeRegistry(),
+            logs_root=tmp_path,
+        )
+        ant._lean_validator = MagicMock()
+        ant._lean_validator.validate.return_value = {
+            "lean_sharpe": None, "lean_max_drawdown": None,
+            "lean_win_rate": None, "lean_trades": None,
+            "lean_status": "unavailable", "lean_reason": "test",
+        }
+        with patch.dict(sys.modules, {"yfinance": mock_yf}):
+            ant._process_commodity_watchtower_signals()
+        assert ("NATGAS", "watchtower_signal") not in ant._last_emitted
+
+
+class TestStrategyTypeWatchtower:
+
+    def test_strategy_type_from_signal_watchtower(self) -> None:
+        assert _strategy_type_from_signal("watchtower_signal NATGAS", []) == "watchtower_signal"
+
+    def test_strategy_type_from_signal_type_watchtower(self) -> None:
+        assert _strategy_type_from_signal_type("watchtower_signal") == "watchtower_signal"
+
+    def test_strategy_type_from_signal_type_watchtower_prefix(self) -> None:
+        assert _strategy_type_from_signal_type("watchtower_signal_v2") == "watchtower_signal"
