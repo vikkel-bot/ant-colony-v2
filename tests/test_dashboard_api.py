@@ -228,6 +228,29 @@ class TestStatusEndpoint:
             r = _client(ctx).get("/api/status")
             assert r.json()["last_tick"] is None
 
+    def test_last_tick_falls_back_to_yesterday(self):
+        """Als het bestand van vandaag ontbreekt, wordt gisteren gelezen."""
+        with tempfile.TemporaryDirectory() as tmp:
+            logs = Path(tmp)
+            yesterday = (datetime.now(tz=timezone.utc) - timedelta(days=1)).strftime("%Y%m%d")
+            log_file = logs / "colony" / f"scheduler_{yesterday}.jsonl"
+            _write_jsonl(log_file, [{"timestamp": _now_iso(), "event_type": "tick"}])
+            ctx = ColonyContext(scheduler=_make_scheduler(), logs_root=logs)
+            r = _client(ctx).get("/api/status")
+            assert r.json()["last_tick"] is not None
+
+    def test_last_tick_ignores_archive_with_timestamp_suffix(self):
+        """Archief-bestanden (scheduler_YYYYMMDD_HHMMSS.jsonl) worden nooit gelezen."""
+        with tempfile.TemporaryDirectory() as tmp:
+            logs = Path(tmp)
+            yesterday = (datetime.now(tz=timezone.utc) - timedelta(days=1)).strftime("%Y%m%d")
+            archive = logs / "colony" / f"scheduler_{yesterday}_120000.jsonl"
+            archive.parent.mkdir(parents=True, exist_ok=True)
+            _write_jsonl(archive, [{"timestamp": _now_iso(), "event_type": "tick"}])
+            ctx = ColonyContext(scheduler=_make_scheduler(), logs_root=logs)
+            r = _client(ctx).get("/api/status")
+            assert r.json()["last_tick"] is None
+
 
 # ---------------------------------------------------------------------------
 # TestMetricsEndpoint

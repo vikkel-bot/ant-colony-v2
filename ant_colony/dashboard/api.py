@@ -2197,16 +2197,26 @@ def _real_equity(registry: BiomeRegistry | None) -> float | None:
 # ---------------------------------------------------------------------------
 
 def _last_tick_from_logs(logs_root: Path | None) -> datetime | None:
-    """Lees de dashboard heartbeat uit het dagelijkse scheduler log."""
+    """Lees de dashboard heartbeat uit het dagelijkse scheduler log.
+
+    Probeert vandaag (UTC) eerst; valt terug op gisteren als er geen events
+    zijn. Archief-bestanden met tijdstempel-suffix (scheduler_YYYYMMDD_HHMMSS.jsonl)
+    worden nooit gelezen — alleen de actieve dagbestanden.
+    """
     if logs_root is None:
         return None
-    today = datetime.now(tz=timezone.utc).strftime("%Y%m%d")
-    log_file = logs_root / "colony" / f"scheduler_{today}.jsonl"
-    return (
-        _last_event_timestamp_in_file(log_file, "dashboard_heartbeat")
-        or _last_event_timestamp_in_file(log_file, "tick")
-        or _last_timestamp_in_file(log_file)
-    )
+    now_utc = datetime.now(tz=timezone.utc)
+    for delta_days in (0, 1):
+        date_str = (now_utc - timedelta(days=delta_days)).strftime("%Y%m%d")
+        log_file = logs_root / "colony" / f"scheduler_{date_str}.jsonl"
+        result = (
+            _last_event_timestamp_in_file(log_file, "dashboard_heartbeat")
+            or _last_event_timestamp_in_file(log_file, "tick")
+            or _last_timestamp_in_file(log_file)
+        )
+        if result is not None:
+            return result
+    return None
 
 
 def _last_event_timestamp_in_file(path: Path, event_type: str) -> datetime | None:
