@@ -614,7 +614,7 @@ def main() -> None:
     hostname = args.node_hostname or socket.gethostname()
 
     _equities_enabled = os.getenv("EQUITIES_ENABLED", "false").lower() == "true"
-    _allowed_biomes   = ["crypto", "equities"] if _equities_enabled else ["crypto"]
+    _allowed_biomes   = ["crypto", "equities", "commodity"] if _equities_enabled else ["crypto", "commodity"]
 
     node = Node(
         node_id=args.node_id,
