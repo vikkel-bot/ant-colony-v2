@@ -489,19 +489,26 @@ class TestWatchtowerCandidateConsumer:
         assert payload["asset"] == "NATGAS"
         assert payload["biome"] == "commodity"
 
-    def test_daily_limit_blocks_after_three_entries(self, tmp_path):
+    def test_daily_limit_blocks_after_ten_entries(self, tmp_path):
         client = _make_client(signals=[
-            self._signal(signal_id="s-jnj", asset="JNJ"),
-            self._signal(signal_id="s-gld", asset="GLD"),
-            self._signal(signal_id="s-xlk", asset="XLK"),
+            self._signal(signal_id="s-jnj",  asset="JNJ"),
+            self._signal(signal_id="s-gld",  asset="GLD"),
+            self._signal(signal_id="s-xlk",  asset="XLK"),
             self._signal(signal_id="s-aapl", asset="AAPL"),
+            self._signal(signal_id="s-msft", asset="MSFT"),
+            self._signal(signal_id="s-amzn", asset="AMZN"),
+            self._signal(signal_id="s-tsla", asset="TSLA"),
+            self._signal(signal_id="s-nvda", asset="NVDA"),
+            self._signal(signal_id="s-meta", asset="META"),
+            self._signal(signal_id="s-googl", asset="GOOGL"),
+            self._signal(signal_id="s-nflx", asset="NFLX"),
         ])
         ant = _make_ant(tmp_path, client)
 
         ant._tick()
 
         candidates = self._read_candidates(tmp_path)
-        assert len(candidates) == 3
+        assert len(candidates) == 10
         rec = self._read_snapshot(tmp_path)
         reasons = [r["detail_reason"] for r in rec["candidate_rejections"]]
         assert "daily_limit_total" in reasons
