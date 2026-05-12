@@ -166,10 +166,14 @@ class WatchtowerAnt:
             )
             reasons: list[str] = []
             reason_code: str | None = None
-            if entry_score < _MIN_ENTRY_SCORE:
+            asset = signal.get("asset") or signal.get("symbol") or ""
+            biome_check = _infer_signal_biome(signal, str(asset).upper())
+            min_score = _MIN_ENTRY_SCORE_COMMODITY if biome_check == "commodity" else _MIN_ENTRY_SCORE
+            min_conf = _MIN_CONFIDENCE_COMMODITY if biome_check == "commodity" else _MIN_CONFIDENCE
+            if entry_score < min_score:
                 reasons.append("entry_score_below_threshold")
                 reason_code = "score_too_low"
-            if confidence < _MIN_CONFIDENCE:
+            if confidence < min_conf:
                 reasons.append("confidence_below_threshold")
                 reason_code = reason_code or "score_too_low"
             if "HIGH_RISK" in signal.get("risk_flags", []):
