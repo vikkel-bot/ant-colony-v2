@@ -32,6 +32,7 @@ Regels:
 from __future__ import annotations
 
 import logging
+import socket
 import time
 from pathlib import Path
 
@@ -126,6 +127,30 @@ def create_app(ctx: ColonyContext | None = None) -> FastAPI:
 _SOCKET_RETRY_DELAY_S = 5
 
 
+class DashboardBindError(RuntimeError):
+    """Dashboardpoort is al bezet; startup moet fail-closed stoppen."""
+
+
+def _connect_host_for_bind_check(host: str) -> str:
+    if host in {"", "0.0.0.0", "::"}:
+        return "127.0.0.1"
+    return host
+
+
+def _port_has_listener(host: str, port: int) -> bool:
+    """Snelle lokale check; doet geen externe netwerkcall."""
+    try:
+        with socket.create_connection((_connect_host_for_bind_check(host), port), timeout=0.2):
+            return True
+    except OSError:
+        return False
+
+
+def _is_bind_error(exc: OSError) -> bool:
+    text = str(exc).lower()
+    return "address already in use" in text or "10048" in text or "adres" in text and "gebruik" in text
+
+
 def run(
     ctx: ColonyContext | None = None,
     host: str = "0.0.0.0",
@@ -158,6 +183,9 @@ def run(
         host, port, " (reload=ON)" if reload else "",
     )
 
+    if _port_has_listener(host, port):
+        raise DashboardBindError(f"Dashboard poort {host}:{port} is al bezet")
+
     if reload:
         # --reload vereist app als import-string, niet als object.
         # _standalone_app() maakt een lege ColonyContext — alleen voor dev.
@@ -180,6 +208,8 @@ def run(
             uvicorn.run(app, host=host, port=port, log_level=log_level)
             return  # clean exit (bijv. SIGINT / shutdown)
         except OSError as exc:
+            if _is_bind_error(exc):
+                raise DashboardBindError(f"Dashboard bind faalde op {host}:{port}: {exc}") from exc
             # Windows IocpProactor accept-loop breekt bij transiente netwerkfouten
             # (bijv. WinError 64 — netwerknaam niet beschikbaar).  Retry in plaats
             # van crash zodat de colony het dashboard niet verliest na Tailscale flip.

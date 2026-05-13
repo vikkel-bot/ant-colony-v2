@@ -18,6 +18,14 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _dashboard_port_free(monkeypatch):
+    monkeypatch.setattr(
+        "ant_colony.dashboard.server._port_has_listener",
+        lambda host, port: False,
+    )
+
+
 # ---------------------------------------------------------------------------
 # server.run() — OSError retry
 # ---------------------------------------------------------------------------
@@ -113,6 +121,16 @@ class TestServerRunRetry:
         warning_messages = [str(c) for c in mock_logger.warning.call_args_list]
         assert any("socket fout" in m or "Dashboard" in m for m in warning_messages)
 
+    def test_bind_conflict_raises_dashboard_bind_error(self, monkeypatch):
+        monkeypatch.setattr(
+            "ant_colony.dashboard.server._port_has_listener",
+            lambda host, port: True,
+        )
+        from ant_colony.dashboard.server import DashboardBindError, run
+
+        with pytest.raises(DashboardBindError):
+            run()
+
 
 # ---------------------------------------------------------------------------
 # start_colony._run_dashboard_watchdog() — watchdog herstart
@@ -195,3 +213,51 @@ class TestDashboardWatchdog:
             watchdog(fake_run, None, "0.0.0.0", 8000, log)
 
         assert call_count == 3
+
+
+# ---------------------------------------------------------------------------
+# start_colony dashboard port preflight
+# ---------------------------------------------------------------------------
+
+class TestDashboardPortPreflight:
+    """start_colony stopt alleen oude Colony-processen en faalt anders gesloten."""
+
+    def _get_module(self):
+        import importlib, sys
+        if "scripts.start_colony" in sys.modules:
+            del sys.modules["scripts.start_colony"]
+        import scripts.start_colony as sc
+        return sc
+
+    def test_unknown_listener_fails_closed(self, monkeypatch):
+        sc = self._get_module()
+        log = MagicMock(spec=logging.Logger)
+        monkeypatch.setattr(sc, "_list_port_listener_pids", lambda port, log: {1234})
+        monkeypatch.setattr(sc, "_process_command_line", lambda pid, log: "C:\\Other\\server.exe")
+        stop = MagicMock()
+        monkeypatch.setattr(sc, "_stop_pid", stop)
+
+        assert sc._prepare_dashboard_port(8000, log) is False
+        stop.assert_not_called()
+
+    def test_old_start_colony_listener_is_stopped(self, monkeypatch, tmp_path):
+        sc = self._get_module()
+        log = MagicMock(spec=logging.Logger)
+        calls = {"count": 0}
+
+        def fake_list(port, log):
+            calls["count"] += 1
+            return {2222} if calls["count"] == 1 else set()
+
+        monkeypatch.setattr(sc, "_list_port_listener_pids", fake_list)
+        monkeypatch.setattr(
+            sc,
+            "_process_command_line",
+            lambda pid, log: str(tmp_path / "scripts" / "start_colony.py"),
+        )
+        monkeypatch.setattr(sc, "_stop_pid", MagicMock(return_value=True))
+        monkeypatch.setattr(sc, "_can_bind_dashboard_port", lambda host, port: True)
+        monkeypatch.setattr(sc.time, "sleep", MagicMock())
+
+        assert sc._prepare_dashboard_port(8000, log, repo_root=tmp_path) is True
+        sc._stop_pid.assert_called_once_with(2222, 8000, log)

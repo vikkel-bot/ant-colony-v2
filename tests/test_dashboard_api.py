@@ -28,6 +28,7 @@ from ant_colony.dashboard.api import (
     ColonyContext, create_router, _parse_ts,
     _compute_sl_tp_progress, _read_open_positions_from_logs,
     _build_event_summary, _parse_queen_decision, _read_queen_decisions,
+    _derive_watchtower_status,
 )
 from ant_colony.dashboard.server import create_app
 from ant_colony.queen.queen import Queen
@@ -306,6 +307,18 @@ class TestStatusEndpoint:
             for w in d["warnings"]
         )
 
+    def test_watchtower_status_uses_metadata_not_stats_reader(self, monkeypatch, tmp_path: Path):
+        monkeypatch.setenv("WATCHTOWER_ENABLED", "true")
+        monkeypatch.setattr(
+            "ant_colony.dashboard.api._read_watchtower_stats",
+            MagicMock(side_effect=AssertionError("metadata-only status mag stats niet lezen")),
+        )
+        signal_path = tmp_path / "watchtower" / "signals.jsonl"
+        signal_path.parent.mkdir(parents=True)
+        signal_path.write_text("", encoding="utf-8")
+
+        assert _derive_watchtower_status(tmp_path) in {"ONLINE", "STALE"}
+
     def test_status_stale_tick_has_specific_warning(self):
         scheduler = _make_scheduler()
         scheduler.last_tick_completed_at = datetime.now(tz=timezone.utc) - timedelta(seconds=301)
@@ -351,27 +364,35 @@ class TestMetricsEndpoint:
         r = _client(ctx).get("/api/metrics")
         assert r.json()["utilization_pct"] == 25.0
 
-    def test_live_eur_balance_from_crypto_adapter(self):
-        from ant_colony.biome.biome_adapter import AccountState
-        account = AccountState(
-            biome_id="crypto", balance=80.64, positions_value=0.0,
-            timestamp=datetime.now(tz=timezone.utc),
-        )
+    def test_metrics_does_not_call_adapter_or_heavy_log_helpers(self, monkeypatch):
         adapter = MagicMock()
-        adapter.is_available.return_value = True
-        adapter.get_account_state.return_value = account
+        adapter.get_account_state.side_effect = AssertionError("metrics endpoint mag geen broker call doen")
         registry = MagicMock()
-        registry.get.return_value = adapter
+        registry.list_biomes.side_effect = AssertionError("metrics endpoint mag registry niet scannen")
+        registry.get.side_effect = AssertionError("metrics endpoint mag registry niet raken")
+        monkeypatch.setattr(
+            "ant_colony.dashboard.api._real_equity",
+            MagicMock(side_effect=AssertionError("metrics endpoint mag _real_equity niet gebruiken")),
+        )
+        monkeypatch.setattr(
+            "ant_colony.dashboard.api._read_paper_capital_in_use",
+            MagicMock(side_effect=AssertionError("metrics endpoint mag paper logs niet scannen")),
+        )
         ctx = ColonyContext(
             queen=_make_queen(),
             scheduler=_make_scheduler(),
             biome_registry=registry,
-            broker_names={"crypto": "Bitvavo"},
         )
         r = _client(ctx).get("/api/metrics")
         d = r.json()
-        assert d["live_eur_balance"] == pytest.approx(80.64)
-        assert d["live_eur_source"] == "Bitvavo"
+        assert r.status_code == 200
+        assert d["capital_total"] == 50_000.0
+        assert d["capital_in_use"] is None
+        assert d["live_eur_balance"] is None
+        assert d["live_eur_source"] is None
+        registry.list_biomes.assert_not_called()
+        registry.get.assert_not_called()
+        adapter.get_account_state.assert_not_called()
 
     def test_live_eur_balance_none_when_no_registry(self):
         ctx = ColonyContext(queen=_make_queen(), scheduler=_make_scheduler())
@@ -393,6 +414,18 @@ class TestMetricsEndpoint:
         r = _client(ctx).get("/api/metrics")
         d = r.json()
         assert d["live_eur_balance"] is None
+        adapter.get_account_state.assert_not_called()
+
+    def test_metrics_minimal_values_with_only_queen(self):
+        queen = _make_queen(capital=12_345.0)
+        ctx = ColonyContext(queen=queen)
+        r = _client(ctx).get("/api/metrics")
+        d = r.json()
+        assert r.status_code == 200
+        assert d["capital_total"] == pytest.approx(12_345.0)
+        assert d["capital_in_use"] is None
+        assert d["live_eur_balance"] is None
+        assert d["live_eur_source"] is None
 
 
 # ---------------------------------------------------------------------------

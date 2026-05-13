@@ -73,6 +73,12 @@ def _env_float(name: str, default: float) -> float:
 
 _DASHBOARD_JSONL_TAIL_LINES = max(1, _env_int("DASHBOARD_JSONL_TAIL_LINES", 100))
 _DASHBOARD_LOG_CACHE_SECONDS = max(1.0, _env_float("DASHBOARD_LOG_CACHE_SECONDS", 30.0))
+_DASHBOARD_TICKER_MAX_FILES_PER_DIR = max(1, _env_int("DASHBOARD_TICKER_MAX_FILES_PER_DIR", 5))
+_DASHBOARD_TICKER_DIRS = (
+    "colony", "audit", "scouts", "research", "paper", "execution",
+    "operator", "strategy", "watchtower", "queen", "news", "rs_regime",
+    "missions",
+)
 _DASHBOARD_LOG_CACHE_LOCK = threading.RLock()
 _DASHBOARD_JSONL_CACHE: dict[tuple[str, int], tuple[float, tuple[int, int], list[dict]]] = {}
 _DASHBOARD_ANT_DIR_CACHE: dict[
@@ -432,13 +438,13 @@ def _derive_watchtower_status(logs_root: Path | None) -> str:
     if logs_root is None:
         return "UNKNOWN"
     try:
-        stats = _read_watchtower_stats(logs_root)
+        signal_path = logs_root / "watchtower" / "signals.jsonl"
+        if not signal_path.exists():
+            return "STALE"
+        mtime = datetime.fromtimestamp(signal_path.stat().st_mtime, tz=timezone.utc)
     except Exception:
         return "UNKNOWN"
-    last = _parse_ts(stats.get("last_signal_ts"))
-    if last is None:
-        return "STALE"
-    age = (datetime.now(tz=timezone.utc) - last).total_seconds()
+    age = (datetime.now(tz=timezone.utc) - mtime).total_seconds()
     if age <= 2 * max(60, _env_int("WATCHTOWER_POLL_INTERVAL", 300)):
         return "ONLINE"
     if age <= 3600:
@@ -1189,53 +1195,51 @@ def create_router(ctx: ColonyContext) -> APIRouter:
 
     @router.get("/metrics", response_model=MetricsResponse)
     def get_metrics() -> MetricsResponse:
-        """Kapitaal totalen en actief agent-aantal."""
-        if ctx.queen is None:
+        """Lichtgewicht topbar-metrics; geen broker, netwerk of zware logscan."""
+        try:
+            if ctx.queen is None:
+                return MetricsResponse(
+                    capital_total=0.0,
+                    capital_allocated=0.0,
+                    capital_available=0.0,
+                    capital_in_use=None,
+                    active_ants=0,
+                    utilization_pct=0.0,
+                    live_eur_balance=None,
+                    live_eur_source=None,
+                )
+
+            total = float(ctx.queen.capital_total or 0.0)
+            allocated = float(ctx.queen.capital_allocated or 0.0)
+            available = max(0.0, total - allocated)
+            active = len(ctx.queen.active_missions)
+            util = round(allocated / total * 100.0, 1) if total > 0 else 0.0
+
+            return MetricsResponse(
+                capital_total=total,
+                capital_allocated=allocated,
+                capital_available=available,
+                capital_in_use=None,
+                active_ants=active,
+                utilization_pct=util,
+                live_eur_balance=None,
+                live_eur_source=None,
+            )
+        except Exception as exc:
+            logger.warning(
+                "/api/metrics fallback actief | error_type=%s",
+                type(exc).__name__,
+            )
             return MetricsResponse(
                 capital_total=0.0,
                 capital_allocated=0.0,
                 capital_available=0.0,
+                capital_in_use=None,
                 active_ants=0,
                 utilization_pct=0.0,
+                live_eur_balance=None,
+                live_eur_source=None,
             )
-
-        # Reëel totaal = live broker-saldi + marktwaarde holdings.
-        # Valt terug op queen.capital_total als adapters niet beschikbaar zijn.
-        live_total = _real_equity(ctx.biome_registry)
-        total = live_total if live_total is not None else ctx.queen.capital_total
-
-        allocated = ctx.queen.capital_allocated
-        available = max(0.0, total - allocated)
-        active    = len(ctx.queen.active_missions)
-        util      = round(allocated / total * 100.0, 1) if total > 0 else 0.0
-
-        # Virtuele inzet: entry_price × quantity voor openstaande paper posities
-        in_use = _read_paper_capital_in_use(ctx.logs_root) if ctx.logs_root else None
-
-        # Echt EUR saldo: rechtstreeks van de crypto-adapter (Bitvavo)
-        live_eur_balance: float | None = None
-        live_eur_source:  str   | None = None
-        if ctx.biome_registry is not None:
-            _crypto = ctx.biome_registry.get("crypto")
-            if _crypto is not None:
-                try:
-                    _account = _crypto.get_account_state()
-                    if _account is not None:
-                        live_eur_balance = _account.balance
-                        live_eur_source  = ctx.broker_names.get("crypto", "Bitvavo")
-                except Exception:
-                    logger.exception("/api/metrics: live EUR saldo ophalen mislukt")
-
-        return MetricsResponse(
-            capital_total=total,
-            capital_allocated=allocated,
-            capital_available=available,
-            capital_in_use=in_use,
-            active_ants=active,
-            utilization_pct=util,
-            live_eur_balance=live_eur_balance,
-            live_eur_source=live_eur_source,
-        )
 
     # ------------------------------------------------------------------
     # GET /api/performance
@@ -2890,7 +2894,7 @@ def _read_recent_events(logs_root: Path, limit: int = 20) -> list[TickerEvent]:
     """
     records: list[tuple[datetime, dict]] = []
 
-    for path in logs_root.rglob("*.jsonl"):
+    for path in _recent_ticker_log_paths(logs_root):
         for record in _read_jsonl_tail_cached(path):
             ts = _parse_ts(record.get("timestamp"))
             if ts is not None:
@@ -2909,6 +2913,25 @@ def _read_recent_events(logs_root: Path, limit: int = 20) -> list[TickerEvent]:
             payload=rec.get("payload", {}),
         ))
     return events
+
+
+def _recent_ticker_log_paths(logs_root: Path) -> list[Path]:
+    """Bounded selectie van logbestanden voor /api/ticker; geen rglob over heel ANT_LOGS."""
+    paths: list[Path] = []
+    for subdir in _DASHBOARD_TICKER_DIRS:
+        directory = logs_root / subdir
+        if not directory.exists():
+            continue
+        try:
+            candidates = sorted(
+                directory.glob("*.jsonl"),
+                key=lambda path: _path_fingerprint(path)[1],
+                reverse=True,
+            )
+        except OSError:
+            continue
+        paths.extend(candidates[:_DASHBOARD_TICKER_MAX_FILES_PER_DIR])
+    return paths
 
 
 _LOCAL_TZ = ZoneInfo("Europe/Amsterdam")

@@ -152,11 +152,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 # ---------------------------------------------------------------------------
-# Hulpfunctie: stop proces op een poort (Windows)
+# Hulpfunctie: dashboardpoort veilig vrijmaken (Windows)
 # ---------------------------------------------------------------------------
 
-def _kill_port(port: int, log: logging.Logger) -> None:
-    """Zoek en stop het proces dat luistert op `port` (Windows netstat)."""
+def _list_port_listener_pids(port: int, log: logging.Logger) -> set[int] | None:
+    """Return PIDs die LISTENING zijn op `port`; None als inspectie faalt."""
     try:
         result = subprocess.run(
             ["netstat", "-ano"],
@@ -165,37 +165,130 @@ def _kill_port(port: int, log: logging.Logger) -> None:
             timeout=10,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        log.warning("netstat niet beschikbaar — poort %d niet vrijgemaakt: %s", port, exc)
-        return
+        log.error("netstat niet beschikbaar — poort %d niet veilig te inspecteren: %s", port, exc)
+        return None
 
     pids: set[int] = set()
     for line in result.stdout.splitlines():
-        # Zoek regels met :8000 in LISTENING of ESTABLISHED staat
-        if f":{port}" in line and ("LISTENING" in line or "ESTABLISHED" in line):
+        if f":{port}" in line and "LISTENING" in line:
             parts = line.split()
             if parts:
                 try:
                     pids.add(int(parts[-1]))
                 except ValueError:
                     pass
+    return pids
+
+
+def _process_command_line(pid: int, log: logging.Logger) -> str:
+    """Lees proces-commandline defensief. Leeg betekent onbekend."""
+    try:
+        result = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                f"(Get-CimInstance Win32_Process -Filter \"ProcessId = {pid}\").CommandLine",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        log.warning("Commandline inspectie mislukt voor PID %d: %s", pid, exc)
+        return ""
+    return (result.stdout or "").strip()
+
+
+def _is_colony_dashboard_owner(pid: int, command_line: str, repo_root: Path) -> bool:
+    """Alleen een oude start_colony.py mag automatisch gestopt worden."""
+    if pid == os.getpid():
+        return False
+    cmd = (command_line or "").lower().replace("/", "\\")
+    if "start_colony.py" not in cmd:
+        return False
+    repo = str(repo_root.resolve()).lower().replace("/", "\\")
+    script = str((repo_root / "scripts" / "start_colony.py").resolve()).lower().replace("/", "\\")
+    return repo in cmd or script in cmd or "scripts\\start_colony.py" in cmd
+
+
+def _stop_pid(pid: int, port: int, log: logging.Logger) -> bool:
+    log.warning("Oude Colony dashboard-proces stoppen | pid=%d port=%d", pid, port)
+    try:
+        result = subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        log.error("taskkill mislukt voor PID %d: %s", pid, exc)
+        return False
+    if result.returncode != 0:
+        log.error("taskkill gaf fout voor PID %d: %s", pid, (result.stderr or "").strip())
+        return False
+    return True
+
+
+def _can_bind_dashboard_port(host: str, port: int) -> bool:
+    """Snelle bind-proef zodat we fail-closed gaan vóór ants starten."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind((host, port))
+        return True
+    except OSError:
+        return False
+
+
+def _prepare_dashboard_port(
+    port: int,
+    log: logging.Logger,
+    host: str = "0.0.0.0",
+    repo_root: Path = _REPO_ROOT,
+) -> bool:
+    """Maak dashboardpoort veilig vrij of weiger startup fail-closed."""
+    pids = _list_port_listener_pids(port, log)
+    if pids is None:
+        if _can_bind_dashboard_port(host, port):
+            log.info("Poort %d is bindbaar ondanks ontbrekende netstat-inspectie.", port)
+            return True
+        log.error("Poort %d is niet bindbaar en kon niet veilig worden vrijgemaakt.", port)
+        return False
 
     if not pids:
-        log.info("Geen actief proces gevonden op poort %d.", port)
-        return
+        if _can_bind_dashboard_port(host, port):
+            log.info("Geen actief proces gevonden op poort %d.", port)
+            return True
+        log.error("Poort %d lijkt bezet maar netstat gaf geen eigenaar — startup gestopt.", port)
+        return False
 
-    for pid in pids:
-        log.info("Stoppen proces PID %d op poort %d …", pid, port)
-        try:
-            subprocess.run(
-                ["taskkill", "/PID", str(pid), "/F"],
-                capture_output=True,
-                timeout=10,
+    for pid in sorted(pids):
+        command_line = _process_command_line(pid, log)
+        if not _is_colony_dashboard_owner(pid, command_line, repo_root):
+            log.error(
+                "Poort %d bezet door onbekend proces — fail-closed | pid=%d command=%r",
+                port,
+                pid,
+                command_line[:300],
             )
-        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-            log.warning("taskkill mislukt voor PID %d: %s", pid, exc)
+            return False
+        if not _stop_pid(pid, port, log):
+            return False
 
-    # Korte pauze zodat de OS-poort vrijkomt
     time.sleep(1)
+    remaining = _list_port_listener_pids(port, log)
+    if remaining:
+        log.error("Poort %d blijft bezet na cleanup | pids=%s", port, sorted(remaining))
+        return False
+    if not _can_bind_dashboard_port(host, port):
+        log.error("Poort %d niet bindbaar na cleanup — startup gestopt.", port)
+        return False
+    return True
+
+
+def _kill_port(port: int, log: logging.Logger) -> None:
+    """Backward-compatible wrapper: stop alleen oude Colony processen."""
+    _prepare_dashboard_port(port, log)
 
 
 # ---------------------------------------------------------------------------
@@ -203,6 +296,8 @@ def _kill_port(port: int, log: logging.Logger) -> None:
 # ---------------------------------------------------------------------------
 
 _DASHBOARD_RESTART_DELAY_S = 5
+_DASHBOARD_WATCHDOG_LOCK = threading.Lock()
+_DASHBOARD_WATCHDOG_STARTED = False
 
 
 def _env_int(name: str, default: int) -> int:
@@ -233,12 +328,43 @@ def _run_dashboard_watchdog(run_fn, ctx, host: str, port: int, log: logging.Logg
             run_fn(ctx, host=host, port=port)
             log.info("Dashboard clean exit — watchdog eindigt.")
             return
-        except Exception:
+        except Exception as exc:
+            if type(exc).__name__ == "DashboardBindError":
+                log.error(
+                    "Dashboard bind failure — colony stopt fail-closed: %s",
+                    exc,
+                    exc_info=True,
+                )
+                os._exit(1)
             log.warning(
                 "Dashboard gecrasht (poging %d) — watchdog herstart.",
                 attempt,
                 exc_info=True,
             )
+
+
+def _start_dashboard_watchdog_once(
+    run_fn,
+    ctx,
+    host: str,
+    port: int,
+    log: logging.Logger,
+) -> threading.Thread | None:
+    """Start exact één dashboard-watchdog in dit proces."""
+    global _DASHBOARD_WATCHDOG_STARTED
+    with _DASHBOARD_WATCHDOG_LOCK:
+        if _DASHBOARD_WATCHDOG_STARTED:
+            log.error("Dashboard watchdog draait al — tweede instantie geweigerd.")
+            return None
+        thread = threading.Thread(
+            target=_run_dashboard_watchdog,
+            args=(run_fn, ctx, host, port, log),
+            name="dashboard-watchdog",
+            daemon=True,
+        )
+        thread.start()
+        _DASHBOARD_WATCHDOG_STARTED = True
+        return thread
 
 
 # ---------------------------------------------------------------------------
@@ -554,9 +680,14 @@ def main() -> None:
     else:
         log.warning("Geen .env gevonden vóór feature-flag checks; cwd=%s repo=%s", Path.cwd(), _REPO_ROOT)
 
-    # --- Stap 1: stop bestaand dashboard-proces op de doelpoort ---
+    # --- Stap 1: dashboardpoort veilig claimen vóór ants starten ---
     log.info("Controleren of poort %d vrij is …", args.port)
-    _kill_port(args.port, log)
+    if not _prepare_dashboard_port(args.port, log, host=args.host):
+        log.error(
+            "Dashboard poort %d niet veilig beschikbaar — colony start fail-closed.",
+            args.port,
+        )
+        sys.exit(1)
 
     # --- Stap 2: importeer colony modules (na sys.path setup) ---
     from ant_colony.biome.adapters.bitvavo_adapter import BitvavoAdapter
@@ -1900,12 +2031,16 @@ def main() -> None:
         args.host,
         args.port,
     )
-    threading.Thread(
-        target=_run_dashboard_watchdog,
-        args=(dashboard_run, context, args.host, args.port, log),
-        name="dashboard-watchdog",
-        daemon=True,
-    ).start()
+    dashboard_thread = _start_dashboard_watchdog_once(
+        dashboard_run,
+        context,
+        args.host,
+        args.port,
+        log,
+    )
+    if dashboard_thread is None:
+        log.error("Dashboard watchdog kon niet starten — colony start fail-closed.")
+        sys.exit(1)
 
     threading.Thread(
         target=_run_runtime_diagnostics,
