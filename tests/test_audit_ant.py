@@ -131,8 +131,9 @@ def findings_with(records: list[dict], *, check_name: str | None = None,
 
 
 def write_scheduler_log(logs_root: Path, timestamp: datetime, seq: int = 0) -> None:
-    """Schrijf een minimale scheduler tick naar colony/scheduler.jsonl."""
-    p = logs_root / "colony" / "scheduler.jsonl"
+    """Schrijf een minimale scheduler tick naar colony/scheduler_YYYYMMDD.jsonl."""
+    date_str = timestamp.strftime("%Y%m%d")
+    p = logs_root / "colony" / f"scheduler_{date_str}.jsonl"
     p.parent.mkdir(parents=True, exist_ok=True)
     record = {"event_type": "tick", "sequence": seq, "timestamp": timestamp.isoformat()}
     with p.open("a", encoding="utf-8") as fh:

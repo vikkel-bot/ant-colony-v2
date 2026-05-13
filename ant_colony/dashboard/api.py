@@ -727,12 +727,12 @@ def create_router(ctx: ColonyContext) -> APIRouter:
             )
 
         status = ctx.scheduler.status.value.upper()
-        last_tick = _last_tick_from_logs(ctx.logs_root)
+        last_tick = ctx.scheduler.last_tick_completed_at
 
         seconds_ago: float | None = None
         last_tick_str: str | None = None
         if last_tick is not None:
-            seconds_ago = round((now - last_tick).total_seconds(), 1)
+            seconds_ago = round(ctx.scheduler.seconds_since_last_tick(), 1)
             last_tick_str = _to_local_str(last_tick)
 
         return StatusResponse(

@@ -58,6 +58,8 @@ def _make_node(node_id: str = "node-1", biomes: list[str] | None = None) -> Node
 def _make_scheduler(status: ColonyStatus = ColonyStatus.RUNNING) -> ColonyScheduler:
     s = MagicMock(spec=ColonyScheduler)
     s.status = status
+    s.last_tick_completed_at = datetime.now(tz=timezone.utc)
+    s.seconds_since_last_tick.return_value = 2.5
     return s
 
 
@@ -191,65 +193,39 @@ class TestStatusEndpoint:
         r = _client(ctx).get("/api/status")
         assert r.json()["server_time"] is not None
 
-    def test_last_tick_from_log(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            logs = Path(tmp)
-            today = datetime.now(tz=timezone.utc).strftime("%Y%m%d")
-            log_file = logs / "colony" / f"scheduler_{today}.jsonl"
-            _write_jsonl(log_file, [{"timestamp": _now_iso(), "event_type": "tick"}])
-            ctx = ColonyContext(scheduler=_make_scheduler(), logs_root=logs)
-            r = _client(ctx).get("/api/status")
-            assert r.json()["last_tick"] is not None
-            assert r.json()["seconds_ago"] is not None
-            assert r.json()["seconds_ago"] >= 0
+    def test_last_tick_from_scheduler_object(self):
+        """last_tick en seconds_ago komen van het scheduler-object, niet van een logbestand."""
+        ctx = ColonyContext(scheduler=_make_scheduler())
+        r = _client(ctx).get("/api/status")
+        assert r.json()["last_tick"] is not None
+        assert r.json()["seconds_ago"] == 2.5
 
-    def test_status_prefers_dashboard_heartbeat_over_scheduler_tick(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            logs = Path(tmp)
-            today = datetime.now(tz=timezone.utc).strftime("%Y%m%d")
-            log_file = logs / "colony" / f"scheduler_{today}.jsonl"
-            old_tick = (datetime.now(tz=timezone.utc) - timedelta(seconds=90)).isoformat()
-            fresh_heartbeat = _now_iso()
-            _write_jsonl(
-                log_file,
-                [
-                    {"timestamp": old_tick, "event_type": "tick"},
-                    {"timestamp": fresh_heartbeat, "event_type": "dashboard_heartbeat"},
-                ],
-            )
-            ctx = ColonyContext(scheduler=_make_scheduler(), logs_root=logs)
-            r = _client(ctx).get("/api/status")
+    def test_seconds_ago_from_scheduler_method(self):
+        """seconds_ago reflecteert de waarde van seconds_since_last_tick()."""
+        scheduler = _make_scheduler()
+        scheduler.seconds_since_last_tick.return_value = 7.3
+        ctx = ColonyContext(scheduler=scheduler)
+        r = _client(ctx).get("/api/status")
+        assert r.json()["seconds_ago"] == 7.3
 
-            assert r.json()["seconds_ago"] < 15
+    def test_no_scheduler_last_tick_none(self):
+        """Zonder scheduler is last_tick None."""
+        ctx = ColonyContext()
+        r = _client(ctx).get("/api/status")
+        assert r.json()["last_tick"] is None
 
-    def test_no_log_file_last_tick_none(self):
+    def test_last_tick_no_log_file_needed(self):
+        """last_tick komt van het scheduler-object; logbestand is niet nodig."""
         with tempfile.TemporaryDirectory() as tmp:
             ctx = ColonyContext(scheduler=_make_scheduler(), logs_root=Path(tmp))
             r = _client(ctx).get("/api/status")
-            assert r.json()["last_tick"] is None
-
-    def test_last_tick_falls_back_to_yesterday(self):
-        """Als het bestand van vandaag ontbreekt, wordt gisteren gelezen."""
-        with tempfile.TemporaryDirectory() as tmp:
-            logs = Path(tmp)
-            yesterday = (datetime.now(tz=timezone.utc) - timedelta(days=1)).strftime("%Y%m%d")
-            log_file = logs / "colony" / f"scheduler_{yesterday}.jsonl"
-            _write_jsonl(log_file, [{"timestamp": _now_iso(), "event_type": "tick"}])
-            ctx = ColonyContext(scheduler=_make_scheduler(), logs_root=logs)
-            r = _client(ctx).get("/api/status")
             assert r.json()["last_tick"] is not None
 
-    def test_last_tick_ignores_archive_with_timestamp_suffix(self):
-        """Archief-bestanden (scheduler_YYYYMMDD_HHMMSS.jsonl) worden nooit gelezen."""
-        with tempfile.TemporaryDirectory() as tmp:
-            logs = Path(tmp)
-            yesterday = (datetime.now(tz=timezone.utc) - timedelta(days=1)).strftime("%Y%m%d")
-            archive = logs / "colony" / f"scheduler_{yesterday}_120000.jsonl"
-            archive.parent.mkdir(parents=True, exist_ok=True)
-            _write_jsonl(archive, [{"timestamp": _now_iso(), "event_type": "tick"}])
-            ctx = ColonyContext(scheduler=_make_scheduler(), logs_root=logs)
-            r = _client(ctx).get("/api/status")
-            assert r.json()["last_tick"] is None
+    def test_seconds_ago_is_numeric(self):
+        """seconds_ago is een getal als scheduler aanwezig is."""
+        ctx = ColonyContext(scheduler=_make_scheduler())
+        r = _client(ctx).get("/api/status")
+        assert isinstance(r.json()["seconds_ago"], (int, float))
 
 
 # ---------------------------------------------------------------------------

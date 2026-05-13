@@ -205,6 +205,9 @@ class ColonyScheduler:
 
     def start(self) -> None:
         """Blocking tick loop. Exits only on Colony kill or operator interrupt."""
+        # Reset het tick-tijdstip naar nu zodat seconds_since_last_tick() start op ~0,
+        # niet op de leeftijd van het scheduler-object (aangemaakt ~20s voor start()).
+        self._last_tick_completed_at = datetime.now(tz=timezone.utc)
         logger.info("Scheduler starting. tick_interval=%ds", self._tick_interval)
         self._log_event(AuditEventType.COLONY_HALTED, source="scheduler", payload={"action": "start"})
         self._start_watchdog()

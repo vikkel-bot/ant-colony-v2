@@ -184,13 +184,17 @@ class AuditAnt:
         if self.logs_root is None:
             return []
 
-        scheduler_log = self.logs_root / "colony" / "scheduler.jsonl"
-        if not scheduler_log.exists():
+        # Zoek de meest recente actieve scheduler log (scheduler_YYYYMMDD.jsonl).
+        # Archief-bestanden (scheduler_YYYYMMDD_HHMMSS.jsonl) worden genegeerd.
+        colony_dir = self.logs_root / "colony"
+        candidates = sorted(colony_dir.glob("scheduler_????????.jsonl"), reverse=True)
+        scheduler_log = candidates[0] if candidates else None
+        if scheduler_log is None or not scheduler_log.exists():
             return [AuditFinding(
                 severity="WARNING",
                 component="scheduler",
                 check_name="scheduler_heartbeat",
-                detail=f"Scheduler log niet gevonden: {scheduler_log}",
+                detail=f"Geen scheduler log gevonden in {colony_dir}",
             )]
 
         try:
