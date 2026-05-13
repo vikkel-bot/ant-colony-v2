@@ -142,32 +142,54 @@ def _runtime_status_fields(
 ) -> dict[str, Any]:
     warnings: list[dict[str, Any]] = []
     colony_status = _classify_colony_status(scheduler_status, seconds_ago, warnings)
-    live_mode = _derive_live_execution_mode()
-    execution_modes = _derive_execution_modes()
-    execution_permission = _execution_permission_for_mode(live_mode)
-    watchtower_status = _derive_watchtower_status(ctx.logs_root)
-    broker_status = _derive_broker_status(ctx)
-    policy_status = _derive_policy_status(live_mode)
+    live_mode = _status_component(
+        "live_execution_mode", "UNKNOWN", warnings, _derive_live_execution_mode
+    )
+    execution_modes = _status_component(
+        "execution_modes", {}, warnings, _derive_execution_modes
+    )
+    execution_permission = _status_component(
+        "execution_permission",
+        "BLOCKED",
+        warnings,
+        lambda: _execution_permission_for_mode(live_mode),
+    )
+    watchtower_status = _status_component(
+        "watchtower_status",
+        "UNKNOWN",
+        warnings,
+        lambda: _derive_watchtower_status(ctx.logs_root),
+    )
+    broker_status = _status_component(
+        "broker_status", "UNKNOWN", warnings, lambda: _derive_broker_status(ctx)
+    )
+    policy_status = _status_component(
+        "policy_status", "UNKNOWN", warnings, lambda: _derive_policy_status(live_mode)
+    )
 
-    queen_regime = None
-    wt_regime = None
-    if ctx.logs_root is not None:
-        try:
-            queen_data = _read_queen_status_data(ctx.logs_root)
-            queen_regime = queen_data.get("regime")
-        except Exception:
-            queen_regime = None
-        try:
-            state = _read_queen_watchtower_state(ctx.logs_root)
-            wt_regime = (state or {}).get("last_regime")
-        except Exception:
-            wt_regime = None
+    queen_regime = _status_component(
+        "queen_regime",
+        None,
+        warnings,
+        lambda: _read_status_queen_regime(ctx.logs_root),
+    )
+    wt_regime = _status_component(
+        "watchtower_regime",
+        None,
+        warnings,
+        lambda: _read_status_watchtower_regime(ctx.logs_root),
+    )
 
-    regime = build_regime_snapshot(
-        macro_source=queen_regime,
-        structure_source=queen_regime,
-        watchtower_source=wt_regime,
-        execution_permission=execution_permission,
+    regime = _status_component(
+        "regime_schema",
+        build_regime_snapshot().as_dict(),
+        warnings,
+        lambda: build_regime_snapshot(
+            macro_source=queen_regime,
+            structure_source=queen_regime,
+            watchtower_source=wt_regime,
+            execution_permission=execution_permission,
+        ).as_dict(),
     )
     return {
         "colony_status": colony_status,
@@ -176,9 +198,72 @@ def _runtime_status_fields(
         "broker_status": broker_status,
         "policy_status": policy_status,
         "execution_modes": execution_modes,
-        **regime.as_dict(),
+        **regime,
         "warnings": warnings,
     }
+
+
+def _status_component(
+    component: str,
+    fallback: Any,
+    warnings: list[dict[str, Any]],
+    fn,
+) -> Any:
+    """Voer een /api/status subcomponent defensief uit zonder endpoint-failures."""
+    started = time.monotonic()
+    try:
+        value = fn()
+    except Exception as exc:
+        warnings.append({
+            "component": component,
+            "severity": "warning",
+            "age_seconds": None,
+            "impact": "status subcomponent onbekend",
+            "message": f"{component} kon niet worden bepaald",
+            "error_type": type(exc).__name__,
+        })
+        logger.warning(
+            "/api/status component mislukt | component=%s error_type=%s",
+            component,
+            type(exc).__name__,
+        )
+        return fallback
+
+    elapsed = time.monotonic() - started
+    if elapsed > 0.5:
+        logger.warning(
+            "Langzame /api/status component | component=%s duur=%.3fs",
+            component,
+            elapsed,
+        )
+    return value
+
+
+def _status_response_fallback(
+    *,
+    status: str = "UNKNOWN",
+    last_tick: str | None = None,
+    seconds_ago: float | None = None,
+    now: datetime | None = None,
+    warnings: list[dict[str, Any]] | None = None,
+) -> "StatusResponse":
+    """Bouw een veilige /api/status fallback response."""
+    warning_list = list(warnings or [])
+    regime = build_regime_snapshot(execution_permission="BLOCKED").as_dict()
+    return StatusResponse(
+        status=status,
+        last_tick=last_tick,
+        seconds_ago=seconds_ago,
+        server_time=_to_local_str(now or datetime.now(tz=timezone.utc)),
+        colony_status="RUNNING_WARN" if status == "RUNNING" else "UNKNOWN",
+        live_execution_mode="UNKNOWN",
+        watchtower_status="UNKNOWN",
+        broker_status="UNKNOWN",
+        policy_status="UNKNOWN",
+        execution_modes={},
+        **regime,
+        warnings=warning_list,
+    )
 
 
 def _classify_colony_status(
@@ -305,23 +390,40 @@ def _derive_policy_status(live_mode: str) -> str:
 
 
 def _derive_broker_status(ctx: ColonyContext) -> str:
-    registry = ctx.biome_registry
-    if registry is None:
+    """
+    Cache-only brokerstatus voor /api/status.
+
+    Belangrijk: deze helper mag GEEN adapter methods aanroepen. Live broker checks
+    horen thuis in /api/brokers en /api/capital; /api/status moet altijd snel zijn.
+    """
+    if ctx.logs_root is None:
         return "UNKNOWN"
-    seen = False
-    connected = False
-    for biome_id in registry.list_biomes():
-        adapter = registry.get(biome_id)
-        if adapter is None:
+    return _read_cached_broker_status(ctx.logs_root) or "UNKNOWN"
+
+
+def _read_cached_broker_status(logs_root: Path) -> str | None:
+    allowed = {"CONNECTED", "DISCONNECTED", "UNKNOWN"}
+    for path in (
+        logs_root / "brokers" / "status.jsonl",
+        logs_root / "broker" / "status.jsonl",
+        logs_root / "colony" / "broker_status.jsonl",
+    ):
+        if not path.exists():
             continue
-        seen = True
         try:
-            connected = connected or bool(adapter.is_available())
+            records = _read_jsonl_tail_cached(path, limit=5)
         except Exception:
-            return "UNKNOWN"
-    if not seen:
-        return "UNKNOWN"
-    return "CONNECTED" if connected else "DISCONNECTED"
+            continue
+        for rec in reversed(records):
+            payload = rec.get("payload") if isinstance(rec.get("payload"), dict) else rec
+            raw = str(payload.get("broker_status") or payload.get("status") or "").upper()
+            if raw in allowed:
+                return raw
+            if payload.get("connected") is True:
+                return "CONNECTED"
+            if payload.get("connected") is False:
+                return "DISCONNECTED"
+    return None
 
 
 def _derive_watchtower_status(logs_root: Path | None) -> str:
@@ -342,6 +444,29 @@ def _derive_watchtower_status(logs_root: Path | None) -> str:
     if age <= 3600:
         return "STALE"
     return "OFFLINE"
+
+
+def _read_status_queen_regime(logs_root: Path | None) -> str | None:
+    """Lees alleen het laatste Queen-regime record voor /api/status."""
+    if logs_root is None:
+        return None
+    regime_path = logs_root / "queen" / "regime.jsonl"
+    if not regime_path.exists():
+        return None
+    records = _read_jsonl_tail_cached(regime_path, limit=1)
+    if not records:
+        return None
+    rec = records[-1]
+    payload = rec.get("payload") if isinstance(rec.get("payload"), dict) else rec
+    return payload.get("regime") or payload.get("macro_regime") or payload.get("structure_regime")
+
+
+def _read_status_watchtower_regime(logs_root: Path | None) -> str | None:
+    """Lees alleen kleine Watchtower Queen-state voor /api/status."""
+    if logs_root is None:
+        return None
+    state = _read_queen_watchtower_state(logs_root)
+    return (state or {}).get("last_regime")
 
 
 # ---------------------------------------------------------------------------
@@ -976,35 +1101,87 @@ def create_router(ctx: ColonyContext) -> APIRouter:
     @router.get("/status", response_model=StatusResponse)
     def get_status() -> StatusResponse:
         """Colony status en laatste dashboard heartbeat timestamp."""
+        started = time.monotonic()
         now = datetime.now(tz=timezone.utc)
+        try:
+            if ctx.scheduler is None:
+                runtime = _runtime_status_fields(ctx, "UNKNOWN", None)
+                return StatusResponse(
+                    status="UNKNOWN",
+                    last_tick=None,
+                    seconds_ago=None,
+                    server_time=_to_local_str(now),
+                    **runtime,
+                )
 
-        if ctx.scheduler is None:
-            runtime = _runtime_status_fields(ctx, "UNKNOWN", None)
+            try:
+                status = ctx.scheduler.status.value.upper()
+            except Exception as exc:
+                warning = {
+                    "component": "scheduler",
+                    "severity": "warning",
+                    "age_seconds": None,
+                    "impact": "scheduler status onbekend",
+                    "message": "Scheduler status kon niet worden gelezen",
+                    "error_type": type(exc).__name__,
+                }
+                return _status_response_fallback(now=now, warnings=[warning])
+
+            try:
+                last_tick = ctx.scheduler.last_tick_completed_at
+            except Exception:
+                last_tick = None
+
+            seconds_ago: float | None = None
+            last_tick_str: str | None = None
+            if last_tick is not None:
+                try:
+                    if last_tick.tzinfo is None:
+                        last_tick = last_tick.replace(tzinfo=timezone.utc)
+                    seconds_ago = round(max(0.0, (now - last_tick).total_seconds()), 1)
+                    last_tick_str = _to_local_str(last_tick)
+                except Exception as exc:
+                    runtime_warning = {
+                        "component": "scheduler",
+                        "severity": "warning",
+                        "age_seconds": None,
+                        "impact": "heartbeat leeftijd onbekend",
+                        "message": "Scheduler tick-leeftijd kon niet worden gelezen",
+                        "error_type": type(exc).__name__,
+                    }
+                    runtime = _runtime_status_fields(ctx, status, None)
+                    runtime["warnings"].append(runtime_warning)
+                    return StatusResponse(
+                        status=status,
+                        last_tick=None,
+                        seconds_ago=None,
+                        server_time=_to_local_str(now),
+                        **runtime,
+                    )
+
+            runtime = _runtime_status_fields(ctx, status, seconds_ago)
             return StatusResponse(
-                status="UNKNOWN",
-                last_tick=None,
-                seconds_ago=None,
+                status=status,
+                last_tick=last_tick_str,
+                seconds_ago=seconds_ago,
                 server_time=_to_local_str(now),
                 **runtime,
             )
-
-        status = ctx.scheduler.status.value.upper()
-        last_tick = ctx.scheduler.last_tick_completed_at
-
-        seconds_ago: float | None = None
-        last_tick_str: str | None = None
-        if last_tick is not None:
-            seconds_ago = round(ctx.scheduler.seconds_since_last_tick(), 1)
-            last_tick_str = _to_local_str(last_tick)
-
-        runtime = _runtime_status_fields(ctx, status, seconds_ago)
-        return StatusResponse(
-            status=status,
-            last_tick=last_tick_str,
-            seconds_ago=seconds_ago,
-            server_time=_to_local_str(now),
-            **runtime,
-        )
+        except Exception as exc:
+            warning = {
+                "component": "status",
+                "severity": "warning",
+                "age_seconds": None,
+                "impact": "status fallback actief",
+                "message": "/api/status viel terug op veilige defaults",
+                "error_type": type(exc).__name__,
+            }
+            logger.exception("/api/status fallback actief")
+            return _status_response_fallback(now=now, warnings=[warning])
+        finally:
+            elapsed = time.monotonic() - started
+            if elapsed > 0.5:
+                logger.warning("Langzame /api/status build | duur=%.3fs", elapsed)
 
     # ------------------------------------------------------------------
     # GET /api/metrics

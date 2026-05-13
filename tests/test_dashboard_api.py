@@ -200,15 +200,18 @@ class TestStatusEndpoint:
         ctx = ColonyContext(scheduler=_make_scheduler())
         r = _client(ctx).get("/api/status")
         assert r.json()["last_tick"] is not None
-        assert r.json()["seconds_ago"] == 2.5
+        assert r.json()["seconds_ago"] >= 0.0
 
-    def test_seconds_ago_from_scheduler_method(self):
-        """seconds_ago reflecteert de waarde van seconds_since_last_tick()."""
+    def test_seconds_ago_calculated_without_scheduler_method(self):
+        """seconds_ago wordt lokaal berekend zodat de scheduler-method niet kan blokkeren."""
         scheduler = _make_scheduler()
-        scheduler.seconds_since_last_tick.return_value = 7.3
+        scheduler.last_tick_completed_at = datetime.now(tz=timezone.utc) - timedelta(seconds=7.3)
+        scheduler.seconds_since_last_tick.side_effect = AssertionError("mag niet worden aangeroepen")
         ctx = ColonyContext(scheduler=scheduler)
         r = _client(ctx).get("/api/status")
-        assert r.json()["seconds_ago"] == 7.3
+        assert r.status_code == 200
+        assert r.json()["seconds_ago"] == pytest.approx(7.3, abs=0.5)
+        scheduler.seconds_since_last_tick.assert_not_called()
 
     def test_no_scheduler_last_tick_none(self):
         """Zonder scheduler is last_tick None."""
@@ -250,14 +253,67 @@ class TestStatusEndpoint:
         }
         assert d["execution_modes"]["live_execution_allowed"] is False
 
+    def test_status_does_not_call_broker_adapter(self):
+        adapter = MagicMock()
+        adapter.is_available.side_effect = AssertionError("status endpoint mag geen broker check doen")
+        registry = MagicMock()
+        registry.list_biomes.side_effect = AssertionError("status endpoint mag registry niet scannen")
+        registry.get.return_value = adapter
+
+        ctx = ColonyContext(scheduler=_make_scheduler(), biome_registry=registry)
+        r = _client(ctx).get("/api/status")
+        d = r.json()
+
+        assert r.status_code == 200
+        assert d["broker_status"] == "UNKNOWN"
+        registry.list_biomes.assert_not_called()
+        registry.get.assert_not_called()
+        adapter.is_available.assert_not_called()
+
+    def test_status_returns_if_adapter_would_hang(self):
+        def would_hang():
+            raise AssertionError("would block if called")
+
+        adapter = MagicMock()
+        adapter.is_available.side_effect = would_hang
+        registry = MagicMock()
+        registry.list_biomes.return_value = ["crypto"]
+        registry.get.return_value = adapter
+        ctx = ColonyContext(scheduler=_make_scheduler(), biome_registry=registry)
+
+        started = datetime.now(tz=timezone.utc)
+        r = _client(ctx).get("/api/status")
+        elapsed = (datetime.now(tz=timezone.utc) - started).total_seconds()
+
+        assert r.status_code == 200
+        assert elapsed < 1.0
+        assert r.json()["broker_status"] == "UNKNOWN"
+        adapter.is_available.assert_not_called()
+
+    def test_status_component_failure_returns_json(self, monkeypatch):
+        def boom(_logs_root):
+            raise RuntimeError("watchtower reader exploded")
+
+        monkeypatch.setattr("ant_colony.dashboard.api._derive_watchtower_status", boom)
+        r = _client(ColonyContext(scheduler=_make_scheduler())).get("/api/status")
+        d = r.json()
+
+        assert r.status_code == 200
+        assert d["watchtower_status"] == "UNKNOWN"
+        assert any(
+            w.get("component") == "watchtower_status"
+            and w.get("error_type") == "RuntimeError"
+            for w in d["warnings"]
+        )
+
     def test_status_stale_tick_has_specific_warning(self):
         scheduler = _make_scheduler()
-        scheduler.seconds_since_last_tick.return_value = 301.0
+        scheduler.last_tick_completed_at = datetime.now(tz=timezone.utc) - timedelta(seconds=301)
         ctx = ColonyContext(scheduler=scheduler)
         d = _client(ctx).get("/api/status").json()
         assert d["colony_status"] == "BLOCKED"
         assert d["warnings"][0]["component"] == "heartbeat"
-        assert d["warnings"][0]["age_seconds"] == 301.0
+        assert d["warnings"][0]["age_seconds"] == pytest.approx(301.0, abs=0.5)
 
 
 # ---------------------------------------------------------------------------
