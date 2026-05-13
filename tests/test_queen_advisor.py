@@ -743,7 +743,8 @@ def test_diverse_top_n_logs_selected_mix(caplog) -> None:
     with caplog.at_level("INFO", logger="ant_colony.queen.queen_advisor"):
         select_diverse_top_n(cands, n=3)
 
-    assert any("Queen diversiteit" in rec.message for rec in caplog.records)
+    assert any("queen_selection_diversity" in rec.message for rec in caplog.records)
+    assert any("layer=queen_selection" in rec.message for rec in caplog.records)
 
 
 def test_stagnant_top3_strategy_type_deprioritized(tmp_path: Path) -> None:

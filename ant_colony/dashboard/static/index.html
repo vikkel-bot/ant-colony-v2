@@ -1199,6 +1199,7 @@ const S = {
     watchtower_status:'UNKNOWN', broker_status:'UNKNOWN',
     policy_status:'UNKNOWN', macro_regime:'UNKNOWN',
     structure_regime:'UNKNOWN', execution_permission:'BLOCKED',
+    execution_modes:{},
     warnings:[],
   },
   metrics:     { capital_total:0, capital_allocated:0, capital_available:0, capital_in_use:null, active_ants:0, utilization_pct:0 },
@@ -1208,6 +1209,7 @@ const S = {
   ticker:      { events:[] },
   activity:    { ants:[] },
   queenStatus: null,
+  paperDiagnostics: { trades:0, win_rate:null, expectancy:null, avg_win:null, avg_loss:null, max_drawdown:null, exit_reasons:{} },
   perfChart:   { points:[], total_pnl:0, curve_label:'vandaag', dag:0, week:0, maand:0, jaar:0, alltime:0 },
   equities:    null,
   equitiesPositions: { open_positions:[], closed_positions:[], summary:{}, fetched_at:'' },
@@ -1285,12 +1287,13 @@ async function fetchAll() {
   const get = url => _fetchQ(() => fetch(url)
     .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
     .catch(e => { console.error(`[dashboard] GET ${url} failed:`, e.message); return null; }));
-  const [st, me, br, cap, pos, ti, act, qs, pc, eq, eqp, wtr, oq, nw, brf, wt] = await Promise.all([
+  const [st, me, br, cap, pos, ti, act, qs, pc, pd, eq, eqp, wtr, oq, nw, brf, wt] = await Promise.all([
     get('/api/status'), get('/api/metrics'),
     get('/api/brokers'), get('/api/capital'),
     get('/api/positions'),
     get('/api/ticker'), get('/api/ants/activity'),
     get('/api/queen/status'), get('/api/performance/chart'),
+    get('/api/paper/diagnostics'),
     get('/api/equities/status'),
     get('/api/equities/positions'),
     get('/api/watchtower/signals/received'),
@@ -1322,6 +1325,7 @@ async function fetchAll() {
   if (act) S.activity    = act;
   if (qs)  S.queenStatus = qs;
   if (pc)  S.perfChart   = pc;
+  if (pd)  S.paperDiagnostics = pd;
   if (eq)  S.equities    = eq;
   if (eqp) S.equitiesPositions = eqp;
   if (wtr) S.watchtowerReceived = wtr;
@@ -1417,7 +1421,9 @@ function renderStatus() {
   const strip = document.getElementById('runtime-strip');
   if (strip) {
     const chips = [
-      ['LIVE', S.status.live_execution_mode],
+      ['CRYPTO', (S.status.execution_modes || {}).crypto_mode || S.status.live_execution_mode],
+      ['EQUITY', (S.status.execution_modes || {}).equities_mode || S.status.live_execution_mode],
+      ['COMMOD', (S.status.execution_modes || {}).commodities_mode || 'UNKNOWN'],
       ['WT', S.status.watchtower_status],
       ['BROKER', S.status.broker_status],
       ['POLICY', S.status.policy_status],
@@ -1585,6 +1591,10 @@ function renderPnlSplit() {
   const fEur = v => (v >= 0 ? '+' : '') + v.toFixed(2) + ' €';
   const fPct = v => (v >= 0 ? '+' : '') + v.toFixed(2) + '%';
   const col  = v => v >= 0 ? 'var(--green)' : 'var(--red)';
+  const diag = S.paperDiagnostics || {};
+  const diagWr = diag.win_rate == null ? '—' : Math.round(diag.win_rate * 100) + '%';
+  const diagExp = diag.expectancy == null ? '—' : fEur(Number(diag.expectancy));
+  const diagDd = diag.max_drawdown == null ? '—' : '€ ' + Number(diag.max_drawdown).toFixed(2);
 
   el.innerHTML = `
     <div class="pnl-split-col">
@@ -1596,6 +1606,11 @@ function renderPnlSplit() {
       <div class="pnl-split-lbl">EQUITIES</div>
       <div class="pnl-split-val" style="color:${col(ePnl)}">${fEur(ePnl)} <span style="font-size:11px">${fPct(ePct)}</span></div>
       <div class="pnl-split-meta">${eCount} open positie${eCount !== 1 ? 's' : ''}</div>
+    </div>
+    <div class="pnl-split-col">
+      <div class="pnl-split-lbl">PAPER DIAGNOSTIEK</div>
+      <div class="pnl-split-val" style="color:${col(diag.expectancy || 0)}">exp ${diagExp} <span style="font-size:11px">wr ${diagWr}</span></div>
+      <div class="pnl-split-meta">${diag.trades || 0} gesloten · DD ${diagDd}</div>
     </div>
   `;
 }
@@ -2490,6 +2505,7 @@ function renderClosedEquitiesPositions() {
 
 function renderWatchtowerReceivedEquities() {
   const data = S.watchtowerReceived || {};
+  const policy = (data.summary && data.summary.commodity_policy) || {};
   const rows = (data.signals || []).slice(0, 50);
   const last24 = rows.filter(s => {
     try { return (Date.now() - new Date(s.timestamp).getTime()) <= 24 * 3600 * 1000; }
@@ -2516,6 +2532,12 @@ function renderWatchtowerReceivedEquities() {
   return `<div class="card">
     <div class="eq-header"><div class="card-title" style="margin:0">Watchtower Signalen Ontvangen <span style="color:var(--faint);font-weight:600">(laatste 24u)</span></div>${eqBadge(`${last24.length} signals`, last24.length ? 'signaal' : 'wacht')}</div>
     ${table}
+    <div class="eq-summary-line">
+      <span>Commodities toegestaan: <strong>${h((policy.allowed_assets || []).join(', ') || '—')}</strong></span>
+      <span>Geblokkeerd: <strong>${policy.blocked_count || 0}</strong></span>
+      <span>Live: <strong>${policy.live_allowed ? 'JA' : 'NEE'}</strong></span>
+      <span>Paper: <strong>${policy.paper_allowed ? 'JA' : 'NEE'}</strong></span>
+    </div>
   </div>`;
 }
 

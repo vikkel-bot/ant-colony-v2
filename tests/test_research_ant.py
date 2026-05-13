@@ -1093,6 +1093,46 @@ class TestCheckStrategyDiversity:
         assert not warning_msgs
 
 
+class TestRejectedCandidateCooldown:
+
+    def test_same_rejected_candidate_suppressed_within_cooldown(self, tmp_path):
+        ant = make_ant(tmp_path)
+
+        kwargs = {
+            "symbol": "BTC-EUR",
+            "signal_type": "sma_crossover",
+            "direction": "long",
+            "parameters": {"short_window": 20, "long_window": 50},
+            "sharpe": _SHARPE_THRESHOLD - 0.01,
+            "win_rate": _WIN_RATE_THRESHOLD + 0.1,
+            "total_trades": 20,
+        }
+        ant._record_rejected_candidate(**kwargs)
+        ant._record_rejected_candidate(**kwargs)
+
+        assert ant._reject_tick_new == 1
+        assert ant._reject_tick_suppressed == 1
+        assert ant._reject_tick_reasons["sharpe"] == 2
+
+    def test_different_rejected_candidate_not_suppressed(self, tmp_path):
+        ant = make_ant(tmp_path)
+
+        base = {
+            "symbol": "BTC-EUR",
+            "signal_type": "sma_crossover",
+            "direction": "long",
+            "sharpe": _SHARPE_THRESHOLD + 0.2,
+            "win_rate": _WIN_RATE_THRESHOLD - 0.01,
+            "total_trades": 20,
+        }
+        ant._record_rejected_candidate(parameters={"short_window": 20}, **base)
+        ant._record_rejected_candidate(parameters={"short_window": 21}, **base)
+
+        assert ant._reject_tick_new == 2
+        assert ant._reject_tick_suppressed == 0
+        assert ant._reject_tick_reasons["win_rate"] == 2
+
+
 # ---------------------------------------------------------------------------
 # Commodity watchtower signalen
 # ---------------------------------------------------------------------------

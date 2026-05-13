@@ -537,6 +537,56 @@ class TestWatchtowerReceivedEndpoint:
         assert d["summary"]["rejected_24h"] == 1
         assert d["summary"]["last_signal"]["asset"] in {"AAPL", "BTC-EUR"}
 
+    def test_commodity_policy_summary_shows_allowed_and_blocked(self, tmp_path: Path):
+        ts = _now_iso()
+        _write_jsonl(tmp_path / "watchtower" / "signals.jsonl", [{
+            "timestamp": ts,
+            "received": 3,
+            "passed_filter": 1,
+            "signals": [{
+                "id": "sig-natgas",
+                "asset": "NATGAS",
+                "asset_class": "commodity",
+                "direction": "long",
+                "timestamp": ts,
+                "entry_score": 0.62,
+                "confidence": 0.58,
+            }],
+            "rejections": [
+                {
+                    "id": "sig-brent",
+                    "asset": "BRENT",
+                    "asset_class": "commodity",
+                    "direction": "long",
+                    "timestamp": ts,
+                    "entry_score": 0.61,
+                    "confidence": 0.57,
+                    "rejection_reason": "asset_blocked",
+                },
+                {
+                    "id": "sig-copper",
+                    "asset": "COPPER",
+                    "asset_class": "commodity",
+                    "direction": "long",
+                    "timestamp": ts,
+                    "entry_score": 0.42,
+                    "confidence": 0.57,
+                    "rejection_reason": "score_too_low",
+                },
+            ],
+        }])
+
+        d = _client(ColonyContext(logs_root=tmp_path)).get("/api/watchtower/signals/received").json()
+        policy = d["summary"]["commodity_policy"]
+        assert policy["allowed_assets"] == ["COPPER", "NATGAS", "SILVER"]
+        assert policy["allowed_count"] == 1
+        assert policy["blocked_count"] == 2
+        assert "BRENT" in policy["blocked_assets"]
+        assert policy["reason_counts"]["commodity_route_not_configured"] == 1
+        assert policy["reason_counts"]["score_too_low"] == 1
+        assert policy["live_allowed"] is False
+        assert policy["paper_allowed"] is True
+
     def test_queen_status_reads_watchtower_state(self, tmp_path: Path):
         ts = _now_iso()
         state = {

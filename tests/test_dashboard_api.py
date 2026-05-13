@@ -240,6 +240,15 @@ class TestStatusEndpoint:
         assert d["policy_status"]
         assert d["macro_regime"] == "UNKNOWN"
         assert d["structure_regime"] == "UNKNOWN"
+        assert set(d["execution_modes"]) >= {
+            "crypto_mode",
+            "equities_mode",
+            "commodities_mode",
+            "live_execution_enabled",
+            "manual_approval_required",
+            "live_execution_allowed",
+        }
+        assert d["execution_modes"]["live_execution_allowed"] is False
 
     def test_status_stale_tick_has_specific_warning(self):
         scheduler = _make_scheduler()
@@ -372,6 +381,77 @@ class TestPerformanceEndpoint:
             d = r.json()
             assert d["day"] == 0.0
             assert d["alltime"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# TestPaperDiagnosticsEndpoint
+# ---------------------------------------------------------------------------
+
+class TestPaperDiagnosticsEndpoint:
+
+    def test_empty_ledger_safe_defaults(self, tmp_path: Path):
+        d = _client(ColonyContext(logs_root=tmp_path)).get("/api/paper/diagnostics").json()
+        assert d["trades"] == 0
+        assert d["win_rate"] is None
+        assert d["expectancy"] is None
+        assert d["max_drawdown"] is None
+        assert d["by_strategy"] == []
+
+    def test_ledger_metrics_and_buckets(self, tmp_path: Path):
+        t1 = (datetime.now(tz=timezone.utc) - timedelta(hours=3)).isoformat()
+        t2 = (datetime.now(tz=timezone.utc) - timedelta(hours=2)).isoformat()
+        t3 = (datetime.now(tz=timezone.utc) - timedelta(hours=1)).isoformat()
+        trades = [
+            {
+                "position_id": "p1",
+                "symbol": "XLK",
+                "strategy_type": "momentum",
+                "biome": "equities",
+                "source": "sector_scout",
+                "exit_reason": "TP",
+                "realized_pnl": 10.0,
+                "closed_at": t1,
+            },
+            {
+                "position_id": "p2",
+                "symbol": "AAPL",
+                "strategy_type": "momentum",
+                "biome": "equities",
+                "source": "sector_scout",
+                "exit_reason": "SL",
+                "realized_pnl": -5.0,
+                "closed_at": t2,
+            },
+            {
+                "position_id": "p3",
+                "symbol": "BTC-EUR",
+                "strategy_type": "sma_crossover",
+                "biome": "crypto",
+                "source": "research_ant",
+                "exit_reason": "TTL",
+                "realized_pnl": 20.0,
+                "closed_at": t3,
+            },
+        ]
+        _write_jsonl(tmp_path / "paper" / "m-1_trades.jsonl", trades)
+        _write_jsonl(tmp_path / "paper" / "ant.jsonl", [{
+            "timestamp": t3,
+            "payload": {"action": "trade_closed", **trades[-1]},
+        }])
+
+        d = _client(ColonyContext(logs_root=tmp_path)).get("/api/paper/diagnostics").json()
+        assert d["trades"] == 3
+        assert d["wins"] == 2
+        assert d["losses"] == 1
+        assert d["win_rate"] == pytest.approx(2 / 3, rel=1e-4)
+        assert d["avg_win"] == pytest.approx(15.0)
+        assert d["avg_loss"] == pytest.approx(-5.0)
+        assert d["expectancy"] == pytest.approx(25.0 / 3, rel=1e-4)
+        assert d["max_drawdown"] == pytest.approx(5.0)
+        assert d["exit_reasons"] == {"TP": 1, "SL": 1, "TTL": 1}
+        by_strategy = {row["key"]: row for row in d["by_strategy"]}
+        assert by_strategy["momentum"]["trades"] == 2
+        assert by_strategy["sma_crossover"]["total_pnl"] == pytest.approx(20.0)
 
 
 # ---------------------------------------------------------------------------

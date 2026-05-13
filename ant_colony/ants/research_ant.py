@@ -58,6 +58,7 @@ _TP_PCT             = 0.06  # 6 % take-profit voor backtests
 _SL_PCT             = 0.03  # 3 % stop-loss voor backtests
 _MAX_BARS_HELD      = 10
 _RESEARCH_WATCHDOG_SECONDS = float(os.getenv("RESEARCH_ANT_WATCHDOG_SECONDS", "600"))
+_REJECT_LOG_COOLDOWN_SECONDS = float(os.getenv("RESEARCH_REJECT_LOG_COOLDOWN_SECONDS", "1800"))
 
 # Commodity symbool → yfinance ticker mapping
 _COMMODITY_YFINANCE_TICKERS: dict[str, str] = {
@@ -117,6 +118,10 @@ class ResearchAnt:
         # Deduplicatie: sla de laatste geëmitteerde candidate_id op per (symbol, signal_type).
         # Voorkomt dat dezelfde kandidaat meerdere ticks achtereen gelogd wordt.
         self._last_emitted: dict[tuple[str, str], str] = {}
+        self._last_rejected: dict[tuple[str, str, str, str], float] = {}
+        self._reject_tick_new: int = 0
+        self._reject_tick_suppressed: int = 0
+        self._reject_tick_reasons: dict[str, int] = {}
         self._seen_ingestion_ids: set[str] = self._preload_seen_ingestion_ids(logs_root)
 
         self._backtester = Backtester()
@@ -255,6 +260,9 @@ class ResearchAnt:
             else "1h"
         )
         symbols_scanned = 0
+        self._reject_tick_new = 0
+        self._reject_tick_suppressed = 0
+        self._reject_tick_reasons = {}
 
         for symbol in self.mission.market_scope.symbols:
             symbols_scanned += 1
@@ -283,6 +291,9 @@ class ResearchAnt:
                 "symbols_scanned": symbols_scanned,
                 "duration_seconds": round(monotonic() - tick_started, 3),
                 "watchdog_restarts": self._watchdog_restarts,
+                "rejected_new": self._reject_tick_new,
+                "rejected_suppressed": self._reject_tick_suppressed,
+                "rejected_reasons_count": dict(self._reject_tick_reasons),
             }
         )
 
@@ -769,13 +780,14 @@ class ResearchAnt:
         win_rate = results.win_rate or 0.0
 
         if sharpe < _SHARPE_THRESHOLD or win_rate < _WIN_RATE_THRESHOLD:
-            self._log.info(
-                "Kandidaat REJECTED | %s %s | direction=%s sharpe=%.3f (min %.2f)"
-                " win_rate=%.3f (min %.2f) trades=%s",
-                symbol, signal_type, direction,
-                sharpe, _SHARPE_THRESHOLD,
-                win_rate, _WIN_RATE_THRESHOLD,
-                results.total_trades,
+            self._record_rejected_candidate(
+                symbol=symbol,
+                signal_type=signal_type,
+                direction=direction,
+                parameters=parameters,
+                sharpe=sharpe,
+                win_rate=win_rate,
+                total_trades=results.total_trades,
             )
             return
 
@@ -831,6 +843,40 @@ class ResearchAnt:
         )
         self._validate_with_lean(candidate, internal_sharpe=sharpe)
         self._write_candidate_log(candidate, direction=direction)
+
+    def _record_rejected_candidate(
+        self,
+        *,
+        symbol: str,
+        signal_type: str,
+        direction: str,
+        parameters: dict,
+        sharpe: float,
+        win_rate: float,
+        total_trades: int,
+    ) -> None:
+        """Log nieuwe rejects, maar onderdruk herhalingen binnen de cooldown."""
+        reason = "sharpe" if sharpe < _SHARPE_THRESHOLD else "win_rate"
+        self._reject_tick_reasons[reason] = self._reject_tick_reasons.get(reason, 0) + 1
+        params_hash = json.dumps(parameters, sort_keys=True, default=str)
+        key = (symbol, signal_type, direction, params_hash)
+        now = monotonic()
+        last = self._last_rejected.get(key)
+        if last is not None and now - last < _REJECT_LOG_COOLDOWN_SECONDS:
+            self._reject_tick_suppressed += 1
+            return
+
+        self._last_rejected[key] = now
+        self._reject_tick_new += 1
+        self._log.info(
+            "Kandidaat REJECTED | %s %s | direction=%s sharpe=%.3f (min %.2f)"
+            " win_rate=%.3f (min %.2f) trades=%s reason=%s",
+            symbol, signal_type, direction,
+            sharpe, _SHARPE_THRESHOLD,
+            win_rate, _WIN_RATE_THRESHOLD,
+            total_trades,
+            reason,
+        )
 
     # ------------------------------------------------------------------
     # Optional Lean validation
@@ -983,7 +1029,7 @@ class ResearchAnt:
 
     def _check_strategy_diversity(self) -> None:
         """
-        Log een WARNING als de top 3 Queen-strategieën allemaal hetzelfde strategy_type hebben.
+        Log een WARNING als de lokale research-top 3 hetzelfde strategy_type heeft.
 
         Leest ANT_LOGS/research/*.jsonl, sorteert op sharpe, bekijkt top 3.
         """
@@ -1016,15 +1062,25 @@ class ResearchAnt:
             return
 
         top3 = sorted(candidates, key=lambda c: float(c.get("sharpe") or 0), reverse=True)[:3]
+        counts: dict[str, int] = {}
+        for candidate in candidates:
+            st = str(candidate.get("strategy_type") or "unknown")
+            counts[st] = counts.get(st, 0) + 1
         types = {c.get("strategy_type") for c in top3}
 
         if len(types) == 1:
             sole_type = next(iter(types))
             self._log.warning(
-                "Queen ziet alleen één strategy_type — diversiteit laag | "
-                "type=%s top3_sharpes=%s",
+                "research_diversity_low | layer=research diversiteit=laag type=%s top3_sharpes=%s counts=%s",
                 sole_type,
                 [round(float(c.get("sharpe") or 0), 3) for c in top3],
+                counts,
+            )
+        else:
+            self._log.info(
+                "research_diversity | layer=research diversiteit=ok top3_types=%s counts=%s",
+                sorted(str(t) for t in types),
+                counts,
             )
 
     # ------------------------------------------------------------------

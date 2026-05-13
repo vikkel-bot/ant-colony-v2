@@ -177,6 +177,7 @@ class Queen:
         self._node_registry: NodeRegistry = NodeRegistry()
         self._log_sequence: int = 0
         self._watchtower_lock = RLock()
+        self._watchtower_write_lock = RLock()
         self._watchtower_state: dict = self._load_watchtower_state()
         self._watchtower_persist_event = Event()
         self._watchtower_persist_thread: Thread | None = None
@@ -817,11 +818,12 @@ class Queen:
         with self._watchtower_lock:
             snapshot = dict(self._watchtower_state or {})
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(
-                json.dumps(snapshot, ensure_ascii=False, indent=2, default=str),
-                encoding="utf-8",
-            )
+            with self._watchtower_write_lock:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(
+                    json.dumps(snapshot, ensure_ascii=False, indent=2, default=str),
+                    encoding="utf-8",
+                )
         except OSError:
             logger.exception("Watchtower Queen-state kon niet geschreven worden: %s", path)
 
@@ -851,6 +853,7 @@ class Queen:
 
     def flush_watchtower_state(self) -> None:
         """Forceer een synchrone state-write voor tests en shutdown hooks."""
+        self._watchtower_persist_event.clear()
         self._persist_watchtower_state()
 
     # ------------------------------------------------------------------

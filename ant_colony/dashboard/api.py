@@ -143,6 +143,7 @@ def _runtime_status_fields(
     warnings: list[dict[str, Any]] = []
     colony_status = _classify_colony_status(scheduler_status, seconds_ago, warnings)
     live_mode = _derive_live_execution_mode()
+    execution_modes = _derive_execution_modes()
     execution_permission = _execution_permission_for_mode(live_mode)
     watchtower_status = _derive_watchtower_status(ctx.logs_root)
     broker_status = _derive_broker_status(ctx)
@@ -174,6 +175,7 @@ def _runtime_status_fields(
         "watchtower_status": watchtower_status,
         "broker_status": broker_status,
         "policy_status": policy_status,
+        "execution_modes": execution_modes,
         **regime.as_dict(),
         "warnings": warnings,
     }
@@ -253,6 +255,31 @@ def _derive_live_execution_mode() -> str:
     if crypto_paper or equities_paper or _env_bool("EQUITIES_ENABLED", False):
         return "PAPER_ONLY"
     return "OFF"
+
+
+def _derive_execution_modes() -> dict[str, Any]:
+    live_enabled = _env_bool("LIVE_EXECUTION_ENABLED", False) or _env_bool("ANT_LIVE_EXECUTION_ENABLED", False)
+    manual_required = _env_bool("MANUAL_APPROVAL_REQUIRED", False)
+    crypto_paper = _env_bool("BITVAVO_PAPER_MODE", True)
+    equities_paper = _env_bool("IBKR_PAPER_MODE", True)
+
+    def mode_for(paper: bool) -> str:
+        if not live_enabled:
+            return "PAPER_ONLY" if paper else "OFF"
+        if manual_required:
+            return "MANUAL_APPROVAL"
+        return "PAPER_ONLY" if paper else "LIVE"
+
+    return {
+        "crypto_mode": mode_for(crypto_paper),
+        "equities_mode": mode_for(equities_paper),
+        "commodities_mode": "PAPER_ONLY",
+        "live_execution_enabled": live_enabled,
+        "manual_approval_required": manual_required,
+        "live_execution_allowed": bool(live_enabled and not manual_required),
+        "max_notional": None,
+        "max_positions": None,
+    }
 
 
 def _execution_permission_for_mode(live_mode: str) -> str:
@@ -335,6 +362,7 @@ class StatusResponse(BaseModel):
     structure_regime: str = "UNKNOWN"
     watchtower_regime: str = "UNKNOWN"
     execution_permission: str = "BLOCKED"
+    execution_modes: dict[str, Any] = Field(default_factory=dict)
     warnings: list[dict[str, Any]] = Field(default_factory=list)
 
 
@@ -544,6 +572,35 @@ class PerformanceChartResponse(BaseModel):
     maand: float = 0.0
     jaar: float = 0.0
     alltime: float = 0.0
+
+
+class PaperDiagnosticsBucket(BaseModel):
+    key: str
+    trades: int
+    wins: int
+    losses: int
+    win_rate: float | None = None
+    avg_win: float | None = None
+    avg_loss: float | None = None
+    expectancy: float | None = None
+    total_pnl: float = 0.0
+    exit_reasons: dict[str, int] = Field(default_factory=dict)
+
+
+class PaperDiagnosticsResponse(BaseModel):
+    trades: int = 0
+    wins: int = 0
+    losses: int = 0
+    win_rate: float | None = None
+    avg_win: float | None = None
+    avg_loss: float | None = None
+    expectancy: float | None = None
+    total_pnl: float = 0.0
+    max_drawdown: float | None = None
+    exit_reasons: dict[str, int] = Field(default_factory=dict)
+    by_strategy: list[PaperDiagnosticsBucket] = Field(default_factory=list)
+    by_biome: list[PaperDiagnosticsBucket] = Field(default_factory=list)
+    by_source: list[PaperDiagnosticsBucket] = Field(default_factory=list)
 
 
 class QueenStrategyEntry(BaseModel):
@@ -1804,6 +1861,13 @@ def create_router(ctx: ColonyContext) -> APIRouter:
             alltime=alltime,
         )
 
+    @router.get("/paper/diagnostics", response_model=PaperDiagnosticsResponse)
+    def get_paper_diagnostics() -> PaperDiagnosticsResponse:
+        """Paper-resultaten diagnostisch samenvatten zonder strategiegedrag te wijzigen."""
+        if ctx.logs_root is None:
+            return PaperDiagnosticsResponse()
+        return PaperDiagnosticsResponse(**_read_paper_diagnostics(ctx.logs_root))
+
     # ------------------------------------------------------------------
     # GET /api/queen/status
     # ------------------------------------------------------------------
@@ -2468,6 +2532,101 @@ def _read_all_trades(logs_root: Path) -> list[dict]:
         except OSError:
             pass
     return trades
+
+
+def _read_recent_closed_paper_trades(logs_root: Path) -> list[dict]:
+    paper_dir = logs_root / "paper"
+    if not paper_dir.exists():
+        return []
+    trades: list[dict] = []
+    for path in paper_dir.glob("*_trades.jsonl"):
+        for rec in _read_jsonl_tail_cached(path):
+            payload = rec.get("payload") if isinstance(rec.get("payload"), dict) else rec
+            if not isinstance(payload, dict):
+                continue
+            if payload.get("realized_pnl") is None and payload.get("realized_pnl_eur") is None:
+                continue
+            trades.append(payload)
+    for path in paper_dir.glob("*.jsonl"):
+        if "_trades" in path.name:
+            continue
+        for rec in _read_jsonl_tail_cached(path):
+            payload = rec.get("payload") or {}
+            if payload.get("action") in {"trade_closed", "position_closed"}:
+                trades.append(payload)
+
+    deduped: dict[tuple[str, str, str, str], dict] = {}
+    for trade in trades:
+        key = (
+            str(trade.get("position_id") or trade.get("id") or ""),
+            str(trade.get("closed_at") or trade.get("timestamp") or ""),
+            str(trade.get("symbol") or trade.get("asset") or ""),
+            str(trade.get("realized_pnl") or trade.get("realized_pnl_eur") or trade.get("pnl_eur") or ""),
+        )
+        deduped[key] = trade
+
+    result = list(deduped.values())
+    result.sort(
+        key=lambda t: str(t.get("closed_at") or t.get("timestamp") or ""),
+    )
+    return result
+
+
+def _read_paper_diagnostics(logs_root: Path) -> dict[str, Any]:
+    trades = _read_recent_closed_paper_trades(logs_root)
+    return _paper_diagnostics_from_trades(trades)
+
+
+def _paper_diagnostics_from_trades(trades: list[dict]) -> dict[str, Any]:
+    def pnl_of(trade: dict) -> float:
+        return float(trade.get("realized_pnl") or trade.get("realized_pnl_eur") or trade.get("pnl_eur") or 0.0)
+
+    def bucket(rows: list[dict], key: str) -> dict[str, Any]:
+        pnls = [pnl_of(t) for t in rows]
+        wins = [p for p in pnls if p > 0]
+        losses = [p for p in pnls if p < 0]
+        exit_reasons: dict[str, int] = {}
+        for trade in rows:
+            reason = str(trade.get("exit_reason") or trade.get("exit_type") or "unknown")
+            exit_reasons[reason] = exit_reasons.get(reason, 0) + 1
+        return {
+            "key": key,
+            "trades": len(rows),
+            "wins": len(wins),
+            "losses": len(losses),
+            "win_rate": round(len(wins) / len(rows), 4) if rows else None,
+            "avg_win": round(sum(wins) / len(wins), 4) if wins else None,
+            "avg_loss": round(sum(losses) / len(losses), 4) if losses else None,
+            "expectancy": round(sum(pnls) / len(pnls), 4) if pnls else None,
+            "total_pnl": round(sum(pnls), 4),
+            "exit_reasons": exit_reasons,
+        }
+
+    def grouped(field: str, default: str) -> list[dict[str, Any]]:
+        groups: dict[str, list[dict]] = {}
+        for trade in trades:
+            key = str(trade.get(field) or default)
+            groups.setdefault(key, []).append(trade)
+        return sorted(
+            [bucket(rows, key) for key, rows in groups.items()],
+            key=lambda item: (item["trades"], item["total_pnl"]),
+            reverse=True,
+        )
+
+    overall = bucket(trades, "all")
+    curve = 0.0
+    peak = 0.0
+    max_dd = 0.0
+    for trade in trades:
+        curve += pnl_of(trade)
+        peak = max(peak, curve)
+        max_dd = min(max_dd, curve - peak)
+    overall.pop("key", None)
+    overall["max_drawdown"] = round(abs(max_dd), 4) if trades else None
+    overall["by_strategy"] = grouped("strategy_type", "unknown")
+    overall["by_biome"] = grouped("biome", "unknown")
+    overall["by_source"] = grouped("source", "unknown")
+    return overall
 
 
 def _path_fingerprint(path: Path) -> tuple[int, int]:
@@ -3982,6 +4141,17 @@ def _empty_watchtower_received_summary() -> dict[str, Any]:
             "risk_flag": 0,
             "other": 0,
         },
+        "commodity_policy": {
+            "allowed_assets": ["COPPER", "NATGAS", "SILVER"],
+            "blocked_assets": [],
+            "allowed_count": 0,
+            "blocked_count": 0,
+            "reason_counts": {},
+            "latest_blocked_examples": [],
+            "paper_allowed": True,
+            "live_allowed": False,
+            "execution_route_available": True,
+        },
     }
 
 
@@ -4054,12 +4224,73 @@ def _watchtower_signal_row(
     return {
         "timestamp": ts.isoformat(),
         "asset": str(signal.get("asset") or signal.get("symbol") or signal.get("market") or "UNKNOWN"),
+        "biome": str(signal.get("biome") or signal.get("asset_class") or signal.get("source_field") or ""),
         "direction": signal.get("direction"),
         "entry_score": _round_or_none(_float_or_none(signal.get("entry_score")), 4),
         "confidence": _round_or_none(_float_or_none(signal.get("confidence")), 4),
         "queen_accepted": bool(accepted),
         "rejection_reason": None if accepted else (str(reason) if reason else "details_not_logged"),
         "signal_id": signal.get("signal_id") or signal.get("id"),
+    }
+
+
+_COMMODITY_PAPER_ALLOWED_ASSETS = {"NATGAS", "COPPER", "SILVER"}
+_COMMODITY_WATCHLIST_ASSETS = _COMMODITY_PAPER_ALLOWED_ASSETS | {"BRENT", "WTI", "GOLD"}
+
+
+def _is_commodity_watchtower_row(row: dict[str, Any]) -> bool:
+    biome = str(row.get("biome") or "").lower()
+    asset = str(row.get("asset") or "").upper()
+    return biome in {"commodity", "commodities"} or asset in _COMMODITY_WATCHLIST_ASSETS
+
+
+def _build_commodity_policy_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    reason_counts: dict[str, int] = {}
+    blocked_assets: set[str] = set()
+    allowed_count = 0
+    blocked_count = 0
+    examples: list[dict[str, Any]] = []
+
+    for row in rows:
+        if not _is_commodity_watchtower_row(row):
+            continue
+        asset = str(row.get("asset") or "").upper()
+        tradable = asset in _COMMODITY_PAPER_ALLOWED_ASSETS
+        accepted = bool(row.get("queen_accepted")) and tradable
+        if accepted:
+            allowed_count += 1
+            continue
+
+        blocked_count += 1
+        blocked_assets.add(asset)
+        reason = str(row.get("rejection_reason") or "")
+        if not tradable:
+            reason = "commodity_route_not_configured"
+        elif not reason:
+            reason = "commodity_policy_blocked"
+        reason_counts[reason] = reason_counts.get(reason, 0) + 1
+        if len(examples) < 5:
+            examples.append({
+                "asset": asset,
+                "timestamp": row.get("timestamp"),
+                "tradable": tradable,
+                "blocked": True,
+                "block_reason": reason,
+                "paper_allowed": tradable,
+                "live_allowed": False,
+                "execution_route_available": tradable,
+            })
+
+    return {
+        "allowed_assets": sorted(_COMMODITY_PAPER_ALLOWED_ASSETS),
+        "blocked_assets": sorted(a for a in blocked_assets if a),
+        "allowed_count": allowed_count,
+        "blocked_count": blocked_count,
+        "reason_counts": reason_counts,
+        "latest_blocked_examples": examples,
+        "paper_allowed": True,
+        "live_allowed": False,
+        "execution_route_available": True,
     }
 
 
@@ -4120,6 +4351,7 @@ def _read_watchtower_received_signals(logs_root: Path, limit: int = 50) -> dict[
                 "asset": latest["asset"],
                 "queen_accepted": latest["queen_accepted"],
             }
+        summary["commodity_policy"] = _build_commodity_policy_summary(rows)
         _apply_queen_watchtower_state(summary, queen_wt_state)
         return {"signals": rows[: max(1, min(limit, 200))], "summary": summary}
 
@@ -4191,5 +4423,6 @@ def _read_watchtower_received_signals(logs_root: Path, limit: int = 50) -> dict[
             "queen_accepted": latest["queen_accepted"],
         }
 
+    summary["commodity_policy"] = _build_commodity_policy_summary(rows)
     _apply_queen_watchtower_state(summary, queen_wt_state)
     return {"signals": rows[: max(1, min(limit, 200))], "summary": summary}

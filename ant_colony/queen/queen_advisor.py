@@ -228,7 +228,7 @@ def select_diverse_top_n(candidates: list[dict], n: int = 3) -> list[dict]:
         result.append(c)
 
     _log.info(
-        "Queen diversiteit | top3=%s typen=%s",
+        "queen_selection_diversity | layer=queen_selection top3=%s typen=%s",
         [c.get("symbol") or c.get("asset") or "unknown" for c in result],
         [c.get("strategy_type") or c.get("strategy") or "unknown" for c in result],
     )
