@@ -150,9 +150,10 @@ class WatchtowerAnt:
             return
 
         received = len(signals)
+        unique_signals, duplicate_count = self._dedupe_signals(signals)
         filtered: list[dict] = []
         rejections: list[dict] = []
-        for signal in signals:
+        for signal in unique_signals:
             asset = signal.get("asset") or signal.get("symbol")
             direction = signal.get("direction")
             entry_score = _safe_float(signal.get("entry_score"))
@@ -197,23 +198,50 @@ class WatchtowerAnt:
                 filtered.append(signal)
 
         self._log.info(
-            "Watchtower poll | interval=%ds  ontvangen=%d  door_filter=%d  afgewezen=%d",
-            _POLL_INTERVAL, received, len(filtered), len(rejections),
+            "Watchtower poll | interval=%ds received_count=%d unique_count=%d "
+            "duplicate_count=%d passed_filter_count=%d blocked_count=%d block_reasons=%s",
+            _POLL_INTERVAL,
+            received,
+            len(unique_signals),
+            duplicate_count,
+            len(filtered),
+            len(rejections),
+            _reason_counts(rejections),
         )
 
         candidates, candidate_rejections = self._route_candidates(now, filtered)
+        block_reasons = _reason_counts(rejections + candidate_rejections)
         self._write_filtered(now, rejections + candidate_rejections)
 
         # altijd schrijven — ook bij 0 gefilterd (voor dashboard stats)
         self._write_snapshot(
             now,
             received,
+            len(unique_signals),
+            duplicate_count,
             filtered,
             rejections,
             candidates_accepted=len(candidates),
             candidate_rejections=candidate_rejections,
+            block_reasons=block_reasons,
         )
         self._send_heartbeat(now, f"tick:received={received} passed={len(filtered)}")
+
+    def _dedupe_signals(self, signals: list[dict]) -> tuple[list[dict], int]:
+        """Dedupliceer per poll voordat filters en daily limits tellen."""
+        unique: list[dict] = []
+        seen: set[tuple] = set()
+        duplicates = 0
+        for signal in signals:
+            if not isinstance(signal, dict):
+                continue
+            key = _signal_dedupe_key(signal)
+            if key in seen:
+                duplicates += 1
+                continue
+            seen.add(key)
+            unique.append(signal)
+        return unique, duplicates
 
     def _route_candidates(
         self,
@@ -485,11 +513,14 @@ class WatchtowerAnt:
         self,
         now: datetime,
         total_received: int,
+        unique_count: int,
+        duplicate_count: int,
         filtered: list[dict],
         rejections: list[dict] | None = None,
         *,
         candidates_accepted: int = 0,
         candidate_rejections: list[dict] | None = None,
+        block_reasons: dict[str, int] | None = None,
     ) -> None:
         """Schrijf poll-resultaat naar ANT_LOGS/watchtower/signals.jsonl."""
         if self._out_dir is None:
@@ -500,7 +531,13 @@ class WatchtowerAnt:
             "timestamp":     now.strftime("%Y-%m-%dT%H:%M:%S"),
             "poll_interval": _POLL_INTERVAL,
             "received":      total_received,
+            "received_count": total_received,
+            "unique_count":   unique_count,
+            "duplicate_count": duplicate_count,
             "passed_filter": len(filtered),
+            "passed_filter_count": len(filtered),
+            "blocked_count": len(rejections or []) + len(candidate_rejections or []),
+            "block_reasons": block_reasons or {},
             "signals":       filtered,
             "rejections":    rejections or [],
             "candidates_accepted": candidates_accepted,
@@ -565,6 +602,41 @@ def _coarse_rejection_reason(reason: str | None) -> str:
     if "score" in reason or "confidence" in reason:
         return "score_too_low"
     return "asset_blocked"
+
+
+def _reason_counts(rejections: list[dict]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for rejection in rejections:
+        reason = str(
+            rejection.get("rejection_reason")
+            or rejection.get("detail_reason")
+            or "unknown"
+        )
+        counts[reason] = counts.get(reason, 0) + 1
+    return counts
+
+
+def _signal_dedupe_key(signal: dict) -> tuple:
+    asset = str(signal.get("asset") or signal.get("symbol") or "").upper().strip()
+    direction = str(signal.get("direction") or "").lower().strip()
+    window = str(
+        signal.get("time_window")
+        or signal.get("timeframe")
+        or signal.get("window")
+        or ""
+    ).lower().strip()
+    ts = _parse_signal_datetime(
+        signal.get("published_at")
+        or signal.get("created_at")
+        or signal.get("timestamp")
+        or signal.get("emitted_at")
+    )
+    hour_bucket = ts.strftime("%Y-%m-%dT%H") if ts else ""
+    score = round(_safe_float(signal.get("entry_score")), 3)
+    confidence = round(_safe_float(signal.get("confidence")), 3)
+    if not asset and not direction and not hour_bucket:
+        return ("id", str(signal.get("signal_id") or signal.get("id") or id(signal)))
+    return (asset, direction, window, hour_bucket, score, confidence)
 
 
 def _parse_signal_datetime(value: object) -> datetime | None:

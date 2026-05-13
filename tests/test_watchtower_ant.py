@@ -148,8 +148,24 @@ class TestSignalFilter:
         rec = json.loads(log_path.read_text(encoding="utf-8").strip())
         assert rec["received"] == 5
         assert rec["passed_filter"] == 2   # s1 en s5 passeren filter
+        assert rec["unique_count"] == 5
+        assert rec["duplicate_count"] == 0
         ids = {s["signal_id"] for s in rec["signals"]}
         assert ids == {"s1", "s5"}
+
+    def test_duplicate_signals_are_deduped_before_filters(self, tmp_path):
+        signal = self._signals()[0]
+        duplicate = dict(signal, signal_id="different-id-same-content")
+        client = _make_client(signals=[signal, duplicate])
+
+        ant = _make_ant(tmp_path, client)
+        ant._tick()
+
+        rec = json.loads((tmp_path / "watchtower" / "signals.jsonl").read_text())
+        assert rec["received"] == 2
+        assert rec["unique_count"] == 1
+        assert rec["duplicate_count"] == 1
+        assert rec["passed_filter"] == 1
 
     def test_entry_score_boundary(self, tmp_path):
         """entry_score exact op drempel (0.6) moet door het filter."""
@@ -516,7 +532,7 @@ class TestWatchtowerCandidateConsumer:
     def test_duplicate_asset_within_24h_is_skipped(self, tmp_path):
         client = _make_client(signals=[
             self._signal(signal_id="s-aapl-1", asset="AAPL"),
-            self._signal(signal_id="s-aapl-2", asset="AAPL"),
+            self._signal(signal_id="s-aapl-2", asset="AAPL", entry_score=0.86),
         ])
         ant = _make_ant(tmp_path, client)
 
@@ -526,6 +542,20 @@ class TestWatchtowerCandidateConsumer:
         assert len(candidates) == 1
         rec = self._read_snapshot(tmp_path)
         assert rec["candidate_rejections"][0]["detail_reason"] == "daily_limit_asset_24h"
+
+    def test_deduped_signals_do_not_pollute_daily_limit(self, tmp_path):
+        sig = self._signal(signal_id="s-aapl-1", asset="AAPL")
+        dup = dict(sig, signal_id="s-aapl-dup")
+        client = _make_client(signals=[sig, dup])
+        ant = _make_ant(tmp_path, client)
+
+        ant._tick()
+
+        candidates = self._read_candidates(tmp_path)
+        assert len(candidates) == 1
+        rec = self._read_snapshot(tmp_path)
+        assert rec["duplicate_count"] == 1
+        assert rec["candidate_rejections"] == []
 
 
 # ---------------------------------------------------------------------------

@@ -128,6 +128,8 @@ class TestEmptyContext:
         d = r.json()
         assert d["status"] == "UNKNOWN"
         assert d["last_tick"] is None
+        assert d["broker_status"] == "UNKNOWN"
+        assert d["execution_permission"] == "PAPER_ONLY"
 
     def test_metrics_empty(self):
         r = self.client.get("/api/metrics")
@@ -226,6 +228,27 @@ class TestStatusEndpoint:
         ctx = ColonyContext(scheduler=_make_scheduler())
         r = _client(ctx).get("/api/status")
         assert isinstance(r.json()["seconds_ago"], (int, float))
+
+    def test_status_runtime_fields_present(self):
+        ctx = ColonyContext(scheduler=_make_scheduler())
+        r = _client(ctx).get("/api/status")
+        d = r.json()
+        assert d["colony_status"] == "RUNNING_GREEN"
+        assert d["live_execution_mode"] in {"OFF", "PAPER_ONLY", "MANUAL_APPROVAL", "LIVE"}
+        assert d["watchtower_status"] in {"ONLINE", "STALE", "OFFLINE", "UNKNOWN"}
+        assert d["broker_status"] == "UNKNOWN"
+        assert d["policy_status"]
+        assert d["macro_regime"] == "UNKNOWN"
+        assert d["structure_regime"] == "UNKNOWN"
+
+    def test_status_stale_tick_has_specific_warning(self):
+        scheduler = _make_scheduler()
+        scheduler.seconds_since_last_tick.return_value = 301.0
+        ctx = ColonyContext(scheduler=scheduler)
+        d = _client(ctx).get("/api/status").json()
+        assert d["colony_status"] == "BLOCKED"
+        assert d["warnings"][0]["component"] == "heartbeat"
+        assert d["warnings"][0]["age_seconds"] == 301.0
 
 
 # ---------------------------------------------------------------------------

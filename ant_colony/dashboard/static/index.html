@@ -123,6 +123,26 @@
       align-items: center;
       justify-content: center;
       gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .runtime-strip {
+      width: 100%;
+      display: flex;
+      justify-content: center;
+      gap: 5px;
+      margin-top: 2px;
+    }
+    .runtime-chip {
+      font-size: 8px;
+      font-weight: 700;
+      text-transform: uppercase;
+      color: var(--top-muted);
+      background: rgba(255,255,255,.06);
+      border: 1px solid rgba(255,255,255,.08);
+      border-radius: 3px;
+      padding: 1px 5px;
+      white-space: nowrap;
     }
 
     .pill {
@@ -997,6 +1017,7 @@
       <span id="status-txt">LADEN</span>
     </div>
     <span class="live-clock" id="live-clock">00:00:00</span>
+    <div class="runtime-strip" id="runtime-strip"></div>
   </div>
 
   <div class="tb-kills">
@@ -1172,7 +1193,14 @@
 // ── State ──────────────────────────────────────
 
 const S = {
-  status:      { status:'UNKNOWN', last_tick:null, seconds_ago:null },
+  status:      {
+    status:'UNKNOWN', last_tick:null, seconds_ago:null,
+    colony_status:'UNKNOWN', live_execution_mode:'UNKNOWN',
+    watchtower_status:'UNKNOWN', broker_status:'UNKNOWN',
+    policy_status:'UNKNOWN', macro_regime:'UNKNOWN',
+    structure_regime:'UNKNOWN', execution_permission:'BLOCKED',
+    warnings:[],
+  },
   metrics:     { capital_total:0, capital_allocated:0, capital_available:0, capital_in_use:null, active_ants:0, utilization_pct:0 },
   brokers:     { brokers:[], fetched_at:'' },
   capital:     { total_eur:0, available_eur:0, holdings_eur:0, brokers:[], fetched_at:'' },
@@ -1350,6 +1378,11 @@ function renderWarningsBanner() {
     }
   });
 
+  (S.status.warnings || []).forEach(w => {
+    const msg = w.message || `${w.component || 'status'} ${w.severity || 'warning'}`;
+    warnings.push(`⚠ ${msg}${w.impact ? ` — ${w.impact}` : ''}`);
+  });
+
   // Trigger 2: totaal open PnL < -3%
   const pnlPct = S.positions && S.positions.total_pnl_pct;
   if (pnlPct != null && pnlPct < -3) {
@@ -1357,7 +1390,7 @@ function renderWarningsBanner() {
   }
 
   // Trigger 3: colony tick > 60s (berekend vanuit live teller)
-  if (S.hbBase != null && S.hbAt != null) {
+  if ((!S.status.warnings || S.status.warnings.length === 0) && S.hbBase != null && S.hbAt != null) {
     const tickSecs = Math.round(S.hbBase + (Date.now() - S.hbAt) / 1000);
     if (tickSecs > 60) {
       warnings.push(`⚠ Colony tick: ${tickSecs}s geleden`);
@@ -1373,11 +1406,29 @@ function renderWarningsBanner() {
 }
 
 function renderStatus() {
-  const raw = (S.status.status || 'UNKNOWN').toLowerCase();
+  const label = S.status.colony_status || S.status.status || 'UNKNOWN';
+  const raw = label.startsWith('RUNNING') ? 'running'
+    : (label === 'BLOCKED' || label === 'HALTED') ? 'halted'
+    : (S.status.status || 'UNKNOWN').toLowerCase();
   const pill = document.getElementById('status-pill');
   pill.className = 'pill ' + raw;
-  document.getElementById('status-txt').textContent = raw.toUpperCase();
+  document.getElementById('status-txt').textContent = label;
   document.getElementById('hb-time').textContent = S.status.last_tick || '—:—:—';
+  const strip = document.getElementById('runtime-strip');
+  if (strip) {
+    const chips = [
+      ['LIVE', S.status.live_execution_mode],
+      ['WT', S.status.watchtower_status],
+      ['BROKER', S.status.broker_status],
+      ['POLICY', S.status.policy_status],
+      ['MACRO', S.status.macro_regime],
+      ['STRUCT', S.status.structure_regime],
+      ['PERM', S.status.execution_permission],
+    ];
+    strip.innerHTML = chips
+      .map(([k, v]) => `<span class="runtime-chip">${k}: ${v || 'UNKNOWN'}</span>`)
+      .join('');
+  }
 }
 
 function renderMetrics() {
@@ -2581,13 +2632,15 @@ function renderEquities() {
     } else {
       const lastTs  = wt.last_signal_ts ? fTS(wt.last_signal_ts) : '—';
       const sigHour = wt.signals_last_hour != null ? wt.signals_last_hour : 0;
+      const uniqHour = wt.unique_last_hour != null ? wt.unique_last_hour : sigHour;
+      const dupHour = wt.duplicates_last_hour != null ? wt.duplicates_last_hour : 0;
       const pasHour = wt.passed_filter_last_hour != null ? wt.passed_filter_last_hour : 0;
       wtRows = `<div class="eq-row">
         <span class="eq-sect">Laatste signal</span>
         <span class="eq-val" style="color:var(--muted)">${lastTs}</span>
       </div><div class="eq-row">
         <span class="eq-sect">Ontvangen (1u)</span>
-        <span class="eq-val">${sigHour}</span>
+        <span class="eq-val">${sigHour} · uniek ${uniqHour} · dup ${dupHour}</span>
       </div><div class="eq-row">
         <span class="eq-sect">Door filter (1u)</span>
         <span class="eq-val" style="color:var(--pnl-pos)">${pasHour}</span>

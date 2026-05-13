@@ -101,6 +101,7 @@ class OperatorAnt:
         self._last_action: str = "init"
         self._last_tick_started_monotonic: float | None = None
         self._last_tick_completed_monotonic: float = time.monotonic()
+        self._last_idle_log_monotonic: float = 0.0
         self._watchdog_restarts: int = 0
 
         self._log = logging.getLogger(f"ant.operator.{ant_id[:8]}")
@@ -225,28 +226,35 @@ class OperatorAnt:
     def _tick(self) -> None:
         """Één verwerkingscyclus: lees input bestanden, verwerk elk."""
         try:
-            self._process_input_files()
+            processed = self._process_input_files()
         except Exception:
             self._log.exception("Onverwachte fout in OperatorAnt._tick()")
-        self._last_action = "tick"
-
-    def _process_input_files(self) -> None:
-        if self.logs_root is None:
             return
+
+        if processed == 0:
+            self._last_action = "idle:no_operator_input"
+            self._write_idle_status()
+
+    def _process_input_files(self) -> int:
+        processed = 0
+        if self.logs_root is None:
+            return processed
 
         input_dir = self.logs_root / "operator" / "input"
         if not input_dir.exists():
-            return
+            return processed
 
         for path in sorted(input_dir.glob("*.json")):
             fname = path.name
             if fname in self._seen_input_files:
                 continue
             self._seen_input_files.add(fname)
+            processed += 1
             try:
                 self._process_input_file(path)
             except Exception:
                 self._log.exception("Fout bij verwerken input bestand: %s", fname)
+        return processed
 
     def _process_input_file(self, path: Path) -> None:
         try:
@@ -624,6 +632,22 @@ class OperatorAnt:
         except OSError:
             self._log.exception("Kon operator log niet schrijven: %s", log_path)
 
+    def _write_idle_status(self) -> None:
+        """Schrijf een lichte idle-heartbeat zodat gezond nietsdoen niet stale lijkt."""
+        now = time.monotonic()
+        if now - self._last_idle_log_monotonic < 55.0:
+            return
+        self._last_idle_log_monotonic = now
+        self._write_operator_log(
+            "operator_idle",
+            {
+                "healthy": True,
+                "state": "idle",
+                "status": "idle",
+                "reason": "no_operator_input",
+            },
+        )
+
     def _write_processed(self, stem: str, data: dict) -> None:
         """Schrijf verwerkingsbevestiging naar ANT_LOGS/operator/processed/."""
         if self.logs_root is None:
@@ -657,6 +681,9 @@ class OperatorAnt:
                 status=hb_status,
                 budget_used=0.0,
                 last_action=self._last_action,
+                healthy=self._status == AntStatus.RUNNING,
+                state="idle" if self._last_action.startswith("idle:") else "active",
+                reason="no_operator_input" if self._last_action.startswith("idle:") else "",
             )
             self.scheduler.record_heartbeat(hb)
             self._log.debug("Heartbeat gestuurd | action=%s", self._last_action)

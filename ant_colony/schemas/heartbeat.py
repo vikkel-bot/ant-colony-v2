@@ -19,3 +19,6 @@ class Heartbeat(BaseModel):
     status: HeartbeatStatus = HeartbeatStatus.RUNNING
     budget_used: float = Field(ge=0)
     last_action: str = ""
+    healthy: bool = True
+    state: str = ""
+    reason: str = ""

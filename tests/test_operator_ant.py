@@ -357,6 +357,36 @@ def test_operator_log_written(tmp_path: Path) -> None:
     )
 
 
+def test_operator_idle_tick_writes_healthy_heartbeat_log(tmp_path: Path) -> None:
+    """Geen input is gezond idle en schrijft een recent status-event."""
+    ant = make_ant(tmp_path)
+
+    ant._tick()
+
+    op_logs = read_operator_log(tmp_path)
+    idle = [r for r in op_logs if r.get("payload", {}).get("action") == "operator_idle"]
+    assert idle
+    payload = idle[-1]["payload"]
+    assert payload["healthy"] is True
+    assert payload["state"] == "idle"
+    assert payload["reason"] == "no_operator_input"
+    assert ant._last_action == "idle:no_operator_input"
+
+
+def test_operator_idle_heartbeat_fields(tmp_path: Path) -> None:
+    """Scheduler-heartbeat maakt idle expliciet zonder een foutstatus te melden."""
+    ant = make_ant(tmp_path)
+    ant._last_action = "idle:no_operator_input"
+    ant._status = AntStatus.RUNNING
+
+    ant._send_heartbeat()
+
+    heartbeat = ant.scheduler.record_heartbeat.call_args.args[0]
+    assert heartbeat.healthy is True
+    assert heartbeat.state == "idle"
+    assert heartbeat.reason == "no_operator_input"
+
+
 # ---------------------------------------------------------------------------
 # Helper unit tests
 # ---------------------------------------------------------------------------

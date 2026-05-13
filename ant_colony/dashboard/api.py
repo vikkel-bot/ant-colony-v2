@@ -45,6 +45,7 @@ from pydantic import BaseModel, Field
 from ant_colony.biome.biome_registry import BiomeRegistry
 from ant_colony.colony.scheduler.colony_scheduler import ColonyScheduler
 from ant_colony.queen.queen import Queen
+from ant_colony.queen.regime_schema import build_regime_snapshot
 from ant_colony.schemas.mission import Mission
 
 # Referentie-markt per biome voor live prijsweergave in het dashboard
@@ -126,6 +127,196 @@ class ColonyContext:
     paper_ledgers: list = field(default_factory=list)  # list[PaperLedger] — optioneel in-memory
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    _ensure_runtime_env_loaded()
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _runtime_status_fields(
+    ctx: ColonyContext,
+    scheduler_status: str,
+    seconds_ago: float | None,
+) -> dict[str, Any]:
+    warnings: list[dict[str, Any]] = []
+    colony_status = _classify_colony_status(scheduler_status, seconds_ago, warnings)
+    live_mode = _derive_live_execution_mode()
+    execution_permission = _execution_permission_for_mode(live_mode)
+    watchtower_status = _derive_watchtower_status(ctx.logs_root)
+    broker_status = _derive_broker_status(ctx)
+    policy_status = _derive_policy_status(live_mode)
+
+    queen_regime = None
+    wt_regime = None
+    if ctx.logs_root is not None:
+        try:
+            queen_data = _read_queen_status_data(ctx.logs_root)
+            queen_regime = queen_data.get("regime")
+        except Exception:
+            queen_regime = None
+        try:
+            state = _read_queen_watchtower_state(ctx.logs_root)
+            wt_regime = (state or {}).get("last_regime")
+        except Exception:
+            wt_regime = None
+
+    regime = build_regime_snapshot(
+        macro_source=queen_regime,
+        structure_source=queen_regime,
+        watchtower_source=wt_regime,
+        execution_permission=execution_permission,
+    )
+    return {
+        "colony_status": colony_status,
+        "live_execution_mode": live_mode,
+        "watchtower_status": watchtower_status,
+        "broker_status": broker_status,
+        "policy_status": policy_status,
+        **regime.as_dict(),
+        "warnings": warnings,
+    }
+
+
+def _classify_colony_status(
+    scheduler_status: str,
+    seconds_ago: float | None,
+    warnings: list[dict[str, Any]],
+) -> str:
+    if scheduler_status == "HALTED":
+        warnings.append({
+            "component": "colony",
+            "severity": "error",
+            "age_seconds": seconds_ago,
+            "impact": "scheduler halted",
+            "message": "Colony scheduler staat op HALTED",
+        })
+        return "HALTED"
+    if scheduler_status != "RUNNING":
+        warnings.append({
+            "component": "colony",
+            "severity": "warning",
+            "age_seconds": seconds_ago,
+            "impact": "scheduler state unknown",
+            "message": f"Colony status is {scheduler_status or 'UNKNOWN'}",
+        })
+        return "RUNNING_WARN" if scheduler_status else "BLOCKED"
+    if seconds_ago is None:
+        warnings.append({
+            "component": "heartbeat",
+            "severity": "warning",
+            "age_seconds": None,
+            "impact": "heartbeat ontbreekt",
+            "message": "Geen dashboard heartbeat beschikbaar",
+        })
+        return "RUNNING_WARN"
+    if seconds_ago <= 15:
+        return "RUNNING_GREEN"
+    if seconds_ago <= 60:
+        warnings.append({
+            "component": "heartbeat",
+            "severity": "warning",
+            "age_seconds": seconds_ago,
+            "impact": "dashboard loopt achter",
+            "message": f"Dashboard heartbeat {seconds_ago:.1f}s oud",
+        })
+        return "RUNNING_WARN"
+    if seconds_ago <= 300:
+        warnings.append({
+            "component": "heartbeat",
+            "severity": "warning",
+            "age_seconds": seconds_ago,
+            "impact": "scheduler mogelijk vertraagd",
+            "message": f"Colony tick {seconds_ago:.1f}s oud",
+        })
+        return "RUNNING_DEGRADED"
+    warnings.append({
+        "component": "heartbeat",
+        "severity": "error",
+        "age_seconds": seconds_ago,
+        "impact": "agent-cycli mogelijk geblokkeerd",
+        "message": f"Colony tick {seconds_ago:.1f}s oud",
+    })
+    return "BLOCKED"
+
+
+def _derive_live_execution_mode() -> str:
+    live_enabled = _env_bool("LIVE_EXECUTION_ENABLED", False) or _env_bool("ANT_LIVE_EXECUTION_ENABLED", False)
+    manual_required = _env_bool("MANUAL_APPROVAL_REQUIRED", False)
+    crypto_paper = _env_bool("BITVAVO_PAPER_MODE", True)
+    equities_paper = _env_bool("IBKR_PAPER_MODE", True)
+    if live_enabled and manual_required:
+        return "MANUAL_APPROVAL"
+    if live_enabled and (not crypto_paper or not equities_paper):
+        return "LIVE"
+    if crypto_paper or equities_paper or _env_bool("EQUITIES_ENABLED", False):
+        return "PAPER_ONLY"
+    return "OFF"
+
+
+def _execution_permission_for_mode(live_mode: str) -> str:
+    if live_mode == "LIVE":
+        return "LIVE_ALLOWED"
+    if live_mode == "MANUAL_APPROVAL":
+        return "MANUAL_APPROVAL"
+    if live_mode == "PAPER_ONLY":
+        return "PAPER_ONLY"
+    return "BLOCKED"
+
+
+def _derive_policy_status(live_mode: str) -> str:
+    if live_mode == "LIVE":
+        return "LIVE_ALLOWED"
+    if live_mode == "MANUAL_APPROVAL":
+        return "MANUAL_APPROVAL"
+    if live_mode == "PAPER_ONLY":
+        return "COMMODITIES_BLOCKED/PAPER_ONLY"
+    if live_mode == "OFF":
+        return "COMMODITIES_BLOCKED"
+    return "UNKNOWN"
+
+
+def _derive_broker_status(ctx: ColonyContext) -> str:
+    registry = ctx.biome_registry
+    if registry is None:
+        return "UNKNOWN"
+    seen = False
+    connected = False
+    for biome_id in registry.list_biomes():
+        adapter = registry.get(biome_id)
+        if adapter is None:
+            continue
+        seen = True
+        try:
+            connected = connected or bool(adapter.is_available())
+        except Exception:
+            return "UNKNOWN"
+    if not seen:
+        return "UNKNOWN"
+    return "CONNECTED" if connected else "DISCONNECTED"
+
+
+def _derive_watchtower_status(logs_root: Path | None) -> str:
+    if not _env_bool("WATCHTOWER_ENABLED", False):
+        return "OFFLINE"
+    if logs_root is None:
+        return "UNKNOWN"
+    try:
+        stats = _read_watchtower_stats(logs_root)
+    except Exception:
+        return "UNKNOWN"
+    last = _parse_ts(stats.get("last_signal_ts"))
+    if last is None:
+        return "STALE"
+    age = (datetime.now(tz=timezone.utc) - last).total_seconds()
+    if age <= 2 * max(60, _env_int("WATCHTOWER_POLL_INTERVAL", 300)):
+        return "ONLINE"
+    if age <= 3600:
+        return "STALE"
+    return "OFFLINE"
+
+
 # ---------------------------------------------------------------------------
 # Response models
 # ---------------------------------------------------------------------------
@@ -135,6 +326,16 @@ class StatusResponse(BaseModel):
     last_tick: str | None
     seconds_ago: float | None
     server_time: str
+    colony_status: str = "UNKNOWN"
+    live_execution_mode: str = "UNKNOWN"
+    watchtower_status: str = "UNKNOWN"
+    broker_status: str = "UNKNOWN"
+    policy_status: str = "UNKNOWN"
+    macro_regime: str = "UNKNOWN"
+    structure_regime: str = "UNKNOWN"
+    watchtower_regime: str = "UNKNOWN"
+    execution_permission: str = "BLOCKED"
+    warnings: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class MetricsResponse(BaseModel):
@@ -568,9 +769,11 @@ class ClaudeAntDeactivateResponse(BaseModel):
 
 class WatchtowerStatusResponse(BaseModel):
     enabled: bool
-    status: str                     # "ONLINE" | "OFFLINE" | "DISABLED"
+    status: str                     # "ONLINE" | "STALE" | "OFFLINE" | "DISABLED"
     last_signal_ts: str | None = None
     signals_last_hour: int = 0
+    unique_last_hour: int = 0
+    duplicates_last_hour: int = 0
     passed_filter_last_hour: int = 0
 
 
@@ -719,11 +922,13 @@ def create_router(ctx: ColonyContext) -> APIRouter:
         now = datetime.now(tz=timezone.utc)
 
         if ctx.scheduler is None:
+            runtime = _runtime_status_fields(ctx, "UNKNOWN", None)
             return StatusResponse(
                 status="UNKNOWN",
                 last_tick=None,
                 seconds_ago=None,
                 server_time=_to_local_str(now),
+                **runtime,
             )
 
         status = ctx.scheduler.status.value.upper()
@@ -735,11 +940,13 @@ def create_router(ctx: ColonyContext) -> APIRouter:
             seconds_ago = round(ctx.scheduler.seconds_since_last_tick(), 1)
             last_tick_str = _to_local_str(last_tick)
 
+        runtime = _runtime_status_fields(ctx, status, seconds_ago)
         return StatusResponse(
             status=status,
             last_tick=last_tick_str,
             seconds_ago=seconds_ago,
             server_time=_to_local_str(now),
+            **runtime,
         )
 
     # ------------------------------------------------------------------
@@ -1806,6 +2013,8 @@ def create_router(ctx: ColonyContext) -> APIRouter:
             status=status_str,
             last_signal_ts=stats["last_signal_ts"],
             signals_last_hour=stats["signals_last_hour"],
+            unique_last_hour=stats.get("unique_last_hour", 0),
+            duplicates_last_hour=stats.get("duplicates_last_hour", 0),
             passed_filter_last_hour=stats["passed_filter_last_hour"],
         )
 
@@ -3721,11 +3930,19 @@ def _read_watchtower_stats(logs_root: Path) -> dict:
     """Lees Watchtower poll-statistieken uit ANT_LOGS/watchtower/signals.jsonl."""
     signal_path = logs_root / "watchtower" / "signals.jsonl"
     if not signal_path.exists():
-        return {"last_signal_ts": None, "signals_last_hour": 0, "passed_filter_last_hour": 0}
+        return {
+            "last_signal_ts": None,
+            "signals_last_hour": 0,
+            "unique_last_hour": 0,
+            "duplicates_last_hour": 0,
+            "passed_filter_last_hour": 0,
+        }
 
     cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=1)
     last_ts = None
     signals_hour = 0
+    unique_hour = 0
+    duplicate_hour = 0
     passed_hour  = 0
 
     for rec in _read_jsonl_tail_cached(signal_path):
@@ -3736,11 +3953,15 @@ def _read_watchtower_stats(logs_root: Path) -> dict:
             last_ts = ts
         if ts >= cutoff:
             signals_hour += int(rec.get("received", 0))
+            unique_hour += int(rec.get("unique_count", rec.get("passed_filter", 0)))
+            duplicate_hour += int(rec.get("duplicate_count", 0))
             passed_hour  += int(rec.get("passed_filter", 0))
 
     return {
         "last_signal_ts":          last_ts.isoformat() if last_ts else None,
         "signals_last_hour":       signals_hour,
+        "unique_last_hour":        unique_hour,
+        "duplicates_last_hour":    duplicate_hour,
         "passed_filter_last_hour": passed_hour,
     }
 
