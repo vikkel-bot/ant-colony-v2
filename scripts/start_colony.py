@@ -29,6 +29,7 @@ import sys
 import threading
 import time
 import uuid
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -500,6 +501,7 @@ def _run_scheduler(scheduler, log: logging.Logger) -> None:
 
 
 _ANT_RESTART_DELAY_S = 5
+_MAX_RESTARTS_PER_HOUR = 3
 
 
 def _start_supervised_ant(
@@ -520,17 +522,42 @@ def _start_supervised_ant(
     Als de ant stopt door TTL, een onverwachte exception of ABORTED status,
     wordt een nieuwe ant-instantie met nieuw ant_id gestart. Daarmee krijgt de
     ant een fresh TTL zonder dat de hele Colony opnieuw hoeft te starten.
+
+    Rate-limiter: maximaal _MAX_RESTARTS_PER_HOUR herstarts per uur. Bij
+    overschrijding logt de supervisor CRITICAL en stopt — dit voorkomt dat een
+    kapotte ant de colony in een oneindig-herstart-loop trekt.
     """
 
     def _supervisor_loop() -> None:
         from ant_colony.colony.scheduler.colony_scheduler import AgentRecord
 
         restart_count = 0
+        restart_times: deque[float] = deque()
+
         while True:
             ant_id = f"{id_prefix}-{uuid.uuid4().hex[:12]}"
             try:
                 if restart_count > 0:
-                    log.warning("%s herstart | restart=%d", label, restart_count)
+                    now = time.monotonic()
+                    while restart_times and now - restart_times[0] > 3600:
+                        restart_times.popleft()
+                    if len(restart_times) >= _MAX_RESTARTS_PER_HOUR:
+                        log.critical(
+                            "%s: %d herstarts per uur bereikt — supervisor gestopt"
+                            " (restart-loop preventie)",
+                            label,
+                            _MAX_RESTARTS_PER_HOUR,
+                        )
+                        return
+                    restart_times.append(now)
+                    log.warning(
+                        "%s herstart | restart=%d  (rate: %d/%d per uur)",
+                        label,
+                        restart_count,
+                        len(restart_times),
+                        _MAX_RESTARTS_PER_HOUR,
+                    )
+
                 ant = make_ant(ant_id)
                 if on_start is not None:
                     on_start(ant)

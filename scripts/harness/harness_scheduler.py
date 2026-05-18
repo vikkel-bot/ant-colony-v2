@@ -3,28 +3,27 @@ scripts/harness/harness_scheduler.py
 
 Standalone test-harness voor ColonyScheduler + ResearchAnt + PaperAnt in threads.
 
-Reproduceert het crash-patroon waarbij alle mieren stoppen maar de scheduler
-blijft draaien. De tijdschaal wordt gecomprimeerd naar 50 seconden
-(10 ticks × 5s) zodat het scenario reproduceerbaar is.
+Doel: verifieer dat de supervisor-restart logica in start_colony.py werkt.
+Ants met korte TTL (10s) worden automatisch herstart door de supervisor-loop;
+alle 10 ticks moeten beide mieren actief (of net hergestart) zijn.
 
 Threading-patroon (analoog aan start_colony.py):
-  - sched_thread   : scheduler.start()  — daemon thread
-  - research_thread: research_ant.run() — daemon thread
-  - paper_thread   : paper_ant.run()    — daemon thread
-  - main thread    : monitoring-loop, 10 × sleep(5s), rapportage
+  - sched_thread       : scheduler.start()         — daemon thread
+  - research-supervisor: supervisor-loop per mier   — daemon thread
+  - paper-supervisor   : supervisor-loop per mier   — daemon thread
+  - main thread        : monitoring-loop, 10 × sleep(5s), rapportage
 
 Scenario:
-  TTL = 20s → ants voltooien na tick 4
-  Monitoring loopt door tot tick 10 (50s)
-  → scheduler draait na tick 4 zonder actieve mieren
-  → "dood"-markering bij heartbeat-leeftijd > 15s (threshold)
+  TTL = 10s → ants voltooien na 2 ticks; supervisor herstart binnen 5s
+  Max 3 herstarts per uur per ant (rate-limit)
+  Dood-drempel = 15s (heartbeat-leeftijd)
 
 Metingen per tick:
-  - Seconden sinds laatste heartbeat per mier
-  - Mier-status in de scheduler (RUNNING / COMPLETED / ABORTED / PAUSED)
-  - Scheduler actief (telt agents met status RUNNING)
-  - Thread count (threading.active_count)
-  - Geheugen in MB (psutil indien beschikbaar)
+  - Seconden sinds laatste heartbeat (van huidige ant-instantie)
+  - Mier-status in de scheduler (RUNNING / COMPLETED / PAUSED)
+  - Herstarts tot nu toe per ant
+  - Scheduler actief (agents met status RUNNING)
+  - Thread count en geheugen (MB) indien beschikbaar
 
 Veiligheid:
   - Geen live broker, geen orders, geen echt kapitaal
@@ -47,6 +46,7 @@ import tempfile
 import threading
 import time
 import uuid
+from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import monotonic
@@ -74,11 +74,13 @@ log = logging.getLogger("harness.scheduler")
 # Configuratie
 # ---------------------------------------------------------------------------
 
-TICK_INTERVAL    = 5    # seconden per monitoring-tick (= scheduler tick)
-N_TICKS          = 10   # totaal ticks → 50s testduur
-ANT_TTL          = 20   # seconden — ants voltooien na ~4 ticks
-HB_INTERVAL      = 5    # heartbeat_interval voor beide ants
-DEAD_THRESHOLD_S = 15   # seconden zonder heartbeat → markeer als dood
+TICK_INTERVAL         = 5    # seconden per monitoring-tick (= scheduler tick)
+N_TICKS               = 10   # totaal ticks → 50s testduur
+ANT_TTL               = 10   # seconden — ants voltooien na 2 ticks; daarna herstart
+HB_INTERVAL           = 5    # heartbeat_interval voor beide ants
+DEAD_THRESHOLD_S      = 15   # seconden zonder heartbeat → markeer als dood
+_RESTART_DELAY_S      = 5    # wachttijd voor herstart (identiek aan start_colony.py)
+_MAX_RESTARTS_PER_HOUR = 3   # rate-limiet per ant per uur
 
 # ---------------------------------------------------------------------------
 # Optionele psutil
@@ -175,7 +177,7 @@ def _research_mission() -> Mission:
         ),
         ttl=ANT_TTL,
         heartbeat_interval=HB_INTERVAL,
-        success_conditions=SuccessConditions(description="Harness scheduler test"),
+        success_conditions=SuccessConditions(description="Harness supervisor test"),
     )
 
 
@@ -192,47 +194,159 @@ def _paper_mission() -> Mission:
         ),
         ttl=ANT_TTL,
         heartbeat_interval=HB_INTERVAL,
-        success_conditions=SuccessConditions(description="Harness scheduler test"),
+        success_conditions=SuccessConditions(description="Harness supervisor test"),
     )
+
+# ---------------------------------------------------------------------------
+# Mutable ant-referentie (wordt bijgewerkt bij elke herstart)
+# ---------------------------------------------------------------------------
+
+class _AntRef:
+    """Houdt bij welk ant_id momenteel actief is voor een gesupervisede ant."""
+
+    def __init__(self, label: str) -> None:
+        self.label = label
+        self.ant_id: str = ""
+        self.restart_count: int = 0
+        self._lock = threading.Lock()
+
+    def set(self, ant_id: str) -> None:
+        with self._lock:
+            self.ant_id = ant_id
+
+    def get(self) -> str:
+        with self._lock:
+            return self.ant_id
+
+    def increment_restarts(self) -> None:
+        with self._lock:
+            self.restart_count += 1
+
+    def get_restarts(self) -> int:
+        with self._lock:
+            return self.restart_count
+
+# ---------------------------------------------------------------------------
+# Supervisor-loop per ant (identiek patroon aan _start_supervised_ant in start_colony.py)
+# ---------------------------------------------------------------------------
+
+def _start_supervised_ant_thread(
+    ref: _AntRef,
+    make_ant,
+    mission: Mission,
+    scheduler: ColonyScheduler,
+    logs_root: Path,
+) -> threading.Thread:
+    """
+    Start een supervisor-loop voor één ant in een daemon-thread.
+
+    De supervisor herstart de ant automatisch na stop/crash, met rate-limiet
+    van _MAX_RESTARTS_PER_HOUR. Patroon identiek aan _start_supervised_ant()
+    in scripts/start_colony.py.
+    """
+
+    def _supervisor_loop() -> None:
+        restart_times: deque[float] = deque()
+
+        while True:
+            ant_id = f"{ref.label.lower()}-{uuid.uuid4().hex[:12]}"
+
+            if ref.get_restarts() > 0:
+                now = monotonic()
+                while restart_times and now - restart_times[0] > 3600:
+                    restart_times.popleft()
+                if len(restart_times) >= _MAX_RESTARTS_PER_HOUR:
+                    log.critical(
+                        "%s: %d herstarts per uur bereikt — supervisor gestopt"
+                        " (restart-loop preventie)",
+                        ref.label, _MAX_RESTARTS_PER_HOUR,
+                    )
+                    return
+                restart_times.append(now)
+                log.warning(
+                    "%s herstart | restart=%d  (rate: %d/%d per uur)",
+                    ref.label, ref.get_restarts(),
+                    len(restart_times), _MAX_RESTARTS_PER_HOUR,
+                )
+
+            ref.set(ant_id)
+
+            try:
+                ant = make_ant(ant_id)
+                scheduler.register_agent(AgentRecord(
+                    ant_id=ant_id,
+                    mission_id=mission.mission_id,
+                    node_id=mission.allowed_node,
+                    ant_type=mission.ant_type,
+                    ttl=mission.ttl,
+                    heartbeat_interval=mission.heartbeat_interval,
+                ))
+                log.info(
+                    "%s gestart | ant_id=%s  ttl=%ds  restart=%d  fresh_ttl=true",
+                    ref.label, ant_id[:16], mission.ttl, ref.get_restarts(),
+                )
+                status = ant.run()
+                log.info(
+                    "%s gestopt | ant_id=%s  status=%s — herstart over %ds",
+                    ref.label, ant_id[:16],
+                    getattr(status, "value", status), _RESTART_DELAY_S,
+                )
+            except Exception:
+                log.exception(
+                    "%s supervisor fout — herstart over %ds",
+                    ref.label, _RESTART_DELAY_S,
+                )
+
+            ref.increment_restarts()
+            time.sleep(_RESTART_DELAY_S)
+
+    t = threading.Thread(
+        target=_supervisor_loop,
+        name=f"{ref.label.lower()}-supervisor",
+        daemon=True,
+    )
+    t.start()
+    return t
 
 # ---------------------------------------------------------------------------
 # Per-tick observatie
 # ---------------------------------------------------------------------------
 
 class TickObs(NamedTuple):
-    tick_n:           int
-    elapsed_s:        float
-    threads:          int
-    memory_mb:        float | None
-    # per ant: (hb_age_s, status_str, is_dead)
-    research:         tuple[float, str, bool]
-    paper:            tuple[float, str, bool]
-    sched_active:     int   # agents met status RUNNING
-    newly_dead:       list[str]   # labels van mieren die deze tick dood gingen
+    tick_n:       int
+    elapsed_s:    float
+    threads:      int
+    memory_mb:    float | None
+    research:     tuple[float, str, bool]   # (hb_age, status, is_dead)
+    paper:        tuple[float, str, bool]
+    sched_active: int
+    newly_dead:   list[str]
+    r_restarts:   int
+    p_restarts:   int
 
 # ---------------------------------------------------------------------------
 # Printen
 # ---------------------------------------------------------------------------
 
-_W = 80
+_W = 88
 
 
 def _print_header() -> None:
     print("=" * _W)
-    print(f"{'HARNESS: ColonyScheduler + ResearchAnt + PaperAnt (threads)':^{_W}}")
-    print(f"{'10 ticks × 5s — TTL=20s — dood-drempel=15s':^{_W}}")
+    print(f"{'HARNESS: ColonyScheduler + Supervisor-restart (ResearchAnt + PaperAnt)':^{_W}}")
+    print(f"{'10 ticks × 5s — TTL=10s — herstart na 5s — dood-drempel=15s':^{_W}}")
     print("=" * _W)
     print(
         f"{'Tick':>4}  {'Elaps':>6}  {'Thrd':>4}  {'RAM':>6}  "
-        f"{'Research':>16}  {'PaperAnt':>16}  {'Actief':>6}"
+        f"{'Research':>18}  {'PaperAnt':>18}  {'Actief':>6}  {'#Rst':>5}"
     )
     print("-" * _W)
 
 
 def _fmt_ant(hb_age: float, status: str, dead: bool) -> str:
     if dead:
-        return f"{'DOOD':>8} ({hb_age:>4.0f}s)"
-    return f"{hb_age:>5.1f}s [{status[:7]:>7}]"
+        return f"{'DOOD':>10} ({hb_age:>4.0f}s)"
+    return f"{hb_age:>5.1f}s [{status[:8]:>8}]"
 
 
 def _print_tick(obs: TickObs) -> None:
@@ -242,9 +356,10 @@ def _print_tick(obs: TickObs) -> None:
     extra = ""
     if obs.newly_dead:
         extra = f"  ← {', '.join(obs.newly_dead)} gestopt"
+    total_restarts = obs.r_restarts + obs.p_restarts
     print(
         f"{obs.tick_n:>4}  {obs.elapsed_s:>5.1f}s  {obs.threads:>4}  {ram:>6}  "
-        f"{r_str:>16}  {p_str:>16}  {obs.sched_active:>6}{extra}"
+        f"{r_str:>18}  {p_str:>18}  {obs.sched_active:>6}  {total_restarts:>5}{extra}"
     )
 
 # ---------------------------------------------------------------------------
@@ -253,22 +368,22 @@ def _print_tick(obs: TickObs) -> None:
 
 def _monitor(
     scheduler: ColonyScheduler,
-    r_id: str,
-    p_id: str,
+    r_ref: _AntRef,
+    p_ref: _AntRef,
     harness_start: float,
 ) -> list[TickObs]:
     all_obs: list[TickObs] = []
-    dead_since: dict[str, float] = {}  # ant_id → monotonic tijdstip
+    dead_since: dict[str, float] = {}
 
     for tick_n in range(1, N_TICKS + 1):
         time.sleep(TICK_INTERVAL)
 
         elapsed = round(monotonic() - harness_start, 1)
 
-        r_rec = scheduler._agents.get(r_id)
-        p_rec = scheduler._agents.get(p_id)
+        r_rec = scheduler._agents.get(r_ref.get())
+        p_rec = scheduler._agents.get(p_ref.get())
 
-        def _ant_obs(rec: AgentRecord | None, label: str) -> tuple[float, str, bool]:
+        def _ant_obs(rec: AgentRecord | None) -> tuple[float, str, bool]:
             if rec is None:
                 return 9999.0, "ONBEKEND", True
             age    = rec.seconds_since_heartbeat()
@@ -276,16 +391,19 @@ def _monitor(
             dead   = age > DEAD_THRESHOLD_S
             return round(age, 1), status, dead
 
-        r_obs = _ant_obs(r_rec, "ResearchAnt")
-        p_obs = _ant_obs(p_rec, "PaperAnt")
+        r_obs = _ant_obs(r_rec)
+        p_obs = _ant_obs(p_rec)
 
         newly_dead: list[str] = []
-        for ant_id, label, obs_tuple in [(r_id, "ResearchAnt", r_obs),
-                                          (p_id, "PaperAnt",   p_obs)]:
+        for ref, obs_tuple in [(r_ref, r_obs), (p_ref, p_obs)]:
             hb_age, _, is_dead = obs_tuple
-            if is_dead and ant_id not in dead_since:
-                dead_since[ant_id] = monotonic()
-                newly_dead.append(label)
+            key = ref.label
+            if is_dead and key not in dead_since:
+                dead_since[key] = monotonic()
+                newly_dead.append(ref.label)
+            elif not is_dead and key in dead_since:
+                # ant is hersteld (na herstart)
+                del dead_since[key]
 
         active = sum(
             1 for rec in scheduler._agents.values()
@@ -301,6 +419,8 @@ def _monitor(
             paper=p_obs,
             sched_active=active,
             newly_dead=newly_dead,
+            r_restarts=r_ref.get_restarts(),
+            p_restarts=p_ref.get_restarts(),
         )
         all_obs.append(obs)
         _print_tick(obs)
@@ -314,9 +434,8 @@ def _monitor(
 def _print_report(
     all_obs: list[TickObs],
     scheduler: ColonyScheduler,
-    r_id: str,
-    p_id: str,
-    ant_started_at: dict[str, float],
+    r_ref: _AntRef,
+    p_ref: _AntRef,
     harness_start: float,
     stopper_calls: list[tuple[str, str]],
 ) -> None:
@@ -333,64 +452,76 @@ def _print_report(
         print(f"RAM aan het einde      : {last.memory_mb:.0f} MB")
     print()
 
-    # Per ant: wanneer dood gegaan?
-    def _death_tick(label_key: str) -> str:
-        for obs in all_obs:
-            for label in obs.newly_dead:
-                if label_key.lower() in label.lower():
-                    return f"tick {obs.tick_n} (~{obs.elapsed_s:.0f}s)"
-        return "nooit dood gegaan in 10 ticks"
-
     print("Mier-overzicht:")
     r_final = all_obs[-1].research
     p_final = all_obs[-1].paper
-    print(f"  ResearchAnt  status={r_final[1]:8s}  hb_leeftijd={r_final[0]:.1f}s"
-          f"  dood={r_final[2]}  gestopt_op={_death_tick('research')}")
-    print(f"  PaperAnt     status={p_final[1]:8s}  hb_leeftijd={p_final[0]:.1f}s"
-          f"  dood={p_final[2]}  gestopt_op={_death_tick('paper')}")
+    print(
+        f"  ResearchAnt  status={r_final[1]:8s}  hb_leeftijd={r_final[0]:.1f}s"
+        f"  dood={r_final[2]}  herstarts={r_ref.get_restarts()}"
+    )
+    print(
+        f"  PaperAnt     status={p_final[1]:8s}  hb_leeftijd={p_final[0]:.1f}s"
+        f"  dood={p_final[2]}  herstarts={p_ref.get_restarts()}"
+    )
     print()
 
-    # Hoeveel ticks scheduler zonder actieve mieren?
     sched_alone = sum(1 for obs in all_obs if obs.sched_active == 0)
-    print(f"Scheduler alleen (geen actieve mieren): {sched_alone} van {len(all_obs)} ticks")
-    print(f"Scheduler stopper-callbacks            : {len(stopper_calls)}")
+    print(f"Scheduler zonder actieve mieren: {sched_alone} van {len(all_obs)} ticks")
+    print(f"Scheduler stopper-callbacks    : {len(stopper_calls)}")
     for ant_id, reason in stopper_calls:
-        label = "ResearchAnt" if r_id in ant_id else "PaperAnt"
+        label = "ResearchAnt" if "research" in ant_id else "PaperAnt"
         print(f"  {label:12s}  reden={reason}")
     print()
 
-    # Diagnose
-    _print_diagnosis(all_obs, sched_alone)
+    _print_diagnosis(all_obs, sched_alone, r_ref, p_ref)
 
     print("=" * _W)
     print("Harness klaar — geen live orders, geen Bitvavo, geen echt kapitaal")
     print("=" * _W + "\n")
 
 
-def _print_diagnosis(all_obs: list[TickObs], sched_alone: int) -> None:
+def _print_diagnosis(
+    all_obs: list[TickObs],
+    sched_alone: int,
+    r_ref: _AntRef,
+    p_ref: _AntRef,
+) -> None:
     print("Diagnose:")
-    both_running = sum(1 for obs in all_obs if obs.sched_active == 2)
-    print(f"  Beide mieren actief          : {both_running} ticks")
-    print(f"  Scheduler zonder mieren      : {sched_alone} ticks")
+    both_running = sum(1 for obs in all_obs if obs.sched_active >= 1)
+    ticks_with_dead = sum(
+        1 for obs in all_obs if obs.research[2] or obs.paper[2]
+    )
+    total_restarts = r_ref.get_restarts() + p_ref.get_restarts()
+
+    print(f"  Minstens één mier actief    : {both_running} van {len(all_obs)} ticks")
+    print(f"  Ticks met dode mier         : {ticks_with_dead}")
+    print(f"  Totaal herstarts            : {total_restarts}"
+          f"  (ResearchAnt={r_ref.get_restarts()}, PaperAnt={p_ref.get_restarts()})")
+    print(f"  Scheduler zonder mieren     : {sched_alone} ticks")
     print()
 
-    if sched_alone > 0:
-        first_alone = next(obs for obs in all_obs if obs.sched_active == 0)
-        print("  ┌─────────────────────────────────────────────────────────┐")
-        print("  │  CRASH-PATROON GEREPRODUCEERD                           │")
-        print(f"  │  Vanaf tick {first_alone.tick_n} ({first_alone.elapsed_s:.0f}s): scheduler draait,"
-              f" alle mieren weg     │")
-        print("  │  → Dit is het 2–4 uurs patroon op PC2 in 50s nagebootst │")
-        print("  └─────────────────────────────────────────────────────────┘")
-        print()
-        print("  Oorzaak: mieren voltooien (TTL) of crashen; scheduler")
-        print("  detecteert dit, maar herstart ze niet automatisch.")
-        print()
-        print("  Oplossing: gebruik _start_supervised_ant() uit start_colony.py —")
-        print("  die supervisor herstart een mier automatisch na stop/crash.")
+    if ticks_with_dead == 0 and total_restarts > 0:
+        print("  ┌─────────────────────────────────────────────────────────────┐")
+        print("  │  SUPERVISOR-RESTART WERKT CORRECT                           │")
+        print("  │  Ants zijn meerdere keren herstart maar nooit als 'dood'    │")
+        print("  │  gemarkeerd — heartbeat bleef altijd onder de drempel       │")
+        print("  └─────────────────────────────────────────────────────────────┘")
+    elif ticks_with_dead == 0:
+        print("  ┌─────────────────────────────────────────────────────────────┐")
+        print("  │  ALLE MIEREN ACTIEF GEDURENDE HELE TESTDUUR                 │")
+        print("  │  Verhoog N_TICKS / verlaag ANT_TTL om herstarts te zien     │")
+        print("  └─────────────────────────────────────────────────────────────┘")
     else:
-        print("  Alle mieren actief gedurende de volledige testduur.")
-        print("  Verhoog N_TICKS of verlaag ANT_TTL om het patroon te zien.")
+        first_dead = next(
+            (obs for obs in all_obs if obs.research[2] or obs.paper[2]), None
+        )
+        if first_dead:
+            print("  ┌─────────────────────────────────────────────────────────────┐")
+            print("  │  WAARSCHUWING: mieren als dood gemarkeerd                   │")
+            print(f"  │  Eerste dode mier: tick {first_dead.tick_n} ({first_dead.elapsed_s:.0f}s)"
+                  f"                         │")
+            print("  │  Controleer herstart-delay en dood-drempel                  │")
+            print("  └─────────────────────────────────────────────────────────────┘")
 
 # ---------------------------------------------------------------------------
 # Hoofd
@@ -402,7 +533,6 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="harness_sched_") as tmpdir:
         logs_root = Path(tmpdir)
 
-        # Scout-signaal voor PaperAnt
         _write_scout_signal(logs_root, "BTC-EUR")
 
         registry = BiomeRegistry()
@@ -412,64 +542,37 @@ def main() -> None:
 
         def _stopper(ant_id: str, reason: str) -> None:
             stopper_calls.append((ant_id, reason))
-            log.info("Scheduler stopper | ant=%s reden=%s", ant_id[:12], reason)
+            log.info("Scheduler stopper | ant=%s reden=%s", ant_id[:16], reason)
 
-        # Scheduler (tick_interval=5s, gelijk aan monitoring-interval)
         scheduler = ColonyScheduler(
             logs_root=logs_root,
             tick_interval=TICK_INTERVAL,
             agent_stopper=_stopper,
         )
 
-        # Missies + ant-IDs
         r_mission = _research_mission()
         p_mission = _paper_mission()
-        r_id = f"research-{uuid.uuid4().hex[:12]}"
-        p_id = f"paper-{uuid.uuid4().hex[:12]}"
 
-        # Ant-instanties
-        research_ant = ResearchAnt(
-            ant_id=r_id, mission=r_mission,
-            scheduler=scheduler, biome_registry=registry,
-            logs_root=logs_root,
-        )
-        paper_ant = PaperAnt(
-            ant_id=p_id, mission=p_mission,
-            scheduler=scheduler, biome_registry=registry,
-            logs_root=logs_root,
-        )
+        r_ref = _AntRef("ResearchAnt")
+        p_ref = _AntRef("PaperAnt")
 
-        ant_started_at: dict[str, float] = {}
+        def _make_research(ant_id: str) -> ResearchAnt:
+            return ResearchAnt(
+                ant_id=ant_id, mission=r_mission,
+                scheduler=scheduler, biome_registry=registry,
+                logs_root=logs_root,
+            )
+
+        def _make_paper(ant_id: str) -> PaperAnt:
+            return PaperAnt(
+                ant_id=ant_id, mission=p_mission,
+                scheduler=scheduler, biome_registry=registry,
+                logs_root=logs_root,
+            )
+
         harness_start = monotonic()
 
-        # ----------------------------------------------------------------
-        # Threads starten — patroon identiek aan start_colony.py
-        # ----------------------------------------------------------------
-
-        def _start_ant_thread(ant, label: str, ant_id: str) -> threading.Thread:
-            """Start een ant in een daemon-thread (zonder supervisor-loop)."""
-            mission = ant.mission
-
-            def _run() -> None:
-                ant_started_at[ant_id] = monotonic()
-                scheduler.register_agent(AgentRecord(
-                    ant_id=ant_id,
-                    mission_id=mission.mission_id,
-                    node_id=mission.allowed_node,
-                    ant_type=mission.ant_type,
-                    ttl=mission.ttl,
-                    heartbeat_interval=mission.heartbeat_interval,
-                ))
-                log.info("%s gestart | ant_id=%s ttl=%ds", label, ant_id[:12], mission.ttl)
-                status = ant.run()
-                log.info("%s gestopt  | ant_id=%s status=%s", label, ant_id[:12],
-                         getattr(status, "value", status))
-
-            t = threading.Thread(target=_run, name=f"{label.lower()}-thread", daemon=True)
-            t.start()
-            return t
-
-        # Scheduler-thread starten (daemon) — identiek aan _run_scheduler()
+        # Scheduler-thread (daemon)
         sched_thread = threading.Thread(
             target=scheduler.start,
             name="scheduler-thread",
@@ -478,36 +581,27 @@ def main() -> None:
         sched_thread.start()
         log.info("Scheduler-thread gestart (tick_interval=%ds)", TICK_INTERVAL)
 
-        # Even wachten zodat de scheduler zijn eerste tick al heeft gedaan
         time.sleep(0.5)
 
-        # Ant-threads starten
-        _start_ant_thread(research_ant, "ResearchAnt", r_id)
-        _start_ant_thread(paper_ant,    "PaperAnt",    p_id)
+        # Supervisor-threads (daemon, herstart automatisch bij stop)
+        _start_supervised_ant_thread(r_ref, _make_research, r_mission, scheduler, logs_root)
+        _start_supervised_ant_thread(p_ref, _make_paper,    p_mission, scheduler, logs_root)
 
-        # Even wachten zodat de AgentRecords zeker geregistreerd zijn
         time.sleep(0.5)
 
-        # ----------------------------------------------------------------
-        # Monitoring-lus (main thread)
-        # ----------------------------------------------------------------
-        log.info("Monitoring gestart | %d ticks × %ds = %ds",
-                 N_TICKS, TICK_INTERVAL, N_TICKS * TICK_INTERVAL)
+        log.info(
+            "Monitoring gestart | %d ticks × %ds = %ds  TTL=%ds  herstart_delay=%ds",
+            N_TICKS, TICK_INTERVAL, N_TICKS * TICK_INTERVAL, ANT_TTL, _RESTART_DELAY_S,
+        )
 
-        all_obs = _monitor(scheduler, r_id, p_id, harness_start)
+        all_obs = _monitor(scheduler, r_ref, p_ref, harness_start)
 
-        # ----------------------------------------------------------------
-        # Scheduler stoppen
-        # ----------------------------------------------------------------
         log.info("Harness klaar — scheduler wordt gestopt via Level-3 kill-switch")
         scheduler.kill_switch(KillLevel.COLONY)
         sched_thread.join(timeout=3.0)
 
-        # ----------------------------------------------------------------
-        # Eindrapport
-        # ----------------------------------------------------------------
-        _print_report(all_obs, scheduler, r_id, p_id,
-                      ant_started_at, harness_start, stopper_calls)
+        _print_report(all_obs, scheduler, r_ref, p_ref,
+                      harness_start, stopper_calls)
 
 
 # ---------------------------------------------------------------------------
