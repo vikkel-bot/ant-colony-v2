@@ -70,6 +70,7 @@ _SIGNAL_VALIDITY_TICKS = 2       # signal geldig voor heartbeat_interval × 2 se
 _MAX_OPEN_POSITIONS    = 10      # maximaal 10 open posities tegelijk (1 per symbool)
 _MAX_OPEN_SHORT_POSITIONS = 2    # shorts apart gelimiteerd naast long posities
 _STALE_SIGNAL_MINUTES  = 5       # signalen ouder dan dit worden genegeerd
+_STALE_APPROVED_MINUTES = 1440   # approved kandidaten blijven 24 uur geldig
 _ZOMBIE_POSITION_HOURS = 168     # posities zonder close ouder dan dit → zombie (7 dagen)
 _PAPER_CANDIDATE_WATCHDOG_SECONDS = 15 * 60
 _PAPER_TICK_WATCHDOG_SECONDS = float(os.getenv("PAPER_ANT_WATCHDOG_SECONDS", "600"))
@@ -502,6 +503,17 @@ class PaperAnt:
         try:
             ts = datetime.fromisoformat(str(ts_str).replace("Z", "+00:00"))
             return (datetime.now(tz=timezone.utc) - ts) > timedelta(minutes=_STALE_SIGNAL_MINUTES)
+        except (ValueError, TypeError):
+            return False
+
+    @staticmethod
+    def _is_stale_approved(ts_str: str | None) -> bool:
+        """True als ts_str meer dan _STALE_APPROVED_MINUTES oud is. Geen timestamp → False (fail-open)."""
+        if not ts_str:
+            return False
+        try:
+            ts = datetime.fromisoformat(str(ts_str).replace("Z", "+00:00"))
+            return (datetime.now(tz=timezone.utc) - ts) > timedelta(minutes=_STALE_APPROVED_MINUTES)
         except (ValueError, TypeError):
             return False
 
@@ -1216,10 +1228,10 @@ class PaperAnt:
                         continue
                     count += 1
 
-                    if self._is_stale_timestamp(record.get("timestamp")):
+                    if self._is_stale_approved(record.get("promoted_at") or record.get("timestamp")):
                         self._log.debug(
-                            "Stale approved-kandidaat %s overgeslagen (timestamp=%s)",
-                            candidate_id, record.get("timestamp"),
+                            "Stale approved-kandidaat %s overgeslagen (promoted_at=%s)",
+                            candidate_id, record.get("promoted_at") or record.get("timestamp"),
                         )
                         continue
 

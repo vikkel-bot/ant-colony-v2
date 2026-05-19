@@ -14,6 +14,8 @@ Scenarios:
   8.  Ongeldige JSON-regel → overgeslagen zonder crash
   9.  Meerdere APPROVED kandidaten → elk apart verwerkt
   10. Paper log bevat trade_opened event na positie openen
+  11. Stale approved kandidaat (>24u) wordt overgeslagen
+  12. Verse approved kandidaat (promoted_at recent) wordt verwerkt
 """
 
 from __future__ import annotations
@@ -132,11 +134,20 @@ def make_approved_candidate(
     )
 
 
-def write_approved(approved_dir: Path, candidate: StrategyCandidate) -> None:
+def write_approved(
+    approved_dir: Path,
+    candidate: StrategyCandidate,
+    *,
+    promoted_at: str | None = None,
+) -> None:
     approved_dir.mkdir(parents=True, exist_ok=True)
     log_path = approved_dir / f"{candidate.candidate_id}.jsonl"
+    record = candidate.model_dump(mode="json")
+    now_iso = datetime.now(timezone.utc).isoformat()
+    record["timestamp"] = promoted_at or now_iso
+    record["promoted_at"] = promoted_at or now_iso
     with log_path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(candidate.model_dump(mode="json"), default=str) + "\n")
+        fh.write(json.dumps(record, default=str) + "\n")
 
 
 def read_paper_log(tmp_path: Path) -> list[dict]:
@@ -324,4 +335,30 @@ def test_rejected_candidate_retried_after_position_closes(tmp_path: Path) -> Non
     ant._has_open_position = MagicMock(return_value=False)
     ant._process_approved_candidates()
     assert candidate.candidate_id in ant._seen_approved_ids
+    assert len(ant._ledger.open_positions) == 1
+
+
+def test_stale_approved_candidate_not_processed(tmp_path: Path) -> None:
+    """Approved kandidaat ouder dan 24 uur wordt overgeslagen."""
+    ant       = make_ant(tmp_path, price=_PRICE)
+    candidate = make_approved_candidate()
+    stale_ts  = (datetime.now(tz=timezone.utc) - timedelta(hours=25)).isoformat()
+    write_approved(tmp_path / "approved", candidate, promoted_at=stale_ts)
+
+    ant._process_approved_candidates()
+
+    assert len(ant._ledger.open_positions) == 0
+    # Niet in seen — mag opnieuw geprobeerd als timestamp ververst
+    assert candidate.candidate_id not in ant._seen_approved_ids
+
+
+def test_fresh_approved_candidate_within_24h_processed(tmp_path: Path) -> None:
+    """Approved kandidaat met promoted_at < 24 uur oud wordt wél verwerkt."""
+    ant       = make_ant(tmp_path, price=_PRICE)
+    candidate = make_approved_candidate()
+    fresh_ts  = (datetime.now(tz=timezone.utc) - timedelta(hours=23)).isoformat()
+    write_approved(tmp_path / "approved", candidate, promoted_at=fresh_ts)
+
+    ant._process_approved_candidates()
+
     assert len(ant._ledger.open_positions) == 1
