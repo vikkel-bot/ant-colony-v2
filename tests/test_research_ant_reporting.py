@@ -37,7 +37,11 @@ from ant_colony.schemas.mission import (
     RiskLimits,
     SuccessConditions,
 )
-from ant_colony.schemas.strategy_candidate import BacktestResults as SchemaBacktestResults
+from ant_colony.schemas.strategy_candidate import (
+    BacktestResults as SchemaBacktestResults,
+    CandidateStatus,
+    StrategyCandidate,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -224,6 +228,34 @@ def test_research_log_contains_strategy_type(tmp_path: Path) -> None:
     if records:
         payload = records[0]["payload"]
         assert "strategy_type" in payload
+
+
+def test_write_candidate_log_blocks_disabled_strategy_type(tmp_path: Path) -> None:
+    ant = make_ant(tmp_path)
+    candidate = StrategyCandidate(
+        candidate_id="candidate-rsi-disabled",
+        name="RSI_OVERSOLD BTC-EUR",
+        source="internal",
+        biome=_BIOME,
+        market_scope={"symbol": _SYMBOL, "timeframe": "1h"},
+        logic_summary="RSI candidate should be blocked at write-path",
+        parameters={},
+        entry_conditions={"direction": "long"},
+        exit_conditions={"take_profit_pct": 0.06, "stop_loss_pct": 0.03},
+        backtest_results=SchemaBacktestResults(
+            sharpe_ratio=0.9,
+            win_rate=0.7,
+            total_trades=20,
+            max_drawdown_pct=0.05,
+        ),
+        fitness_score=0.9,
+        status=CandidateStatus.RESEARCH,
+    )
+
+    ant._write_candidate_log(candidate, direction="long")
+
+    assert read_research_records(tmp_path) == []
+    assert ant._last_action == "strategy_disabled:rsi_based:candidate-rsi-disabled"
 
 
 def test_research_log_contains_grade(tmp_path: Path) -> None:

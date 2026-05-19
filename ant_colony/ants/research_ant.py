@@ -973,6 +973,16 @@ class ResearchAnt:
             candidate.name, entry_kws, tp_pct, strategy_type,
         )
 
+        disabled_type = _disabled_strategy_type(strategy_type)
+        if disabled_type is not None:
+            self._last_action = f"strategy_disabled:{disabled_type}:{candidate.candidate_id}"
+            self._log.debug(
+                "Kandidaat afgewezen — strategy_type=%s is uitgeschakeld | %s",
+                disabled_type,
+                candidate.candidate_id,
+            )
+            return
+
         event = AuditEvent(
             event_type=AuditEventType.ACTION_EXECUTED,
             source=self.ant_id,
