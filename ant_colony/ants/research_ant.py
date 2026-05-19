@@ -10,7 +10,7 @@ Verantwoordelijkheden:
       2. RSI              — oversold (< 30) of overbought (> 70)
       3. Bollinger bands  — prijs raakt boven- of onderband
       4. Momentum breakout — close breekt boven vorige 20-bar high
-      5. Mean reversion   — close heeft Z-score < -2.0 over 20 bars
+      5. Mean reversion   — close heeft Z-score < scanner-drempel over 20 bars
   - Per signaal een backtest uitvoeren via Backtester
   - Kandidaten met sharpe > 0.5 en win_rate > 0.45 loggen als JSON naar
     ANT_LOGS/research/{ant_id}.jsonl
@@ -60,6 +60,7 @@ _WIN_RATE_THRESHOLD = 0.45
 _TP_PCT             = 0.06  # 6 % take-profit voor backtests
 _SL_PCT             = 0.03  # 3 % stop-loss voor backtests
 _MAX_BARS_HELD      = 10
+_ZSCORE_OVERSOLD_THRESHOLD = -1.5   # paper-fase: -1.5; productie: -2.0
 _RESEARCH_WATCHDOG_SECONDS = float(os.getenv("RESEARCH_ANT_WATCHDOG_SECONDS", "600"))
 _REJECT_LOG_COOLDOWN_SECONDS = float(os.getenv("RESEARCH_REJECT_LOG_COOLDOWN_SECONDS", "1800"))
 
@@ -498,7 +499,7 @@ class ResearchAnt:
         candles: list[MarketData],
         closes: list[float],
     ) -> None:
-        """Close heeft een Z-score lager dan -2.0 over de laatste 20 bars."""
+        """Close heeft een Z-score lager dan de oversold-drempel over 20 bars."""
         if len(closes) < 20:
             return
 
@@ -510,7 +511,7 @@ class ResearchAnt:
             return
 
         z_score = (closes[-1] - avg_close) / std_close
-        if z_score >= -2.0:
+        if z_score >= _ZSCORE_OVERSOLD_THRESHOLD:
             return
 
         self._evaluate_and_emit(
@@ -526,7 +527,7 @@ class ResearchAnt:
             },
             entry_conditions={
                 "close": round(closes[-1], 4),
-                "z_score_below": -2.0,
+                "z_score_below": _ZSCORE_OVERSOLD_THRESHOLD,
             },
             logic_summary=(
                 f"Close {closes[-1]:.4f} is oversold met Z-score "

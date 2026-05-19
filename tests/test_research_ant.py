@@ -43,6 +43,7 @@ from ant_colony.ants.research_ant import (
     _MIN_CANDLES,
     _SHARPE_THRESHOLD,
     _WIN_RATE_THRESHOLD,
+    _ZSCORE_OVERSOLD_THRESHOLD,
     _COMMODITY_YFINANCE_TICKERS,
     _bollinger,
     _rsi,
@@ -243,8 +244,8 @@ BB_UPPER_CLOSES = [100.0] * 199 + [130.0]  # 200 bars
 # Momentum breakout: laatste close breekt boven vorige 20 highs
 MOMENTUM_BREAKOUT_CLOSES = [100.0] * 199 + [103.0]  # 200 bars
 
-# Mean-reversion oversold: laatste close geeft Z-score < -2.0 over 20 bars
-MEAN_REVERSION_OVERSOLD_CLOSES = [100.0] * 199 + [85.0]  # 200 bars
+# Mean-reversion oversold: laatste close geeft Z-score tussen -2.0 en paper-drempel over 20 bars
+MEAN_REVERSION_OVERSOLD_CLOSES = [100.0] * 180 + [float(v) for v in range(100, 119)] + [99.0]
 
 # Neutraal: 200 bars op constante prijs → geen SMA crossover
 FLAT_CLOSES = [100.0] * 200
@@ -532,11 +533,17 @@ class TestMomentumAndMeanReversionDetection:
         assert payload["strategy_type"] == "momentum"
 
     def test_mean_reversion_oversold_generates_long_candidate(self, tmp_path):
-        """Z-score < -2.0 over 20 bars → mean_reversion_oversold kandidaat."""
+        """Z-score onder scanner-drempel → mean_reversion_oversold kandidaat."""
         candles = make_candles(MEAN_REVERSION_OVERSOLD_CLOSES)
         registry = make_registry(candles=candles)
         ant = make_ant(tmp_path, registry=registry)
         stub_backtester(ant)
+
+        window = MEAN_REVERSION_OVERSOLD_CLOSES[-20:]
+        mean = sum(window) / len(window)
+        std = math.sqrt(sum((close - mean) ** 2 for close in window) / len(window))
+        z_score = (window[-1] - mean) / std
+        assert -2.0 < z_score < _ZSCORE_OVERSOLD_THRESHOLD
 
         ant._tick()
 
