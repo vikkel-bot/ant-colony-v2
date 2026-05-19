@@ -26,29 +26,37 @@ def test_loads_last_closed_trades_from_paper_event_logs(tmp_path: Path) -> None:
         closed = opened + timedelta(hours=2)
         rows.append({
             "timestamp": opened.isoformat(),
-            "action": "trade_opened",
-            "position_id": f"p-{idx}",
-            "symbol": "BTC-EUR",
-            "strategy_type": "sma_crossover",
-            "biome": "crypto",
-            "entry_price": 100.0,
+            "event_type": "action_executed",
+            "source": f"paper-{idx}",
+            "payload": {
+                "action": "trade_opened",
+                "position_id": f"p-{idx}",
+                "symbol": "BTC-EUR",
+                "strategy_type": "sma_crossover",
+                "biome": "crypto",
+                "entry_price": 100.0,
+            },
         })
         rows.append({
             "timestamp": closed.isoformat(),
-            "action": "trade_closed",
-            "position_id": f"p-{idx}",
-            "symbol": "BTC-EUR",
-            "pnl_net": 10.0 if idx % 2 == 0 else -5.0,
-            "exit_reason": "take_profit" if idx % 2 == 0 else "stop_loss",
-            "exit_time": closed.isoformat(),
+            "event_type": "action_executed",
+            "source": f"paper-{idx}",
+            "payload": {
+                "action": "trade_closed",
+                "position_id": f"p-{idx}",
+                "symbol": "BTC-EUR",
+                "pnl_net": 10.0 if idx % 2 == 0 else -5.0,
+                "exit_reason": "take_profit" if idx % 2 == 0 else "stop_loss",
+                "exit_time": closed.isoformat(),
+            },
         })
 
-    _write_jsonl(tmp_path / "paper" / "paper-test.jsonl", rows)
+    _write_jsonl(tmp_path / "paper" / "paper-test_trades.jsonl", rows)
 
     trades, sources = load_closed_trades(logs_root=tmp_path, repo_root=tmp_path)
 
     assert len(trades) == 6
-    assert sources == [tmp_path / "paper" / "paper-test.jsonl"]
+    assert sources == [tmp_path / "paper" / "paper-test_trades.jsonl"]
     assert trades[-1]["duration_hours"] == 2.0
     assert trades[-1]["strategy_type"] == "sma_crossover"
     assert trades[-1]["biome"] == "crypto"

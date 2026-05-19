@@ -140,45 +140,28 @@ def _iter_json_records(path: Path) -> list[dict[str, Any]]:
     return records
 
 
-def _flatten_record(record: dict[str, Any]) -> dict[str, Any]:
+def _payload_from_record(record: dict[str, Any]) -> dict[str, Any]:
     payload = record.get("payload")
     if isinstance(payload, dict):
-        merged = dict(record)
-        merged.update(payload)
-        if "event_timestamp" not in merged:
-            merged["event_timestamp"] = record.get("timestamp")
-        return merged
-    merged = dict(record)
-    merged.setdefault("event_timestamp", record.get("timestamp"))
-    return merged
+        row = dict(payload)
+    else:
+        # Backward compatible with older local fixtures that logged the action at
+        # the root level instead of inside AuditEvent.payload.
+        row = dict(record)
+    return row
 
 
-def _closed_trade_from_record(
-    record: dict[str, Any],
+def _closed_trade_from_payload(
+    payload: dict[str, Any],
     opened_by_id: dict[str, dict[str, Any]],
 ) -> dict[str, Any] | None:
-    row = _flatten_record(record)
-    action = str(row.get("action") or "").lower()
-    position_id = str(row.get("position_id") or row.get("id") or "").strip()
-
-    if action in {"trade_opened", "position_opened"} and position_id:
-        row.setdefault("opened_at", row.get("event_timestamp") or row.get("timestamp"))
-        opened_by_id[position_id] = row
-        return None
-
-    has_close_marker = bool(_first(row, "closed_at", "exit_time"))
-    is_close_action = action in {"trade_closed", "position_closed"}
-    if not has_close_marker and not is_close_action:
-        return None
-
+    position_id = str(payload.get("position_id") or payload.get("id") or "").strip()
     base = opened_by_id.get(position_id, {}) if position_id else {}
     combined = dict(base)
-    combined.update(row)
+    combined.update(payload)
 
     closed_at = _parse_ts(
         _first(combined, "closed_at", "exit_time", "closed_time")
-        or (combined.get("event_timestamp") if is_close_action else None)
-        or (combined.get("timestamp") if is_close_action else None)
     )
     if closed_at is None:
         return None
@@ -200,20 +183,40 @@ def load_closed_trades(
     repo_root: Path | None = None,
 ) -> tuple[list[dict[str, Any]], list[Path]]:
     opened_by_id: dict[str, dict[str, Any]] = {}
+    closed_payloads: list[dict[str, Any]] = []
     trades_by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
     sources = _paper_jsonl_sources(logs_root)
 
     for path in sources:
         for record in _iter_json_records(path):
-            trade = _closed_trade_from_record(record, opened_by_id)
-            if trade is None:
+            payload = _payload_from_record(record)
+            action = str(payload.get("action") or "").lower()
+            position_id = payload.get("position_id")
+
+            if action in {"trade_opened", "position_opened"}:
+                if "opened_at" not in payload and "timestamp" in record:
+                    payload["opened_at"] = record["timestamp"]
+                if position_id:
+                    opened_by_id[str(position_id)] = payload
                 continue
-            key = (
-                trade.get("position_id") or "",
-                trade["symbol"],
-                trade["closed_at"].isoformat(),
-            )
-            trades_by_key[key] = trade
+
+            if action not in {"trade_closed", "position_closed"}:
+                continue
+
+            if "exit_time" not in payload and "timestamp" in record:
+                payload["exit_time"] = record["timestamp"]
+            closed_payloads.append(payload)
+
+    for payload in closed_payloads:
+        trade = _closed_trade_from_payload(payload, opened_by_id)
+        if trade is None:
+            continue
+        key = (
+            trade.get("position_id") or "",
+            trade["symbol"],
+            trade["closed_at"].isoformat(),
+        )
+        trades_by_key[key] = trade
 
     trades = sorted(trades_by_key.values(), key=lambda t: t["closed_at"])
     return trades[-MAX_TRADES:], sources
@@ -292,7 +295,7 @@ def write_report(report: str, logs_root: Path = DEFAULT_LOGS_ROOT) -> Path:
 def main() -> int:
     trades, sources = load_closed_trades()
     if len(trades) < MIN_CLOSED_TRADES:
-        source_msg = ", ".join(str(path) for path in sources) if sources else "geen ledger/logbron gevonden"
+        source_msg = ", ".join(str(path) for path in sources) if sources else "geen paper JSONL-logbron gevonden"
         print(
             "WAARSCHUWING: minder dan 5 gesloten trades gevonden "
             f"({len(trades)}). Geen rapport geschreven. Bronnen: {source_msg}"
