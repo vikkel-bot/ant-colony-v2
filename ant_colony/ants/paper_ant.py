@@ -1463,7 +1463,7 @@ class PaperAnt:
             if adapter is None or not adapter.is_available():
                 return None
             md = adapter.get_market_data(symbol, "1m")
-            if md is None or not md.is_valid_price or md.is_stale():
+            if md is None or not md.is_valid_price or md.is_stale(max_age_seconds=300.0):
                 return None
             return md.close
         except Exception:
