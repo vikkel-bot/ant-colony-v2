@@ -306,3 +306,22 @@ def test_trade_opened_event_in_log(tmp_path: Path) -> None:
     logs    = read_paper_log(tmp_path)
     actions = [r.get("payload", {}).get("action") for r in logs]
     assert "trade_opened" in actions
+
+
+def test_rejected_candidate_retried_after_position_closes(tmp_path: Path) -> None:
+    """Geweigerde kandidaat (al open positie) wordt opnieuw geprobeerd als de positie gesloten is."""
+    ant       = make_ant(tmp_path, price=_PRICE)
+    candidate = make_approved_candidate()
+    write_approved(tmp_path / "approved", candidate)
+
+    # Tick 1: simuleer een open positie — _open_from_candidate geeft False terug
+    ant._has_open_position = MagicMock(return_value=True)
+    ant._process_approved_candidates()
+    # Kandidaat geblokkeerd → niet in _seen_approved_ids
+    assert candidate.candidate_id not in ant._seen_approved_ids
+
+    # Tick 2: positie weg → kandidaat moet nu wél worden geprobeerd
+    ant._has_open_position = MagicMock(return_value=False)
+    ant._process_approved_candidates()
+    assert candidate.candidate_id in ant._seen_approved_ids
+    assert len(ant._ledger.open_positions) == 1

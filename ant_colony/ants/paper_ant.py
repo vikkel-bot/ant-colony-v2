@@ -1214,7 +1214,6 @@ class PaperAnt:
                     candidate_id = str(record.get("candidate_id") or "")
                     if not candidate_id or candidate_id in self._seen_approved_ids:
                         continue
-                    self._seen_approved_ids.add(candidate_id)
                     count += 1
 
                     if self._is_stale_timestamp(record.get("timestamp")):
@@ -1224,15 +1223,19 @@ class PaperAnt:
                         )
                         continue
 
-                    self._open_from_candidate(record, regime=regime)
+                    if self._open_from_candidate(record, regime=regime):
+                        self._seen_approved_ids.add(candidate_id)
 
             except OSError:
                 self._log.warning("Kan approved-log niet lezen: %s", jsonl_path)
 
         return count
 
-    def _open_from_candidate(self, record: dict, regime: str | None = None) -> None:
-        """Open een paper positie op basis van een APPROVED StrategyCandidate record."""
+    def _open_from_candidate(self, record: dict, regime: str | None = None) -> bool:
+        """Open een paper positie op basis van een APPROVED StrategyCandidate record.
+
+        Retourneert True als _try_open_position aangeroepen is, False bij elke vroege return.
+        """
         market_scope = record.get("market_scope") or {}
         # Ondersteunt zowel "symbol": "BTC-EUR" als "symbols": ["BTC-EUR", ...]
         raw_symbol = market_scope.get("symbol") or ""
@@ -1245,7 +1248,7 @@ class PaperAnt:
                 "Approved kandidaat overgeslagen: geen symbool | %s",
                 record.get("candidate_id"),
             )
-            return
+            return False
 
         parameters  = record.get("parameters") or {}
         entry_cond  = record.get("entry_conditions") or {}
@@ -1260,7 +1263,7 @@ class PaperAnt:
                 "Approved kandidaat overgeslagen: ongeldige direction=%s | %s",
                 direction, record.get("candidate_id"),
             )
-            return
+            return False
 
         price = self._fetch_price(symbol)
         if price is None or price <= 0:
@@ -1268,7 +1271,7 @@ class PaperAnt:
                 "Approved kandidaat overgeslagen: geen prijs voor %s | %s",
                 symbol, record.get("candidate_id"),
             )
-            return
+            return False
 
         # Sla over als er al een open positie is voor dit symbool
         if self._has_open_position(symbol):
@@ -1276,7 +1279,7 @@ class PaperAnt:
                 "Approved kandidaat overgeslagen: al open positie voor %s | %s",
                 symbol, record.get("candidate_id"),
             )
-            return
+            return False
 
         # Regime-filter op approved candidates
         strategy_type = str(
@@ -1293,15 +1296,15 @@ class PaperAnt:
         if direction == "short":
             if biome != "crypto":
                 self._log.info("Entry geblokkeerd: %s short alleen toegestaan in crypto biome", symbol)
-                return
+                return False
             allowed, reason = self._is_short_allowed_by_regime(regime, symbol=symbol)
             if not allowed:
                 self._log.info("Entry geblokkeerd: %s", reason)
-                return
+                return False
             allowed, reason = self._short_capacity_available(symbol)
             if not allowed:
                 self._log.info("Entry geblokkeerd: %s", reason)
-                return
+                return False
             allowed, reason = self._passes_entry_thresholds(
                 symbol=symbol,
                 strategy_type=strategy_type,
@@ -1310,7 +1313,7 @@ class PaperAnt:
             )
             if not allowed:
                 self._log.info("Entry geblokkeerd: %s", reason)
-                return
+                return False
 
         if direction == "long":
             allowed, reason = self._is_entry_allowed_by_regime(
@@ -1318,7 +1321,7 @@ class PaperAnt:
             )
             if not allowed:
                 self._log.info("Entry geblokkeerd: %s", reason)
-                return
+                return False
 
         sig = {
             "symbol":        symbol,
@@ -1335,6 +1338,7 @@ class PaperAnt:
             tp_pct=_SHORT_TP_PCT if direction == "short" else None,
             sharpe=sharpe,
         )
+        return True
 
     # ------------------------------------------------------------------
     # Scout-signalen lezen
