@@ -1241,6 +1241,10 @@ class PaperAnt:
             raw_symbol = symbols_list[0] if symbols_list else ""
         symbol = str(raw_symbol)
         if not symbol:
+            self._log.info(
+                "Approved kandidaat overgeslagen: geen symbool | %s",
+                record.get("candidate_id"),
+            )
             return
 
         parameters  = record.get("parameters") or {}
@@ -1252,20 +1256,26 @@ class PaperAnt:
         )
 
         if direction not in ("long", "short"):
-            self._log.debug(
-                "Approved candidate %s heeft unsupported direction=%s — overgeslagen",
-                record.get("candidate_id"), direction,
+            self._log.info(
+                "Approved kandidaat overgeslagen: ongeldige direction=%s | %s",
+                direction, record.get("candidate_id"),
             )
             return
 
         price = self._fetch_price(symbol)
         if price is None or price <= 0:
-            self._log.debug("Geen prijs beschikbaar voor approved candidate %s", symbol)
+            self._log.info(
+                "Approved kandidaat overgeslagen: geen prijs voor %s | %s",
+                symbol, record.get("candidate_id"),
+            )
             return
 
         # Sla over als er al een open positie is voor dit symbool
         if self._has_open_position(symbol):
-            self._log.debug("Al een open positie voor %s — approved candidate overgeslagen", symbol)
+            self._log.info(
+                "Approved kandidaat overgeslagen: al open positie voor %s | %s",
+                symbol, record.get("candidate_id"),
+            )
             return
 
         # Regime-filter op approved candidates
