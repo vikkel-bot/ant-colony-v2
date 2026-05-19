@@ -28,7 +28,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from ant_colony.colony.promoter import StrategyPromoter, _MIN_TRADES, _SHARPE_THRESHOLD, _WIN_RATE_THRESHOLD
+from ant_colony.colony.promoter import (
+    StrategyPromoter,
+    _MIN_TRADES, _SHARPE_THRESHOLD, _WIN_RATE_THRESHOLD,
+    _RUN_ONCE_MIN_TRADES, _RUN_ONCE_SHARPE_THRESHOLD, _RUN_ONCE_WIN_RATE_THRESHOLD,
+)
 from ant_colony.colony.scheduler.colony_scheduler import ColonyScheduler
 from ant_colony.lab.backtester import BacktestResults
 from ant_colony.queen.queen import Queen, PromotionResult
@@ -283,3 +287,34 @@ def test_tick_is_fail_closed(tmp_path: Path) -> None:
     write_research_candidate(tmp_path / "research", candidate)
 
     promoter.tick()  # should not raise
+
+
+def test_run_once_promotes_candidate_above_lower_threshold(tmp_path: Path) -> None:
+    """run_once() accepteert kandidaten boven de lagere drempel die tick() zou weigeren."""
+    queen     = make_queen(tmp_path)
+    promoter  = StrategyPromoter(queen=queen, logs_root=tmp_path)
+    # boven _RUN_ONCE_* drempel maar onder _SHARPE_THRESHOLD / _WIN_RATE_THRESHOLD / _MIN_TRADES
+    candidate = make_candidate(
+        sharpe=_RUN_ONCE_SHARPE_THRESHOLD + 0.05,       # 0.20 < _SHARPE_THRESHOLD (0.7)
+        win_rate=_RUN_ONCE_WIN_RATE_THRESHOLD + 0.05,   # 0.50 < _WIN_RATE_THRESHOLD (0.55)
+        total_trades=_RUN_ONCE_MIN_TRADES + 5,           # 10 < _MIN_TRADES (20)
+    )
+    write_research_candidate(tmp_path / "research", candidate)
+
+    promoter.run_once()
+
+    records = read_approved(tmp_path)
+    assert len(records) == 1
+    assert records[0]["candidate_id"] == candidate.candidate_id
+    assert records[0]["status"] == "approved"
+
+
+def test_run_once_is_fail_closed(tmp_path: Path) -> None:
+    """run_once() absorbeert alle exceptions (fail-closed)."""
+    queen    = MagicMock()
+    queen.promote_candidate.side_effect = RuntimeError("onverwachte fout")
+    promoter  = StrategyPromoter(queen=queen, logs_root=tmp_path)
+    candidate = make_candidate(sharpe=0.9, win_rate=0.65, total_trades=30)
+    write_research_candidate(tmp_path / "research", candidate)
+
+    promoter.run_once()  # should not raise

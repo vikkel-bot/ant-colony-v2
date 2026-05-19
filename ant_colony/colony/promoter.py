@@ -34,6 +34,11 @@ _SHARPE_THRESHOLD    = 0.15
 _WIN_RATE_THRESHOLD  = 0.45
 _MIN_TRADES          = 5
 
+# Lagere drempelwaarden voor run_once() — bedoeld voor de colony runtime (60s interval)
+_RUN_ONCE_SHARPE_THRESHOLD   = 0.15
+_RUN_ONCE_WIN_RATE_THRESHOLD  = 0.45
+_RUN_ONCE_MIN_TRADES          = 5
+
 _PAPER_TTL           = 1_209_600          # 14 dagen in seconden
 _PAPER_CAPITAL       = 100.0              # EUR per kandidaat
 _PAPER_HEARTBEAT     = 300                # 5 minuten
@@ -68,20 +73,47 @@ class StrategyPromoter:
 
     def tick(self) -> None:
         """
-        Één promotiecyclus: lees logs, beoordeel, promoveer.
+        Één promotiecyclus met hoge drempelwaarden (sharpe>=0.7, win_rate>=0.55, trades>=20).
 
         Fail-closed: negeert alle exceptions.
         """
         try:
-            self._process_candidates()
+            self._process_candidates(
+                sharpe_threshold=_SHARPE_THRESHOLD,
+                win_rate_threshold=_WIN_RATE_THRESHOLD,
+                min_trades=_MIN_TRADES,
+            )
         except Exception:
             logger.exception("Onverwachte fout in StrategyPromoter.tick()")
+
+    def run_once(self) -> None:
+        """
+        Één promotiecyclus met lagere drempelwaarden (sharpe>=0.15, win_rate>=0.45, trades>=5).
+
+        Bedoeld voor gebruik door de colony runtime (elke 60 seconden). Accepteert
+        kandidaten die aan de minimale research-kwaliteitseisen voldoen.
+
+        Fail-closed: negeert alle exceptions.
+        """
+        try:
+            self._process_candidates(
+                sharpe_threshold=_RUN_ONCE_SHARPE_THRESHOLD,
+                win_rate_threshold=_RUN_ONCE_WIN_RATE_THRESHOLD,
+                min_trades=_RUN_ONCE_MIN_TRADES,
+            )
+        except Exception:
+            logger.exception("Onverwachte fout in StrategyPromoter.run_once()")
 
     # ------------------------------------------------------------------
     # Intern
     # ------------------------------------------------------------------
 
-    def _process_candidates(self) -> None:
+    def _process_candidates(
+        self,
+        sharpe_threshold: float = _SHARPE_THRESHOLD,
+        win_rate_threshold: float = _WIN_RATE_THRESHOLD,
+        min_trades: int = _MIN_TRADES,
+    ) -> None:
         if self._logs_root is None:
             return
 
@@ -90,9 +122,16 @@ class StrategyPromoter:
             if not dir_path.exists():
                 continue
             for path in sorted(dir_path.glob("*.jsonl")):
-                self._process_file(path, source_dir)
+                self._process_file(path, source_dir, sharpe_threshold, win_rate_threshold, min_trades)
 
-    def _process_file(self, path: Path, source_dir: str) -> None:
+    def _process_file(
+        self,
+        path: Path,
+        source_dir: str,
+        sharpe_threshold: float,
+        win_rate_threshold: float,
+        min_trades: int,
+    ) -> None:
         try:
             for line in path.read_text(encoding="utf-8").splitlines():
                 if not line.strip():
@@ -119,7 +158,7 @@ class StrategyPromoter:
                 if candidate.status != CandidateStatus.RESEARCH:
                     continue
 
-                if not self._meets_criteria(candidate):
+                if not self._meets_criteria(candidate, sharpe_threshold, win_rate_threshold, min_trades):
                     continue
 
                 self._promote(candidate)
@@ -142,20 +181,26 @@ class StrategyPromoter:
                 return None
             return raw
 
-    def _meets_criteria(self, candidate: StrategyCandidate) -> bool:
+    def _meets_criteria(
+        self,
+        candidate: StrategyCandidate,
+        sharpe_threshold: float = _SHARPE_THRESHOLD,
+        win_rate_threshold: float = _WIN_RATE_THRESHOLD,
+        min_trades: int = _MIN_TRADES,
+    ) -> bool:
         """Controleer of de kandidaat voldoet aan de promotie-criteria."""
         bt = candidate.backtest_results
         if bt is None:
             return False
 
-        sharpe      = getattr(bt, "sharpe_ratio", None) or 0.0
-        win_rate    = getattr(bt, "win_rate", None) or 0.0
+        sharpe       = getattr(bt, "sharpe_ratio", None) or 0.0
+        win_rate     = getattr(bt, "win_rate", None) or 0.0
         total_trades = getattr(bt, "total_trades", None) or 0
 
         passes = (
-            sharpe      >= _SHARPE_THRESHOLD
-            and win_rate    >= _WIN_RATE_THRESHOLD
-            and total_trades >= _MIN_TRADES
+            sharpe       >= sharpe_threshold
+            and win_rate     >= win_rate_threshold
+            and total_trades >= min_trades
         )
 
         if not passes:

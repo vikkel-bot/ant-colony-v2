@@ -771,6 +771,25 @@ def main() -> None:
         "RESEARCH kandidaten worden niet automatisch via promoter gepromoveerd."
     )
 
+    # --- Stap 6b: StrategyPromoter ---
+    try:
+        from ant_colony.colony.promoter import StrategyPromoter as _StrategyPromoter
+
+        _promoter = _StrategyPromoter(queen=queen, logs_root=logs_root, node_id=args.node_id)
+
+        def _promoter_loop() -> None:
+            while True:
+                try:
+                    _promoter.run_once()
+                except Exception:
+                    pass
+                time.sleep(60)
+
+        threading.Thread(target=_promoter_loop, daemon=True, name="promoter").start()
+        log.info("StrategyPromoter gestart | interval=60s")
+    except Exception:
+        log.exception("StrategyPromoter bootstrap mislukt — colony draait door.")
+
     # --- Stap 7: registreer PC2 node ---
     all_ant_types = [t.value for t in AntType]
     hostname = args.node_hostname or socket.gethostname()
