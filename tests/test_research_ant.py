@@ -240,6 +240,12 @@ BB_LOWER_CLOSES = [100.0] * 199 + [70.0]  # 200 bars
 # mean≈100.15, std≈2.1, upper≈104.4 → 130 > upper ✓
 BB_UPPER_CLOSES = [100.0] * 199 + [130.0]  # 200 bars
 
+# Momentum breakout: laatste close breekt boven vorige 20 highs
+MOMENTUM_BREAKOUT_CLOSES = [100.0] * 199 + [103.0]  # 200 bars
+
+# Mean-reversion oversold: laatste close geeft Z-score < -2.0 over 20 bars
+MEAN_REVERSION_OVERSOLD_CLOSES = [100.0] * 199 + [85.0]  # 200 bars
+
 # Neutraal: 200 bars op constante prijs → geen SMA crossover
 FLAT_CLOSES = [100.0] * 200
 
@@ -499,6 +505,50 @@ class TestBollingerDetection:
             if "BB_" in (r.get("payload") or {}).get("signal_type", "").upper()
         ]
         assert len(bb_records) == 0
+
+
+# ---------------------------------------------------------------------------
+# Momentum / mean-reversion detectie
+# ---------------------------------------------------------------------------
+
+class TestMomentumAndMeanReversionDetection:
+    def test_momentum_breakout_generates_long_candidate(self, tmp_path):
+        """Close boven vorige 20-bar high → momentum_breakout kandidaat."""
+        candles = make_candles(MOMENTUM_BREAKOUT_CLOSES)
+        registry = make_registry(candles=candles)
+        ant = make_ant(tmp_path, registry=registry)
+        stub_backtester(ant)
+
+        ant._tick()
+
+        records = read_jsonl(log_path(tmp_path, ant))
+        momentum_records = [
+            r for r in records
+            if "MOMENTUM_BREAKOUT" in (r.get("payload") or {}).get("signal_type", "").upper()
+        ]
+        assert len(momentum_records) >= 1
+        payload = momentum_records[0]["payload"]
+        assert payload["direction"] == "long"
+        assert payload["strategy_type"] == "momentum"
+
+    def test_mean_reversion_oversold_generates_long_candidate(self, tmp_path):
+        """Z-score < -2.0 over 20 bars → mean_reversion_oversold kandidaat."""
+        candles = make_candles(MEAN_REVERSION_OVERSOLD_CLOSES)
+        registry = make_registry(candles=candles)
+        ant = make_ant(tmp_path, registry=registry)
+        stub_backtester(ant)
+
+        ant._tick()
+
+        records = read_jsonl(log_path(tmp_path, ant))
+        mean_reversion_records = [
+            r for r in records
+            if "MEAN_REVERSION_OVERSOLD" in (r.get("payload") or {}).get("signal_type", "").upper()
+        ]
+        assert len(mean_reversion_records) >= 1
+        payload = mean_reversion_records[0]["payload"]
+        assert payload["direction"] == "long"
+        assert payload["strategy_type"] == "mean_reversion"
 
 
 # ---------------------------------------------------------------------------

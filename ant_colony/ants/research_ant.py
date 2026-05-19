@@ -5,10 +5,12 @@ ResearchAnt — analyseert markten en genereert StrategyCandidate objecten.
 
 Verantwoordelijkheden:
   - Historische OHLCV data ophalen via BiomeAdapter (100 candles, 1h)
-  - Drie technische signalen detecteren per symbool:
+  - Vijf technische signalen detecteren per symbool:
       1. SMA-crossover    — SMA20 kruist SMA50
       2. RSI              — oversold (< 30) of overbought (> 70)
       3. Bollinger bands  — prijs raakt boven- of onderband
+      4. Momentum breakout — close breekt boven vorige 20-bar high
+      5. Mean reversion   — close heeft Z-score < -2.0 over 20 bars
   - Per signaal een backtest uitvoeren via Backtester
   - Kandidaten met sharpe > 0.5 en win_rate > 0.45 loggen als JSON naar
     ANT_LOGS/research/{ant_id}.jsonl
@@ -276,9 +278,12 @@ class ResearchAnt:
                 continue
 
             closes = [c.close for c in candles]
+            highs = [c.high for c in candles]
             self._check_sma_crossover(symbol, candles, closes)
             self._check_rsi(symbol, candles, closes)
             self._check_bollinger(symbol, candles, closes)
+            self._check_momentum_breakout(symbol, candles, closes, highs)
+            self._check_mean_reversion_oversold(symbol, candles, closes)
 
         self._process_ingestion_candidates()
         self._process_commodity_watchtower_signals()
@@ -447,6 +452,85 @@ class ResearchAnt:
                 f"Prijs {'op' if 'touch' in signal_type else 'nabij'} "
                 f"{'bovenste' if direction == 'short' else 'onderste'} "
                 f"Bollinger band op {symbol}"
+            ),
+        )
+
+    def _check_momentum_breakout(
+        self,
+        symbol: str,
+        candles: list[MarketData],
+        closes: list[float],
+        highs: list[float],
+    ) -> None:
+        """Close breekt boven de hoogste high van de vorige 20 bars."""
+        if len(closes) < 21 or len(highs) < 21:
+            return
+
+        breakout_level = max(highs[-21:-1])
+        last_close = closes[-1]
+        if breakout_level <= 0 or last_close <= breakout_level:
+            return
+
+        breakout_pct = (last_close - breakout_level) / breakout_level
+        self._evaluate_and_emit(
+            symbol=symbol,
+            candles=candles,
+            signal_type="momentum_breakout",
+            direction="long",
+            parameters={
+                "lookback_bars": 20,
+                "breakout_level": round(breakout_level, 4),
+                "breakout_pct": round(breakout_pct, 6),
+            },
+            entry_conditions={
+                "close": round(last_close, 4),
+                "above_20_bar_high": round(breakout_level, 4),
+            },
+            logic_summary=(
+                f"Close {last_close:.4f} breekt boven 20-bar high "
+                f"{breakout_level:.4f} op {symbol}"
+            ),
+        )
+
+    def _check_mean_reversion_oversold(
+        self,
+        symbol: str,
+        candles: list[MarketData],
+        closes: list[float],
+    ) -> None:
+        """Close heeft een Z-score lager dan -2.0 over de laatste 20 bars."""
+        if len(closes) < 20:
+            return
+
+        window = closes[-20:]
+        avg_close = sum(window) / len(window)
+        variance = sum((close - avg_close) ** 2 for close in window) / len(window)
+        std_close = math.sqrt(variance)
+        if std_close <= 0:
+            return
+
+        z_score = (closes[-1] - avg_close) / std_close
+        if z_score >= -2.0:
+            return
+
+        self._evaluate_and_emit(
+            symbol=symbol,
+            candles=candles,
+            signal_type="mean_reversion_oversold",
+            direction="long",
+            parameters={
+                "zscore_window": 20,
+                "z_score": round(z_score, 4),
+                "mean_close": round(avg_close, 4),
+                "std_close": round(std_close, 4),
+            },
+            entry_conditions={
+                "close": round(closes[-1], 4),
+                "z_score_below": -2.0,
+            },
+            logic_summary=(
+                f"Close {closes[-1]:.4f} is oversold met Z-score "
+                f"{z_score:.2f} over 20 bars op {symbol}"
             ),
         )
 
