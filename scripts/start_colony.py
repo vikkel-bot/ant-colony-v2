@@ -766,6 +766,10 @@ def main() -> None:
         logs_root=logs_root,
     )
     log.info("Queen aangemaakt — kapitaal: €%.2f", capital)
+    log.warning(
+        "StrategyPromoter is niet gekoppeld aan start_colony runtime — "
+        "RESEARCH kandidaten worden niet automatisch via promoter gepromoveerd."
+    )
 
     # --- Stap 7: registreer PC2 node ---
     all_ant_types = [t.value for t in AntType]

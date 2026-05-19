@@ -53,9 +53,9 @@ def make_queen(tmp_path: Path) -> Queen:
 def make_candidate(
     *,
     status: CandidateStatus = CandidateStatus.RESEARCH,
-    sharpe: float = 0.8,
-    win_rate: float = 0.6,
-    total_trades: int = 25,
+    sharpe: float = _SHARPE_THRESHOLD + 0.05,
+    win_rate: float = _WIN_RATE_THRESHOLD + 0.05,
+    total_trades: int = _MIN_TRADES,
 ) -> StrategyCandidate:
     return StrategyCandidate(
         candidate_id=f"cand-{uuid.uuid4().hex[:8]}",
@@ -117,11 +117,18 @@ def read_approved(tmp_path: Path) -> list[dict]:
 # Tests
 # ---------------------------------------------------------------------------
 
+def test_promoter_thresholds_are_paper_phase_values() -> None:
+    """Promoter gebruikt tijdelijk lagere paper-testfase drempels."""
+    assert _SHARPE_THRESHOLD == 0.15
+    assert _WIN_RATE_THRESHOLD == 0.45
+    assert _MIN_TRADES == 5
+
+
 def test_high_quality_candidate_becomes_approved(tmp_path: Path) -> None:
     """RESEARCH kandidaat met hoge metrics → APPROVED op disk."""
     queen     = make_queen(tmp_path)
     promoter  = StrategyPromoter(queen=queen, logs_root=tmp_path)
-    candidate = make_candidate(sharpe=0.9, win_rate=0.65, total_trades=30)
+    candidate = make_candidate()
     write_research_candidate(tmp_path / "research", candidate)
 
     promoter.tick()
@@ -136,7 +143,11 @@ def test_low_sharpe_not_promoted(tmp_path: Path) -> None:
     """Kandidaat met sharpe < drempel → niet gepromoveerd."""
     queen     = make_queen(tmp_path)
     promoter  = StrategyPromoter(queen=queen, logs_root=tmp_path)
-    candidate = make_candidate(sharpe=_SHARPE_THRESHOLD - 0.1, win_rate=0.65, total_trades=30)
+    candidate = make_candidate(
+        sharpe=_SHARPE_THRESHOLD - 0.01,
+        win_rate=_WIN_RATE_THRESHOLD + 0.05,
+        total_trades=_MIN_TRADES,
+    )
     write_research_candidate(tmp_path / "research", candidate)
 
     promoter.tick()
@@ -148,7 +159,11 @@ def test_low_win_rate_not_promoted(tmp_path: Path) -> None:
     """Kandidaat met win_rate < drempel → niet gepromoveerd."""
     queen     = make_queen(tmp_path)
     promoter  = StrategyPromoter(queen=queen, logs_root=tmp_path)
-    candidate = make_candidate(sharpe=0.9, win_rate=_WIN_RATE_THRESHOLD - 0.01, total_trades=30)
+    candidate = make_candidate(
+        sharpe=_SHARPE_THRESHOLD + 0.05,
+        win_rate=_WIN_RATE_THRESHOLD - 0.01,
+        total_trades=_MIN_TRADES,
+    )
     write_research_candidate(tmp_path / "research", candidate)
 
     promoter.tick()
@@ -160,7 +175,11 @@ def test_too_few_trades_not_promoted(tmp_path: Path) -> None:
     """Kandidaat met total_trades < minimum → niet gepromoveerd."""
     queen     = make_queen(tmp_path)
     promoter  = StrategyPromoter(queen=queen, logs_root=tmp_path)
-    candidate = make_candidate(sharpe=0.9, win_rate=0.65, total_trades=_MIN_TRADES - 1)
+    candidate = make_candidate(
+        sharpe=_SHARPE_THRESHOLD + 0.05,
+        win_rate=_WIN_RATE_THRESHOLD + 0.05,
+        total_trades=_MIN_TRADES - 1,
+    )
     write_research_candidate(tmp_path / "research", candidate)
 
     promoter.tick()
@@ -179,7 +198,7 @@ def test_duplicate_not_reprocessed(tmp_path: Path) -> None:
     """Zelfde candidate_id twee keer aangeboden → slechts één keer gepromoveerd."""
     queen     = make_queen(tmp_path)
     promoter  = StrategyPromoter(queen=queen, logs_root=tmp_path)
-    candidate = make_candidate(sharpe=0.9, win_rate=0.65, total_trades=30)
+    candidate = make_candidate()
     write_research_candidate(tmp_path / "research", candidate)
 
     promoter.tick()
@@ -192,7 +211,7 @@ def test_strategy_log_format_parsed_correctly(tmp_path: Path) -> None:
     """Kandidaat in strategy log (AuditEvent formaat) → juist geparsed en gepromoveerd."""
     queen     = make_queen(tmp_path)
     promoter  = StrategyPromoter(queen=queen, logs_root=tmp_path)
-    candidate = make_candidate(sharpe=0.9, win_rate=0.65, total_trades=30)
+    candidate = make_candidate()
     write_strategy_candidate(tmp_path / "strategy", candidate)
 
     promoter.tick()
@@ -206,7 +225,7 @@ def test_non_research_status_skipped(tmp_path: Path) -> None:
     """Kandidaat met status != RESEARCH → overgeslagen."""
     queen     = make_queen(tmp_path)
     promoter  = StrategyPromoter(queen=queen, logs_root=tmp_path)
-    candidate = make_candidate(status=CandidateStatus.PAPER, sharpe=0.9, win_rate=0.65, total_trades=30)
+    candidate = make_candidate(status=CandidateStatus.PAPER)
     write_research_candidate(tmp_path / "research", candidate)
 
     promoter.tick()
@@ -226,7 +245,7 @@ def test_invalid_json_skipped(tmp_path: Path) -> None:
     """Ongeldige JSON-regel → overgeslagen, rest verwerkt."""
     queen     = make_queen(tmp_path)
     promoter  = StrategyPromoter(queen=queen, logs_root=tmp_path)
-    candidate = make_candidate(sharpe=0.9, win_rate=0.65, total_trades=30)
+    candidate = make_candidate()
 
     research_dir = tmp_path / "research"
     research_dir.mkdir(parents=True, exist_ok=True)
@@ -247,7 +266,7 @@ def test_queen_refuses_paper_promotion_no_approved(tmp_path: Path) -> None:
         accepted=False, rejection_reason="test weigering"
     )
     promoter  = StrategyPromoter(queen=queen, logs_root=tmp_path)
-    candidate = make_candidate(sharpe=0.9, win_rate=0.65, total_trades=30)
+    candidate = make_candidate()
     write_research_candidate(tmp_path / "research", candidate)
 
     promoter.tick()
@@ -260,7 +279,7 @@ def test_tick_is_fail_closed(tmp_path: Path) -> None:
     queen    = MagicMock()
     queen.promote_candidate.side_effect = RuntimeError("onverwachte fout")
     promoter  = StrategyPromoter(queen=queen, logs_root=tmp_path)
-    candidate = make_candidate(sharpe=0.9, win_rate=0.65, total_trades=30)
+    candidate = make_candidate()
     write_research_candidate(tmp_path / "research", candidate)
 
     promoter.tick()  # should not raise

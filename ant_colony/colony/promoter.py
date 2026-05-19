@@ -5,8 +5,8 @@ StrategyPromoter — beoordeelt RESEARCH-kandidaten en promoveert ze naar APPROV
 
 Verantwoordelijkheden:
   - Leest ANT_LOGS/research/*.jsonl en ANT_LOGS/strategy/*.jsonl
-  - Filtert kandidaten met status RESEARCH die voldoen aan hoge criteria
-    (sharpe_ratio > 0.7, win_rate > 0.55, total_trades >= 20)
+  - Filtert kandidaten met status RESEARCH die voldoen aan de paper-testfase criteria
+    (sharpe_ratio >= 0.15, win_rate >= 0.45, total_trades >= 5)
   - Promoveert via Queen (twee stappen: RESEARCH→PAPER, PAPER→APPROVED)
   - Schrijft APPROVED kandidaten naar ANT_LOGS/approved/{candidate_id}.jsonl
   - Dedupliceert op candidate_id (_seen_candidate_ids)
@@ -28,9 +28,11 @@ from ant_colony.queen.queen import Queen
 from ant_colony.schemas.mission import MarketScope, Mission, RiskLimits, SuccessConditions
 from ant_colony.schemas.strategy_candidate import CandidateStatus, StrategyCandidate
 
-_SHARPE_THRESHOLD    = 0.7
-_WIN_RATE_THRESHOLD  = 0.55
-_MIN_TRADES          = 20
+# Paper-testfase drempels. Voor productie later terug verhogen naar:
+# sharpe=0.7, win_rate=0.55, trades=20.
+_SHARPE_THRESHOLD    = 0.15
+_WIN_RATE_THRESHOLD  = 0.45
+_MIN_TRADES          = 5
 
 _PAPER_TTL           = 1_209_600          # 14 dagen in seconden
 _PAPER_CAPITAL       = 100.0              # EUR per kandidaat
