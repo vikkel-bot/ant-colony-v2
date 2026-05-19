@@ -24,7 +24,7 @@ import time
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
-from statistics import mean
+from statistics import mean, pstdev
 
 from ant_colony.ants._heartbeat import HeartbeatThread
 from ant_colony.ants.time_filter_ant import read_latest_time_signal
@@ -40,6 +40,8 @@ from ant_colony.schemas.opportunity_signal import OpportunitySignal, SignalType
 _PRICE_MOVE_THRESHOLD = 0.01   # 1%
 _VOLUME_SPIKE_FACTOR  = 2.0    # 2× gemiddeld volume
 _HISTORY_SIZE         = 10     # candles voor volume-baseline
+_MOMENTUM_LOOKBACK    = 20     # vorige 20 candles voor breakout
+_MEAN_REVERSION_WINDOW = 20    # laatste 20 closes voor Z-score
 
 
 class ScoutAnt:
@@ -76,6 +78,10 @@ class ScoutAnt:
         # Rollenend volume-venster per symbool (maxlen=10)
         self._vol_history: dict[str, deque[float]] = {
             symbol: deque(maxlen=_HISTORY_SIZE)
+            for symbol in mission.market_scope.symbols
+        }
+        self._candle_history: dict[str, deque[MarketData]] = {
+            symbol: deque(maxlen=_MOMENTUM_LOOKBACK + 1)
             for symbol in mission.market_scope.symbols
         }
 
@@ -159,6 +165,7 @@ class ScoutAnt:
                 continue
 
             self._vol_history[symbol].append(candle.volume)
+            self._candle_history[symbol].append(candle)
 
             signals = self._detect(symbol, candle)
             for signal in signals:
@@ -222,6 +229,14 @@ class ScoutAnt:
         if volume_signal:
             signals.append(volume_signal)
 
+        momentum_signal = self._check_momentum_breakout(symbol, candle)
+        if momentum_signal:
+            signals.append(momentum_signal)
+
+        mean_reversion_signal = self._check_mean_reversion_oversold(symbol, candle)
+        if mean_reversion_signal:
+            signals.append(mean_reversion_signal)
+
         return signals
 
     def _check_price_move(self, symbol: str, candle: MarketData) -> OpportunitySignal | None:
@@ -284,6 +299,74 @@ class ScoutAnt:
             signal_type=SignalType.VOLUME_SPIKE,
             current_price=candle.close,
             change_pct=0.0,
+            confidence=round(confidence, 4),
+            biome=self.mission.market_scope.biome,
+            mission_id=self.mission.mission_id,
+        )
+
+    def _check_momentum_breakout(
+        self, symbol: str, candle: MarketData
+    ) -> OpportunitySignal | None:
+        """Laatste close breekt boven de hoogste high van de vorige 20 candles."""
+        history = list(self._candle_history[symbol])
+        if len(history) < _MOMENTUM_LOOKBACK + 1:
+            return None
+
+        previous_highs = [bar.high for bar in history[-(_MOMENTUM_LOOKBACK + 1):-1]]
+        if len(previous_highs) < _MOMENTUM_LOOKBACK:
+            return None
+
+        breakout_level = max(previous_highs)
+        if breakout_level <= 0 or candle.close <= breakout_level:
+            return None
+
+        breakout_pct = (candle.close - breakout_level) / breakout_level
+        confidence = min(0.35 + breakout_pct / 0.04, 1.0)
+
+        self._log.info(
+            "MOMENTUM_BREAKOUT | %s close=%.4f high20=%.4f (confidence=%.2f)",
+            symbol, candle.close, breakout_level, confidence,
+        )
+        return OpportunitySignal(
+            symbol=symbol,
+            signal_type=SignalType.MOMENTUM_BREAKOUT,
+            current_price=candle.close,
+            change_pct=round(breakout_pct, 6),
+            confidence=round(confidence, 4),
+            biome=self.mission.market_scope.biome,
+            mission_id=self.mission.mission_id,
+        )
+
+    def _check_mean_reversion_oversold(
+        self, symbol: str, candle: MarketData
+    ) -> OpportunitySignal | None:
+        """Laatste close heeft een Z-score lager dan -2.0 over 20 closes."""
+        history = list(self._candle_history[symbol])
+        if len(history) < _MEAN_REVERSION_WINDOW:
+            return None
+
+        closes = [bar.close for bar in history[-_MEAN_REVERSION_WINDOW:]]
+        avg_close = mean(closes)
+        std_close = pstdev(closes)
+        if avg_close <= 0 or std_close <= 0:
+            return None
+
+        z_score = (candle.close - avg_close) / std_close
+        if z_score >= -2.0:
+            return None
+
+        deviation_pct = (candle.close - avg_close) / avg_close
+        confidence = min(0.35 + (abs(z_score) - 2.0) / 2.0, 1.0)
+
+        self._log.info(
+            "MEAN_REVERSION_OVERSOLD | %s z=%.2f close=%.4f mean20=%.4f (confidence=%.2f)",
+            symbol, z_score, candle.close, avg_close, confidence,
+        )
+        return OpportunitySignal(
+            symbol=symbol,
+            signal_type=SignalType.MEAN_REVERSION_OVERSOLD,
+            current_price=candle.close,
+            change_pct=round(deviation_pct, 6),
             confidence=round(confidence, 4),
             biome=self.mission.market_scope.biome,
             mission_id=self.mission.mission_id,

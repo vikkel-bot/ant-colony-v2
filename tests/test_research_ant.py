@@ -1339,3 +1339,9 @@ class TestStrategyTypeWatchtower:
 
     def test_strategy_type_from_signal_type_watchtower_prefix(self) -> None:
         assert _strategy_type_from_signal_type("watchtower_signal_v2") == "watchtower_signal"
+
+    def test_strategy_type_from_signal_type_momentum_breakout(self) -> None:
+        assert _strategy_type_from_signal_type("MOMENTUM_BREAKOUT") == "momentum"
+
+    def test_strategy_type_from_signal_type_mean_reversion_oversold(self) -> None:
+        assert _strategy_type_from_signal_type("MEAN_REVERSION_OVERSOLD") == "mean_reversion"

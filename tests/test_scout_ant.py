@@ -271,6 +271,42 @@ class TestVolumeSpikeDetection:
 
 
 # ---------------------------------------------------------------------------
+# Momentum / mean-reversion detectie
+# ---------------------------------------------------------------------------
+
+class TestMomentumAndMeanReversionDetection:
+    def _append_history(self, scout: ScoutAnt, symbol: str, closes: list[float]) -> None:
+        for close in closes:
+            scout._candle_history[symbol].append(
+                make_candle(symbol=symbol, open_=close, close=close)
+            )
+
+    def test_momentum_breakout_above_20_bar_high_generates_signal(self, tmp_path):
+        scout = make_scout(tmp_path, mission=make_mission(symbols=["BTC-EUR"]))
+        self._append_history(scout, "BTC-EUR", [100.0] * 20)
+        candle = make_candle(symbol="BTC-EUR", open_=100.0, close=102.0)
+        scout._candle_history["BTC-EUR"].append(candle)
+
+        signal = scout._check_momentum_breakout("BTC-EUR", candle)
+
+        assert signal is not None
+        assert signal.signal_type == SignalType.MOMENTUM_BREAKOUT
+        assert signal.change_pct > 0
+
+    def test_mean_reversion_oversold_zscore_below_minus_2_generates_signal(self, tmp_path):
+        scout = make_scout(tmp_path, mission=make_mission(symbols=["BTC-EUR"]))
+        self._append_history(scout, "BTC-EUR", [100.0] * 19)
+        candle = make_candle(symbol="BTC-EUR", open_=100.0, close=85.0)
+        scout._candle_history["BTC-EUR"].append(candle)
+
+        signal = scout._check_mean_reversion_oversold("BTC-EUR", candle)
+
+        assert signal is not None
+        assert signal.signal_type == SignalType.MEAN_REVERSION_OVERSOLD
+        assert signal.change_pct < 0
+
+
+# ---------------------------------------------------------------------------
 # 6  Stale / ongeldige marktdata
 # ---------------------------------------------------------------------------
 

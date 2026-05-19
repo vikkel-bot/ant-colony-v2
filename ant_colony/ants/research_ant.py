@@ -1179,6 +1179,10 @@ def _strategy_type_from_signal(
     # --- Directe signalen van ResearchAnt ---
     if "sma_crossover" in st or ("sma" in st and "cross" in st):
         return "sma_crossover"
+    if "momentum_breakout" in st:
+        return "momentum"
+    if "mean_reversion_oversold" in st:
+        return "mean_reversion"
     if "rsi" in st and "ingested" not in st:
         return "rsi_based"
     if "bb_upper" in st or "bb_lower" in st or ("bollinger" in st and "ingested" not in st):
@@ -1248,6 +1252,10 @@ def _strategy_type_from_signal_type(signal_type: str) -> str | None:
         return "mean_reversion"
     if "watchtower" in st:
         return "watchtower_signal"
+    if "momentum_breakout" in st:
+        return "momentum"
+    if "mean_reversion_oversold" in st:
+        return "mean_reversion"
     return None   # ingested of onbekend → elke bar (veilig fallback)
 
 

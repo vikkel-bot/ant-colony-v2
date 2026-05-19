@@ -19,6 +19,8 @@ from pydantic import BaseModel, Field
 class SignalType(str, Enum):
     PRICE_MOVE = "price_move"
     VOLUME_SPIKE = "volume_spike"
+    MOMENTUM_BREAKOUT = "momentum_breakout"
+    MEAN_REVERSION_OVERSOLD = "mean_reversion_oversold"
 
 
 class OpportunitySignal(BaseModel):
