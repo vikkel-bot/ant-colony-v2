@@ -26,26 +26,21 @@ def test_loads_last_closed_trades_from_paper_event_logs(tmp_path: Path) -> None:
         closed = opened + timedelta(hours=2)
         rows.append({
             "timestamp": opened.isoformat(),
-            "payload": {
-                "action": "trade_opened",
-                "position_id": f"p-{idx}",
-                "symbol": "BTC-EUR",
-                "strategy_type": "sma_crossover",
-                "biome": "crypto",
-                "entry_price": 100.0,
-            },
+            "action": "trade_opened",
+            "position_id": f"p-{idx}",
+            "symbol": "BTC-EUR",
+            "strategy_type": "sma_crossover",
+            "biome": "crypto",
+            "entry_price": 100.0,
         })
         rows.append({
             "timestamp": closed.isoformat(),
-            "payload": {
-                "action": "trade_closed",
-                "position_id": f"p-{idx}",
-                "symbol": "BTC-EUR",
-                "strategy_type": "sma_crossover",
-                "biome": "crypto",
-                "realized_pnl": 10.0 if idx % 2 == 0 else -5.0,
-                "exit_reason": "take_profit" if idx % 2 == 0 else "stop_loss",
-            },
+            "action": "trade_closed",
+            "position_id": f"p-{idx}",
+            "symbol": "BTC-EUR",
+            "pnl_net": 10.0 if idx % 2 == 0 else -5.0,
+            "exit_reason": "take_profit" if idx % 2 == 0 else "stop_loss",
+            "exit_time": closed.isoformat(),
         })
 
     _write_jsonl(tmp_path / "paper" / "paper-test.jsonl", rows)
@@ -55,6 +50,42 @@ def test_loads_last_closed_trades_from_paper_event_logs(tmp_path: Path) -> None:
     assert len(trades) == 6
     assert sources == [tmp_path / "paper" / "paper-test.jsonl"]
     assert trades[-1]["duration_hours"] == 2.0
+    assert trades[-1]["strategy_type"] == "sma_crossover"
+    assert trades[-1]["biome"] == "crypto"
+
+
+def test_supports_nested_payload_audit_events(tmp_path: Path) -> None:
+    now = datetime(2026, 5, 19, 10, 0, tzinfo=timezone.utc)
+    rows = [
+        {
+            "timestamp": now.isoformat(),
+            "payload": {
+                "action": "trade_opened",
+                "position_id": "p-1",
+                "symbol": "XLK",
+                "strategy_type": "momentum",
+                "biome": "equities",
+            },
+        },
+        {
+            "timestamp": (now + timedelta(hours=3)).isoformat(),
+            "payload": {
+                "action": "trade_closed",
+                "position_id": "p-1",
+                "symbol": "XLK",
+                "pnl_gross": 3.25,
+                "exit_reason": "trailing_stop",
+            },
+        },
+    ]
+    _write_jsonl(tmp_path / "paper" / "paper-test.jsonl", rows)
+
+    trades, _ = load_closed_trades(logs_root=tmp_path, repo_root=tmp_path)
+
+    assert len(trades) == 1
+    assert trades[0]["pnl"] == 3.25
+    assert trades[0]["strategy_type"] == "momentum"
+    assert trades[0]["biome"] == "equities"
 
 
 def test_build_report_contains_required_sections_and_writes_file(tmp_path: Path) -> None:

@@ -3,8 +3,7 @@ scripts/harness/harness_trade_analytics.py
 
 Kleine read-only harness voor gesloten paper trades.
 
-Leest eerst expliciete paper-ledger bestanden als die bestaan. Als die ontbreken,
-valt het script terug op de bestaande append-only paper logs:
+Leest de bestaande append-only paper logs:
 ANT_LOGS\\paper\\*.jsonl.
 """
 
@@ -18,7 +17,6 @@ from pathlib import Path
 from typing import Any
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_LOGS_ROOT = Path(os.environ.get("ANT_LOGS", r"C:\Trading\ANT_LOGS"))
 MIN_CLOSED_TRADES = 5
 MAX_TRADES = 30
@@ -86,6 +84,8 @@ def _normalise_strategy(record: dict[str, Any]) -> str:
 
 def _normalise_pnl(record: dict[str, Any]) -> float:
     for key in (
+        "pnl_net",
+        "pnl_gross",
         "realized_pnl",
         "realized_pnl_eur",
         "pnl_eur",
@@ -114,56 +114,29 @@ def _duration_hours(record: dict[str, Any], closed_at: datetime) -> float | None
     return max(0.0, (closed_at - opened_at).total_seconds() / 3600.0)
 
 
-def _candidate_sources(logs_root: Path, repo_root: Path) -> list[Path]:
-    explicit = [
-        logs_root / "paper_ledger.json",
-        logs_root / "paper_ledger.jsonl",
-        logs_root / "paper" / "paper_ledger.json",
-        logs_root / "paper" / "paper_ledger.jsonl",
-        repo_root / "data" / "paper_ledger.json",
-        repo_root / "data" / "paper_ledger.jsonl",
-    ]
-    existing_explicit = [path for path in explicit if path.exists()]
-    if existing_explicit:
-        return existing_explicit
-
+def _paper_jsonl_sources(logs_root: Path) -> list[Path]:
     paper_dir = logs_root / "paper"
     if not paper_dir.exists():
         return []
-    return sorted(paper_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime)
+    return sorted(paper_dir.glob("*.jsonl"))
 
 
 def _iter_json_records(path: Path) -> list[dict[str, Any]]:
-    if path.suffix.lower() == ".json":
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return []
-        if isinstance(data, list):
-            return [row for row in data if isinstance(row, dict)]
-        if isinstance(data, dict):
-            for key in ("closed_trades", "trades", "positions", "records"):
-                rows = data.get(key)
-                if isinstance(rows, list):
-                    return [row for row in rows if isinstance(row, dict)]
-            return [data]
-        return []
-
     records: list[dict[str, Any]] = []
     try:
-        with path.open("r", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    row = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(row, dict):
-                    records.append(row)
+        lines = path.read_text(encoding="utf-8").splitlines()
     except OSError:
         return []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(row, dict):
+            records.append(row)
     return records
 
 
@@ -175,7 +148,9 @@ def _flatten_record(record: dict[str, Any]) -> dict[str, Any]:
         if "event_timestamp" not in merged:
             merged["event_timestamp"] = record.get("timestamp")
         return merged
-    return dict(record)
+    merged = dict(record)
+    merged.setdefault("event_timestamp", record.get("timestamp"))
+    return merged
 
 
 def _closed_trade_from_record(
@@ -222,11 +197,11 @@ def _closed_trade_from_record(
 
 def load_closed_trades(
     logs_root: Path = DEFAULT_LOGS_ROOT,
-    repo_root: Path = REPO_ROOT,
+    repo_root: Path | None = None,
 ) -> tuple[list[dict[str, Any]], list[Path]]:
     opened_by_id: dict[str, dict[str, Any]] = {}
     trades_by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
-    sources = _candidate_sources(logs_root, repo_root)
+    sources = _paper_jsonl_sources(logs_root)
 
     for path in sources:
         for record in _iter_json_records(path):
