@@ -300,7 +300,11 @@ class StrategyPromoter:
         try:
             approved_dir.mkdir(parents=True, exist_ok=True)
             log_path = approved_dir / f"{candidate.candidate_id}.jsonl"
+            now_iso = datetime.now(timezone.utc).isoformat()
+            record = candidate.model_dump(mode="json")
+            record["timestamp"] = now_iso
+            record["promoted_at"] = now_iso
             with log_path.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(candidate.model_dump(mode="json"), default=str) + "\n")
+                fh.write(json.dumps(record, default=str) + "\n")
         except OSError:
             logger.exception("Kon approved kandidaat niet schrijven: %s", candidate.candidate_id)
