@@ -7,8 +7,8 @@ Scenarios:
   1.  SMA golden cross           → long kandidaat gegenereerd
   2.  SMA death cross            → short kandidaat gegenereerd
   3.  SMA geen crossover         → geen kandidaat
-  4.  RSI oversold (< 30)        → long kandidaat
-  5.  RSI overbought (> 70)      → short kandidaat
+  4.  RSI oversold (< 30)        → rsi_based gedeactiveerd, geen kandidaat
+  5.  RSI overbought (> 70)      → rsi_based gedeactiveerd, geen kandidaat
   6.  RSI neutraal (30–70)       → geen kandidaat
   7.  Bollinger onderband touch  → long kandidaat
   8.  Bollinger bovenband touch  → short kandidaat
@@ -50,6 +50,7 @@ from ant_colony.ants.research_ant import (
     _strategy_type_from_signal,
     _strategy_type_from_signal_type,
 )
+from ant_colony.strategies import DISABLED_STRATEGY_TYPES
 from ant_colony.biome.biome_adapter import MarketData
 from ant_colony.biome.biome_registry import BiomeRegistry
 from ant_colony.schemas.ant import AntStatus
@@ -393,39 +394,39 @@ class TestSMACrossover:
 # ---------------------------------------------------------------------------
 
 class TestRSIDetection:
-    def test_rsi_oversold_generates_long_candidate(self, tmp_path):
-        """Scenario 4: RSI < 30 → long kandidaat met rsi_oversold."""
+    def test_rsi_oversold_is_disabled(self, tmp_path):
+        """Scenario 4: RSI < 30 → rsi_based is uitgeschakeld, geen kandidaat."""
         candles = make_candles(RSI_OVERSOLD_CLOSES)
         registry = make_registry(candles=candles)
         ant = make_ant(tmp_path, registry=registry)
         stub_backtester(ant)
 
-        ant._tick()
+        ant._check_rsi("BTC-EUR", candles, [c.close for c in candles])
 
         records = read_jsonl(log_path(tmp_path, ant))
         rsi_records = [
             r for r in records
             if "RSI_OVERSOLD" in (r.get("payload") or {}).get("signal_type", "").upper()
         ]
-        assert len(rsi_records) >= 1
-        assert (rsi_records[0].get("payload") or {}).get("direction") == "long"
+        assert rsi_records == []
+        assert not ant._backtester.run.called
 
-    def test_rsi_overbought_generates_short_candidate(self, tmp_path):
-        """Scenario 5: RSI > 70 → short kandidaat met rsi_overbought."""
+    def test_rsi_overbought_is_disabled(self, tmp_path):
+        """Scenario 5: RSI > 70 → rsi_based is uitgeschakeld, geen kandidaat."""
         candles = make_candles(RSI_OVERBOUGHT_CLOSES)
         registry = make_registry(candles=candles)
         ant = make_ant(tmp_path, registry=registry)
         stub_backtester(ant)
 
-        ant._tick()
+        ant._check_rsi("BTC-EUR", candles, [c.close for c in candles])
 
         records = read_jsonl(log_path(tmp_path, ant))
         rsi_records = [
             r for r in records
             if "RSI_OVERBOUGHT" in (r.get("payload") or {}).get("signal_type", "").upper()
         ]
-        assert len(rsi_records) >= 1
-        assert (rsi_records[0].get("payload") or {}).get("direction") == "short"
+        assert rsi_records == []
+        assert not ant._backtester.run.called
 
     def test_rsi_neutral_no_candidate(self, tmp_path):
         """Scenario 6: RSI neutraal (≈50) → geen RSI kandidaat."""
@@ -986,6 +987,12 @@ class TestStrategyTypeFromSignalClaudeVariants:
         """Zonder 'claude'/'improved' wordt tp_pct genegeerd."""
         result = _strategy_type_from_signal("LONG", ["sma", "crossover"], tp_pct=0.02)
         assert result != "mean_reversion"
+
+
+def test_disabled_strategy_types_for_slimming_phase() -> None:
+    assert {"rsi_based", "sector_scout", "hybrid", "unknown"}.issubset(
+        DISABLED_STRATEGY_TYPES
+    )
 
 
 # ---------------------------------------------------------------------------

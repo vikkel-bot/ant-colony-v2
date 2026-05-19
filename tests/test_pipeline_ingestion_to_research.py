@@ -131,6 +131,7 @@ def write_ingestion_event(
     candidate_id: str | None = None,
     symbol: str = _SYMBOL,
     action: str = "candidate_ingested",
+    entry_keywords: list[str] | None = None,
 ) -> str:
     candidate_id = candidate_id or f"cand-{uuid.uuid4().hex[:8]}"
     ingestion_dir.mkdir(parents=True, exist_ok=True)
@@ -141,6 +142,7 @@ def write_ingestion_event(
             "action": action,
             "candidate_id": candidate_id,
             "market_scope": {"symbol": symbol, "timeframe": "1h"},
+            "entry_keywords": entry_keywords if entry_keywords is not None else ["momentum"],
             "entry_conditions": {"direction": "long"},
             "parameters": {},
             "logic_summary": f"Test ingested candidate {candidate_id[:8]}",
@@ -279,6 +281,7 @@ def test_invalid_json_line_skipped(tmp_path: Path) -> None:
                 "action": "candidate_ingested",
                 "candidate_id": cid,
                 "market_scope": {"symbol": _SYMBOL, "timeframe": "1h"},
+                "entry_keywords": ["momentum"],
                 "entry_conditions": {"direction": "long"},
                 "parameters": {},
             },
@@ -299,3 +302,15 @@ def test_other_action_ignored(tmp_path: Path) -> None:
     ant._process_ingestion_candidates()
 
     assert ant._backtester.run.call_count == 0
+
+
+def test_unknown_ingested_strategy_type_disabled(tmp_path: Path) -> None:
+    """Ingested candidates zonder bruikbare strategy_type worden niet doorgestuurd."""
+    ant = make_ant(tmp_path)
+    stub_backtester(ant, sharpe=0.9, win_rate=0.6)
+    write_ingestion_event(tmp_path / "ingestion", entry_keywords=[])
+
+    ant._process_ingestion_candidates()
+
+    assert ant._backtester.run.call_count == 0
+    assert read_research_log(tmp_path) == []

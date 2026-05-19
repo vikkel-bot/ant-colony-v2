@@ -49,6 +49,7 @@ from ant_colony.schemas.strategy_candidate import (
     ProvenanceEntry,
     StrategyCandidate,
 )
+from ant_colony.strategies import DISABLED_STRATEGY_TYPES
 
 _MIN_CANDLES        = 200   # backtester vereist ≥200 bars voor betrouwbare walk-forward resultaten
 _CANDLE_LIMIT       = 500   # candles ophalen per symbool per tick (verhoogd voor betrouwbaardere backtests)
@@ -743,6 +744,29 @@ class ResearchAnt:
         if (symbol, signal_type) in self._last_emitted:
             return
 
+        if backtest_config is not None:
+            config = backtest_config
+        else:
+            _st = _strategy_type_from_signal_type(signal_type)
+            config = BacktestConfig(
+                direction=direction,
+                take_profit_pct=_TP_PCT,
+                stop_loss_pct=_SL_PCT,
+                max_bars_held=_MAX_BARS_HELD,
+                strategy_type=_st,
+            )
+
+        disabled_type = _disabled_strategy_type(config.strategy_type)
+        if disabled_type is not None:
+            self._last_action = f"strategy_disabled:{disabled_type}:{symbol}"
+            self._log.info(
+                "Kandidaat onderdrukt | %s %s | strategy_type=%s uitgeschakeld",
+                symbol,
+                signal_type,
+                disabled_type,
+            )
+            return
+
         bars = [
             OHLCVBar(
                 timestamp=c.timestamp,
@@ -760,17 +784,6 @@ class ResearchAnt:
             return
 
         try:
-            if backtest_config is not None:
-                config = backtest_config
-            else:
-                _st = _strategy_type_from_signal_type(signal_type)
-                config = BacktestConfig(
-                    direction=direction,
-                    take_profit_pct=_TP_PCT,
-                    stop_loss_pct=_SL_PCT,
-                    max_bars_held=_MAX_BARS_HELD,
-                    strategy_type=_st,
-                )
             results = self._backtester.run(bars, config)
         except Exception:
             self._log.exception("Backtest mislukt voor %s/%s", symbol, signal_type)
@@ -1112,6 +1125,11 @@ class ResearchAnt:
 # ---------------------------------------------------------------------------
 # Keyword → BacktestConfig vertaling
 # ---------------------------------------------------------------------------
+
+def _disabled_strategy_type(strategy_type: str | None) -> str | None:
+    normalized = str(strategy_type or "unknown").strip().lower()
+    return normalized if normalized in DISABLED_STRATEGY_TYPES else None
+
 
 def _strategy_type_from_signal(
     signal_type: str,
