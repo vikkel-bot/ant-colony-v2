@@ -5,12 +5,19 @@ from pathlib import Path
 
 from ant_colony.biome.biome_adapter import MarketData
 from scripts.harness.harness_volatility_squeeze import (
+    SWEEP_BB_MULTIPLIERS,
+    SWEEP_KC_MULTIPLIERS,
+    SWEEP_SL_PCTS,
+    SWEEP_TP_PCTS,
     TIMEFRAME,
     _backtest_symbol,
     _compute_squeeze_state,
     _fetch_candles,
+    _run_sweep,
     build_report,
+    build_sweep_report,
     write_report,
+    write_sweep_report,
 )
 
 
@@ -113,3 +120,26 @@ def test_report_contains_go_no_go_and_writes_file(tmp_path: Path) -> None:
     assert "Verdict:" in report
     assert out_path.exists()
     assert out_path.parent == tmp_path / "harness"
+
+
+def test_sweep_runs_all_parameter_combinations_and_reports_top5(tmp_path: Path) -> None:
+    candles = _squeeze_base()
+    candles.append(_candle(40, close=130.0, high=130.5, low=129.5))
+    candles.append(_candle(41, close=142.0, high=143.0, low=141.0))
+
+    rows = _run_sweep(candles)
+    report = build_sweep_report(rows)
+    out_path = write_sweep_report(report, logs_root=tmp_path)
+
+    assert len(rows) == (
+        len(SWEEP_BB_MULTIPLIERS)
+        * len(SWEEP_KC_MULTIPLIERS)
+        * len(SWEEP_SL_PCTS)
+        * len(SWEEP_TP_PCTS)
+    )
+    assert "=== VOLATILITY SQUEEZE PARAMETER SWEEP ===" in report
+    assert "Gesorteerd op Sharpe, top-5:" in report
+    top_lines = [line for line in report.splitlines() if line[:2] in {"1.", "2.", "3.", "4.", "5."}]
+    assert len(top_lines) == 5
+    assert out_path.exists()
+    assert out_path.name.startswith("squeeze_sweep_")

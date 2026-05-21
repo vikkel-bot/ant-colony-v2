@@ -20,6 +20,8 @@ Vereisten:
 
 from __future__ import annotations
 
+import argparse
+import itertools
 import math
 import os
 from datetime import datetime, timedelta, timezone
@@ -45,6 +47,10 @@ SL_PCT = 0.03
 TP_PCT = 0.09
 MAX_BARS = 48
 BARS_PER_YEAR = 365 * 24
+SWEEP_BB_MULTIPLIERS = [1.5, 2.0, 2.5]
+SWEEP_KC_MULTIPLIERS = [1.0, 1.5, 2.0]
+SWEEP_SL_PCTS = [0.02, 0.03, 0.05]
+SWEEP_TP_PCTS = [0.06, 0.09, 0.12]
 
 DEFAULT_LOGS_ROOT = Path(os.environ.get("ANT_LOGS", r"C:\Trading\ANT_LOGS"))
 
@@ -129,7 +135,11 @@ def _atr(highs: np.ndarray, lows: np.ndarray, closes: np.ndarray, period: int) -
     return result
 
 
-def _compute_squeeze_state(candles: list) -> dict[str, np.ndarray]:
+def _compute_squeeze_state(
+    candles: list,
+    bb_std_mult: float = BB_STD_MULT,
+    kc_atr_mult: float = KC_ATR_MULT,
+) -> dict[str, np.ndarray]:
     closes = np.array([c.close for c in candles], dtype=float)
     highs = np.array([c.high for c in candles], dtype=float)
     lows = np.array([c.low for c in candles], dtype=float)
@@ -139,10 +149,10 @@ def _compute_squeeze_state(candles: list) -> dict[str, np.ndarray]:
     ema20 = _ema(closes, EMA_WINDOW)
     atr14 = _atr(highs, lows, closes, ATR_WINDOW)
 
-    bb_upper = sma20 + (BB_STD_MULT * std20)
-    bb_lower = sma20 - (BB_STD_MULT * std20)
-    kc_upper = ema20 + (KC_ATR_MULT * atr14)
-    kc_lower = ema20 - (KC_ATR_MULT * atr14)
+    bb_upper = sma20 + (bb_std_mult * std20)
+    bb_lower = sma20 - (bb_std_mult * std20)
+    kc_upper = ema20 + (kc_atr_mult * atr14)
+    kc_lower = ema20 - (kc_atr_mult * atr14)
 
     squeeze_on = (bb_upper < kc_upper) & (bb_lower > kc_lower)
     valid = ~(
@@ -172,7 +182,14 @@ def _compute_squeeze_state(candles: list) -> dict[str, np.ndarray]:
 # Backtest simulatie
 # ---------------------------------------------------------------------------
 
-def _backtest_symbol(candles: list) -> list[dict]:
+def _backtest_symbol(
+    candles: list,
+    *,
+    bb_std_mult: float = BB_STD_MULT,
+    kc_atr_mult: float = KC_ATR_MULT,
+    sl_pct: float = SL_PCT,
+    tp_pct: float = TP_PCT,
+) -> list[dict]:
     """
     Simuleer volatility-squeeze trades.
 
@@ -182,7 +199,11 @@ def _backtest_symbol(candles: list) -> list[dict]:
     if n < max(BB_WINDOW, EMA_WINDOW, ATR_WINDOW) + 2:
         return []
 
-    state = _compute_squeeze_state(candles)
+    state = _compute_squeeze_state(
+        candles,
+        bb_std_mult=bb_std_mult,
+        kc_atr_mult=kc_atr_mult,
+    )
     closes = state["close"]
     ema20 = state["ema20"]
     release = state["release"]
@@ -215,11 +236,11 @@ def _backtest_symbol(candles: list) -> list[dict]:
             else:
                 pct = (entry_price - close) / entry_price
 
-            if pct <= -SL_PCT:
+            if pct <= -sl_pct:
                 exit_idx = j
                 exit_reason = "sl"
                 break
-            if pct >= TP_PCT:
+            if pct >= tp_pct:
                 exit_idx = j
                 exit_reason = "tp"
                 break
@@ -321,13 +342,113 @@ def write_report(report: str, logs_root: Path = DEFAULT_LOGS_ROOT) -> Path:
 
 
 # ---------------------------------------------------------------------------
+# Parameter sweep
+# ---------------------------------------------------------------------------
+
+def _run_sweep(candles: list) -> list[dict]:
+    rows: list[dict] = []
+    for bb_mult, kc_mult, sl_pct, tp_pct in itertools.product(
+        SWEEP_BB_MULTIPLIERS,
+        SWEEP_KC_MULTIPLIERS,
+        SWEEP_SL_PCTS,
+        SWEEP_TP_PCTS,
+    ):
+        trades = _backtest_symbol(
+            candles,
+            bb_std_mult=bb_mult,
+            kc_atr_mult=kc_mult,
+            sl_pct=sl_pct,
+            tp_pct=tp_pct,
+        )
+        metrics = _compute_metrics(trades)
+        rows.append({
+            "bb_mult": bb_mult,
+            "kc_mult": kc_mult,
+            "sl_pct": sl_pct,
+            "tp_pct": tp_pct,
+            "trades": metrics["n"],
+            "win_rate": metrics["win_rate"],
+            "sharpe": metrics["sharpe"],
+            "max_dd_pct": metrics["max_dd_pct"],
+        })
+    return rows
+
+
+def build_sweep_report(rows: list[dict]) -> str:
+    ranked = sorted(rows, key=lambda row: row["sharpe"], reverse=True)
+    lines = [
+        "=== VOLATILITY SQUEEZE PARAMETER SWEEP ===",
+        "Symbol: BTC-EUR",
+        f"Combinaties getest: {len(rows)}",
+        "Gesorteerd op Sharpe, top-5:",
+        "",
+    ]
+    for idx, row in enumerate(ranked[:5], start=1):
+        lines.append(
+            f"{idx}. bb={row['bb_mult']:.1f} kc={row['kc_mult']:.1f} "
+            f"sl={row['sl_pct']:.2%} tp={row['tp_pct']:.2%} | "
+            f"trades={row['trades']} winrate={row['win_rate']:.1f}% "
+            f"sharpe={row['sharpe']:.2f} max_dd={row['max_dd_pct']:.1f}%"
+        )
+    if not rows:
+        lines.append("Geen resultaten.")
+    return "\n".join(lines)
+
+
+def write_sweep_report(report: str, logs_root: Path = DEFAULT_LOGS_ROOT) -> Path:
+    out_dir = logs_root / "harness"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M")
+    out_path = out_dir / f"squeeze_sweep_{stamp}.txt"
+    out_path.write_text(report + "\n", encoding="utf-8")
+    return out_path
+
+
+def run_sweep(adapter: CryptoAdapter) -> tuple[str, Path, list[dict]]:
+    symbol = "BTC-EUR"
+    print(f"Ophalen: {symbol} ...", flush=True)
+    candles = _fetch_candles(adapter, symbol)
+    if not candles:
+        raise RuntimeError("geen BTC-EUR candles beschikbaar voor sweep")
+    print(f"  {len(candles)} candles ({LOOKBACK_DAYS}d lookback)")
+    rows = _run_sweep(candles)
+    report = build_sweep_report(rows)
+    out_path = write_sweep_report(report)
+    return report, out_path, rows
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Volatility Squeeze harness — standaard backtest of parameter sweep."
+    )
+    parser.add_argument(
+        "--sweep",
+        action="store_true",
+        help="Test BB/KC/SL/TP combinaties op BTC-EUR en rapporteer top-5 op Sharpe.",
+    )
+    return parser.parse_args()
+
+
 def main() -> int:
+    args = _parse_args()
     api_key = os.environ.get("BITVAVO_API_KEY", "")
     api_secret = os.environ.get("BITVAVO_API_SECRET", "")
     adapter = CryptoAdapter(api_key=api_key, api_secret=api_secret, paper_only=True)
+
+    if args.sweep:
+        try:
+            report, out_path, _rows = run_sweep(adapter)
+        except RuntimeError as exc:
+            print(f"FOUT: {exc}")
+            return 1
+        print()
+        print(report)
+        print(f"\nSweep rapport opgeslagen: {out_path}")
+        return 0
 
     results: list[tuple[str, list[dict], dict]] = []
     for symbol in SYMBOLS:
