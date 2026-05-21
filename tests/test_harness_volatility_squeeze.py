@@ -13,6 +13,7 @@ from scripts.harness.harness_volatility_squeeze import (
     _backtest_symbol,
     _compute_squeeze_state,
     _fetch_candles,
+    _parse_params,
     _run_sweep,
     build_report,
     build_sweep_report,
@@ -107,6 +108,34 @@ def test_fetch_candles_paginates_when_first_batch_hits_bitvavo_limit() -> None:
     }
     assert calls[1]["limit"] == 1440
     assert calls[1]["end_ms"] == int(batch1[0].timestamp.timestamp() * 1000) - 1
+
+
+def test_fetch_candles_uses_days_cutoff() -> None:
+    old = _candle(-240, close=90.0)
+    recent = _candle(-12, close=100.0)
+
+    class Adapter:
+        def get_candles(self, symbol, timeframe, limit=1440, end_ms=None):
+            return [old, recent]
+
+    candles = _fetch_candles(Adapter(), "BTC-EUR", days=2)
+
+    assert candles == [recent]
+
+
+def test_parse_params_accepts_fixed_combination() -> None:
+    params = _parse_params("bb=2.0,kc=1.5,sl=0.02,tp=0.06")
+
+    assert params == {"bb": 2.0, "kc": 1.5, "sl": 0.02, "tp": 0.06}
+
+
+def test_parse_params_rejects_missing_key() -> None:
+    try:
+        _parse_params("bb=2.0,kc=1.5,sl=0.02")
+    except ValueError as exc:
+        assert "ontbrekende parameters" in str(exc)
+    else:
+        raise AssertionError("missing tp should fail")
 
 
 def test_report_contains_go_no_go_and_writes_file(tmp_path: Path) -> None:

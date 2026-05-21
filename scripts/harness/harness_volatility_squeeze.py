@@ -53,20 +53,21 @@ SWEEP_SL_PCTS = [0.02, 0.03, 0.05]
 SWEEP_TP_PCTS = [0.06, 0.09, 0.12]
 
 DEFAULT_LOGS_ROOT = Path(os.environ.get("ANT_LOGS", r"C:\Trading\ANT_LOGS"))
+_PARAM_KEYS = {"bb", "kc", "sl", "tp"}
 
 
 # ---------------------------------------------------------------------------
 # Data ophalen
 # ---------------------------------------------------------------------------
 
-def _fetch_candles(adapter: CryptoAdapter, symbol: str) -> list:
+def _fetch_candles(adapter: CryptoAdapter, symbol: str, days: int = LOOKBACK_DAYS) -> list:
     """
-    Haal ~90 dagen uurlijkse candles op voor symbol.
+    Haal uurlijkse candles op voor symbol.
 
     Bitvavo accepteert maximaal 1440 candles per request; daarom halen we
     desnoods een tweede batch op vóór de oudste candle uit batch 1.
     """
-    cutoff = datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=max(days, 1))
 
     batch1 = adapter.get_candles(symbol, TIMEFRAME, limit=1440)
     if not batch1:
@@ -341,6 +342,38 @@ def write_report(report: str, logs_root: Path = DEFAULT_LOGS_ROOT) -> Path:
     return out_path
 
 
+def _parse_params(raw: str | None) -> dict[str, float] | None:
+    if not raw:
+        return None
+    parsed: dict[str, float] = {}
+    for item in raw.split(","):
+        if not item.strip():
+            continue
+        if "=" not in item:
+            raise ValueError(f"parameter mist '=': {item!r}")
+        key, value = item.split("=", 1)
+        key = key.strip().lower()
+        if key not in _PARAM_KEYS:
+            raise ValueError(f"onbekende parameter: {key!r}")
+        try:
+            parsed[key] = float(value)
+        except ValueError as exc:
+            raise ValueError(f"ongeldige waarde voor {key}: {value!r}") from exc
+    missing = _PARAM_KEYS - set(parsed)
+    if missing:
+        raise ValueError(f"ontbrekende parameters: {', '.join(sorted(missing))}")
+    return parsed
+
+
+def _param_label(params: dict[str, float] | None) -> str:
+    if not params:
+        return "default"
+    return (
+        f"bb={params['bb']:.2f},kc={params['kc']:.2f},"
+        f"sl={params['sl']:.2%},tp={params['tp']:.2%}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Parameter sweep
 # ---------------------------------------------------------------------------
@@ -404,13 +437,13 @@ def write_sweep_report(report: str, logs_root: Path = DEFAULT_LOGS_ROOT) -> Path
     return out_path
 
 
-def run_sweep(adapter: CryptoAdapter) -> tuple[str, Path, list[dict]]:
+def run_sweep(adapter: CryptoAdapter, days: int = LOOKBACK_DAYS) -> tuple[str, Path, list[dict]]:
     symbol = "BTC-EUR"
     print(f"Ophalen: {symbol} ...", flush=True)
-    candles = _fetch_candles(adapter, symbol)
+    candles = _fetch_candles(adapter, symbol, days=days)
     if not candles:
         raise RuntimeError("geen BTC-EUR candles beschikbaar voor sweep")
-    print(f"  {len(candles)} candles ({LOOKBACK_DAYS}d lookback)")
+    print(f"  {len(candles)} candles ({days}d lookback)")
     rows = _run_sweep(candles)
     report = build_sweep_report(rows)
     out_path = write_sweep_report(report)
@@ -430,18 +463,41 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Test BB/KC/SL/TP combinaties op BTC-EUR en rapporteer top-5 op Sharpe.",
     )
+    parser.add_argument(
+        "--days",
+        type=int,
+        default=LOOKBACK_DAYS,
+        help="Aantal dagen lookback voor candles.",
+    )
+    parser.add_argument(
+        "--params",
+        default=None,
+        help="Vaste parameters, bijvoorbeeld: bb=2.0,kc=1.5,sl=0.02,tp=0.06",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = _parse_args()
+    if args.days <= 0:
+        print("FOUT: --days moet groter zijn dan 0")
+        return 1
+    try:
+        fixed_params = _parse_params(args.params)
+    except ValueError as exc:
+        print(f"FOUT: ongeldige --params: {exc}")
+        return 1
+
     api_key = os.environ.get("BITVAVO_API_KEY", "")
     api_secret = os.environ.get("BITVAVO_API_SECRET", "")
     adapter = CryptoAdapter(api_key=api_key, api_secret=api_secret, paper_only=True)
 
     if args.sweep:
+        if fixed_params is not None:
+            print("FOUT: --params kan niet samen met --sweep worden gebruikt")
+            return 1
         try:
-            report, out_path, _rows = run_sweep(adapter)
+            report, out_path, _rows = run_sweep(adapter, days=args.days)
         except RuntimeError as exc:
             print(f"FOUT: {exc}")
             return 1
@@ -453,12 +509,21 @@ def main() -> int:
     results: list[tuple[str, list[dict], dict]] = []
     for symbol in SYMBOLS:
         print(f"Ophalen: {symbol} ...", flush=True)
-        candles = _fetch_candles(adapter, symbol)
+        candles = _fetch_candles(adapter, symbol, days=args.days)
         if not candles:
             print(f"  WAARSCHUWING: geen data voor {symbol}, overgeslagen.")
             continue
-        print(f"  {len(candles)} candles ({LOOKBACK_DAYS}d lookback)")
-        trades = _backtest_symbol(candles)
+        print(f"  {len(candles)} candles ({args.days}d lookback)")
+        if fixed_params is None:
+            trades = _backtest_symbol(candles)
+        else:
+            trades = _backtest_symbol(
+                candles,
+                bb_std_mult=fixed_params["bb"],
+                kc_atr_mult=fixed_params["kc"],
+                sl_pct=fixed_params["sl"],
+                tp_pct=fixed_params["tp"],
+            )
         metrics = _compute_metrics(trades)
         results.append((symbol, trades, metrics))
 
@@ -467,6 +532,8 @@ def main() -> int:
         return 1
 
     report = build_report(results)
+    if fixed_params is not None:
+        report += f"\nParameters: {_param_label(fixed_params)}"
     out_path = write_report(report)
     print()
     print(report)
