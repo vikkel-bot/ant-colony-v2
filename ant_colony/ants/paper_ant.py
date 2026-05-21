@@ -432,6 +432,23 @@ class PaperAnt:
             return None
         return read_latest_queen_regime(self.logs_root)
 
+    def _watchtower_veto_state(self) -> tuple[bool, str]:
+        """Lees het Watchtower GO/NO-GO veto. Fouten zijn fail-open."""
+        if self.logs_root is None:
+            return False, ""
+        veto_path = self.logs_root / "queen" / "watchtower_veto.json"
+        if not veto_path.exists():
+            return False, ""
+        try:
+            data = json.loads(veto_path.read_text(encoding="utf-8"))
+            return bool(data.get("veto", False)), str(data.get("reason") or "")
+        except Exception:
+            return False, ""
+
+    def _is_watchtower_veto(self) -> bool:
+        veto, _reason = self._watchtower_veto_state()
+        return veto
+
     def _is_entry_allowed_by_regime(
         self,
         regime: str | None,
@@ -1087,6 +1104,14 @@ class PaperAnt:
             return
         if side not in ("long", "short"):
             self._log.debug("unsupported side voor %s: %s", symbol, side)
+            return
+
+        veto_active, veto_reason = self._watchtower_veto_state()
+        if veto_active:
+            self._log.info(
+                "Watchtower VETO actief — geen nieuwe entries | reden=%s",
+                veto_reason or "unknown",
+            )
             return
 
         entry_price = self._fetch_price(symbol)

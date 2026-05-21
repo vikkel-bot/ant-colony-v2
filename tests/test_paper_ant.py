@@ -359,6 +359,31 @@ class TestLogEvents:
         actions = [r["payload"]["action"] for r in records]
         assert "trade_opened" in actions
 
+    def test_watchtower_veto_blocks_trade_open(self, tmp_path: Path, caplog) -> None:
+        queen_dir = tmp_path / "queen"
+        queen_dir.mkdir(parents=True, exist_ok=True)
+        (queen_dir / "watchtower_veto.json").write_text(
+            json.dumps({
+                "veto": True,
+                "reason": "confidence=0.32",
+                "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+            }),
+            encoding="utf-8",
+        )
+
+        ant = make_ant(logs_root=tmp_path)
+        write_scout_signal(tmp_path / "scouts")
+
+        with caplog.at_level(logging.INFO):
+            ant._tick()
+
+        log_path = tmp_path / "paper" / f"{ant.ant_id}.jsonl"
+        records = [json.loads(l) for l in log_path.read_text().splitlines() if l.strip()]
+        actions = [r["payload"]["action"] for r in records]
+        assert "trade_opened" not in actions
+        assert ant._ledger.open_positions == []
+        assert any("Watchtower VETO actief" in record.message for record in caplog.records)
+
     def test_paper_tick_event_written_without_trade(self, tmp_path: Path) -> None:
         ant = make_ant(logs_root=tmp_path)
         ant._tick()

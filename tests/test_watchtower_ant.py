@@ -249,6 +249,28 @@ class TestSignalFilter:
         assert rec["signals"] == []
 
 
+class TestWatchtowerVeto:
+    def test_compute_veto_true_for_low_confidence(self, tmp_path):
+        ant = _make_ant(tmp_path)
+
+        assert ant._compute_veto({
+            "asset": "BTC-EUR",
+            "direction": "long",
+            "confidence": 0.32,
+            "risk_flags": [],
+        }) is True
+
+    def test_compute_veto_true_for_veto_keyword(self, tmp_path):
+        ant = _make_ant(tmp_path)
+
+        assert ant._compute_veto({
+            "asset": "AAPL",
+            "direction": "long",
+            "confidence": 0.75,
+            "risk_flags": ["macro_sensitive", "earnings"],
+        }) is True
+
+
 # ---------------------------------------------------------------------------
 # Offline-detectie
 # ---------------------------------------------------------------------------

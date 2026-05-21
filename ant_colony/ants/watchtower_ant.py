@@ -48,6 +48,7 @@ _MAX_DAILY_WATCHTOWER_ENTRIES = 10
 _MAX_ASSET_ENTRY_INTERVAL_SECONDS = 24 * 3600
 _CRYPTO_ASSETS = frozenset({"BTC", "ETH", "SOL", "XRP", "ADA", "DOT", "LINK", "LTC"})
 _COMMODITY_ASSETS = frozenset({"BRENT", "WTI", "NATGAS", "COPPER", "SILVER", "GOLD"})
+_VETO_RISK_KEYWORDS = ("macro_sensitive", "stale_news", "high_volatility", "cross_market")
 
 
 @dataclass(frozen=True)
@@ -146,11 +147,14 @@ class WatchtowerAnt:
                 "Watchtower offline, degrading gracefully | url=%s",
                 self._client.base_url,
             )
+            self._write_veto(now, False, "watchtower_offline")
             self._send_heartbeat(now, "tick:offline")
             return
 
         received = len(signals)
         unique_signals, duplicate_count = self._dedupe_signals(signals)
+        veto, veto_reason, veto_signal = self._evaluate_veto(unique_signals)
+        self._write_veto(now, veto, veto_reason, veto_signal)
         filtered: list[dict] = []
         rejections: list[dict] = []
         for signal in unique_signals:
@@ -242,6 +246,63 @@ class WatchtowerAnt:
             seen.add(key)
             unique.append(signal)
         return unique, duplicates
+
+    def _compute_veto(self, signal: dict) -> bool:
+        """True = VETO (geen nieuwe entries). False = GO."""
+        return self._veto_reason(signal) is not None
+
+    def _evaluate_veto(self, signals: list[dict]) -> tuple[bool, str, dict | None]:
+        """Bepaal de binaire Watchtower GO/NO-GO status voor deze poll."""
+        for signal in signals:
+            reason = self._veto_reason(signal)
+            if reason:
+                return True, reason, signal
+        return False, "go", signals[0] if signals else None
+
+    def _veto_reason(self, signal: dict) -> str | None:
+        confidence = _safe_float(signal.get("confidence"))
+        if confidence < 0.4:
+            return f"confidence={confidence:.2f}"
+
+        risk_flags = signal.get("risk_flags", "")
+        if isinstance(risk_flags, (list, tuple, set)):
+            risk_text = " ".join(str(flag) for flag in risk_flags)
+        else:
+            risk_text = str(risk_flags)
+        risk_text = risk_text.lower()
+        for keyword in _VETO_RISK_KEYWORDS:
+            if keyword in risk_text:
+                return f"risk_flag={keyword}"
+        return None
+
+    def _write_veto(
+        self,
+        now: datetime,
+        veto: bool,
+        reason: str,
+        signal: dict | None = None,
+    ) -> None:
+        """Schrijf de Watchtower GO/NO-GO status voor Queen/PaperAnt."""
+        if self.logs_root is None:
+            return
+        veto_path = Path(self.logs_root) / "queen" / "watchtower_veto.json"
+        payload = {
+            "veto": bool(veto),
+            "reason": reason,
+            "timestamp": now.isoformat(),
+        }
+        if signal:
+            payload.update({
+                "signal_id": signal.get("signal_id") or signal.get("id"),
+                "asset": signal.get("asset") or signal.get("symbol"),
+                "confidence": signal.get("confidence"),
+                "entry_score": signal.get("entry_score"),
+            })
+        try:
+            veto_path.parent.mkdir(parents=True, exist_ok=True)
+            veto_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        except OSError:
+            self._log.exception("Kon Watchtower veto-status niet schrijven: %s", veto_path)
 
     def _route_candidates(
         self,
