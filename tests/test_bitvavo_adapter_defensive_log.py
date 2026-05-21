@@ -10,10 +10,12 @@ produceren.
 from __future__ import annotations
 
 import logging
+import time
 from unittest.mock import MagicMock
 
 import pytest
 
+import ant_colony.biome.adapters.bitvavo_adapter as bitvavo_module
 from ant_colony.biome.adapters.bitvavo_adapter import BitvavoAdapter
 
 
@@ -86,3 +88,23 @@ class TestBitvavoAdapterDefensiveLog:
         warning_records = [r for r in caplog.records if r.levelno == logging.WARNING
                            and "XLU" in r.message]
         assert len(warning_records) == 0
+
+    def test_trage_bitvavo_candle_call_timeout_returnt_none(self, monkeypatch, caplog):
+        """Een hangende candles-call mag PaperAnt niet blokkeren."""
+        adapter = _make_adapter()
+
+        def slow_candles(*_args, **_kwargs):
+            time.sleep(0.05)
+            return [[0, "1", "1", "1", "1", "1"]]
+
+        adapter._client.candles.side_effect = slow_candles
+        monkeypatch.setattr(bitvavo_module, "_BITVAVO_API_TIMEOUT_SECONDS", 0.01)
+
+        started = time.perf_counter()
+        with caplog.at_level(logging.WARNING, logger="ant_colony.biome.adapters.bitvavo_adapter"):
+            result = adapter.get_market_data("BTC-EUR", "1m")
+        elapsed = time.perf_counter() - started
+
+        assert result is None
+        assert elapsed < 0.2
+        assert any("Bitvavo API timeout" in record.message for record in caplog.records)

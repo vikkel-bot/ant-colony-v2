@@ -32,6 +32,7 @@ from __future__ import annotations
 import logging
 import os
 import uuid
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 from datetime import datetime, timezone
 from typing import Any
 
@@ -63,6 +64,11 @@ _TIMEFRAME_MAP: dict[str, str] = {
 
 # Minimale EUR-waarde om een balance als "positie" te tellen (stofdeeltjes negeren)
 _MIN_POSITION_EUR = 1.0
+_BITVAVO_API_TIMEOUT_SECONDS = 10.0
+_BITVAVO_API_EXECUTOR = ThreadPoolExecutor(
+    max_workers=4,
+    thread_name_prefix="bitvavo-api",
+)
 
 
 def _env_paper_mode() -> bool:
@@ -119,6 +125,22 @@ class BitvavoAdapter:
         from python_bitvavo_api.bitvavo import Bitvavo  # noqa: PLC0415
         return Bitvavo({"APIKEY": api_key, "APISECRET": api_secret})
 
+    def _fetch_with_timeout(
+        self,
+        fn,
+        *args,
+        timeout: float | None = None,
+    ):
+        """Voer een Bitvavo client-call uit met harde bovengrens."""
+        timeout = _BITVAVO_API_TIMEOUT_SECONDS if timeout is None else timeout
+        future = _BITVAVO_API_EXECUTOR.submit(fn, *args)
+        try:
+            return future.result(timeout=timeout)
+        except FuturesTimeout:
+            future.cancel()
+            log.warning("Bitvavo API timeout na %.1fs", timeout)
+            return None
+
     # -----------------------------------------------------------------------
     # BiomeAdapter protocol
     # -----------------------------------------------------------------------
@@ -160,7 +182,12 @@ class BitvavoAdapter:
             return None
 
         try:
-            candles = self._client.candles(symbol, interval, {"limit": 1})
+            candles = self._fetch_with_timeout(
+                self._client.candles,
+                symbol,
+                interval,
+                {"limit": 1},
+            )
 
             # Bitvavo geeft een dict terug bij een API-fout ({"errorCode": ..., "error": ...})
             if not candles or isinstance(candles, dict):
@@ -216,7 +243,12 @@ class BitvavoAdapter:
             return []
 
         try:
-            raw = self._client.candles(symbol, interval, {"limit": limit})
+            raw = self._fetch_with_timeout(
+                self._client.candles,
+                symbol,
+                interval,
+                {"limit": limit},
+            )
             if not raw or isinstance(raw, dict):
                 log.warning(
                     "BitvavoAdapter.get_candles: geen data voor %s/%s — %r",
