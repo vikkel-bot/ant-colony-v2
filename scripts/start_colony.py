@@ -502,6 +502,7 @@ def _run_scheduler(scheduler, log: logging.Logger) -> None:
 
 _ANT_RESTART_DELAY_S = 5
 _MAX_RESTARTS_PER_HOUR = 3
+_SCOUT_ANT_ENABLED = False  # Uitgeschakeld: produceert alleen geblokkeerde signalen
 
 
 def _start_supervised_ant(
@@ -600,6 +601,40 @@ def _start_supervised_ant(
     )
     thread.start()
     return thread
+
+
+def _start_scout_ant_if_enabled(
+    *,
+    scout_mission,
+    scheduler,
+    node_id: str,
+    make_ant,
+    log: logging.Logger,
+) -> bool:
+    """Start ScoutAnt alleen als de runtime-flag expliciet aan staat."""
+    if not _SCOUT_ANT_ENABLED:
+        log.info("ScoutAnt uitgeschakeld (_SCOUT_ANT_ENABLED=False).")
+        return False
+
+    if scout_mission is None:
+        log.warning("Scout-missie niet geaccepteerd — geen ScoutAnt thread gestart.")
+        return False
+
+    _start_supervised_ant(
+        label="ScoutAnt",
+        ant_type="scout_ant",
+        id_prefix="scout",
+        mission=scout_mission,
+        scheduler=scheduler,
+        node_id=node_id,
+        make_ant=make_ant,
+        log=log,
+    )
+    log.info(
+        "ScoutAnt supervisor gestart | symbols=%s",
+        scout_mission.market_scope.symbols,
+    )
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -1085,29 +1120,19 @@ def main() -> None:
             elif mission.ant_type == "execution_ant" and result.accepted:
                 execution_mission = mission
 
-        if scout_mission is not None:
-            _start_supervised_ant(
-                label="ScoutAnt",
-                ant_type="scout_ant",
-                id_prefix="scout",
+        _start_scout_ant_if_enabled(
+            scout_mission=scout_mission,
+            scheduler=scheduler,
+            node_id=args.node_id,
+            make_ant=lambda ant_id: ScoutAnt(
+                ant_id=ant_id,
                 mission=scout_mission,
                 scheduler=scheduler,
-                node_id=args.node_id,
-                make_ant=lambda ant_id: ScoutAnt(
-                    ant_id=ant_id,
-                    mission=scout_mission,
-                    scheduler=scheduler,
-                    biome_registry=biome_registry,
-                    logs_root=logs_root,
-                ),
-                log=log,
-            )
-            log.info(
-                "ScoutAnt supervisor gestart | symbols=%s",
-                scout_mission.market_scope.symbols,
-            )
-        else:
-            log.warning("Scout-missie niet geaccepteerd — geen ScoutAnt thread gestart.")
+                biome_registry=biome_registry,
+                logs_root=logs_root,
+            ),
+            log=log,
+        )
 
         if research_mission is not None:
             _start_supervised_ant(

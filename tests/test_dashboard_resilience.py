@@ -283,6 +283,46 @@ class TestAntSupervisor:
         assert sleep_calls[0] == sc._ANT_RESTART_DELAY_S
 
 
+class TestScoutAntRuntimeFlag:
+    """ScoutAnt kan uit staan zonder de colony bootstrap te blokkeren."""
+
+    def _get_module(self):
+        import importlib, sys
+        if "scripts.start_colony" in sys.modules:
+            del sys.modules["scripts.start_colony"]
+        import scripts.start_colony as sc
+        return sc
+
+    def test_colony_bootstrap_skips_scout_ant_when_disabled(self, monkeypatch):
+        sc = self._get_module()
+
+        class DummyScope:
+            symbols = ["BTC-EUR"]
+
+        class DummyMission:
+            mission_id = "scout-test"
+            ttl = 60
+            heartbeat_interval = 10
+            market_scope = DummyScope()
+
+        start_supervised = MagicMock()
+        monkeypatch.setattr(sc, "_SCOUT_ANT_ENABLED", False)
+        monkeypatch.setattr(sc, "_start_supervised_ant", start_supervised)
+        log = MagicMock(spec=logging.Logger)
+
+        started = sc._start_scout_ant_if_enabled(
+            scout_mission=DummyMission(),
+            scheduler=MagicMock(),
+            node_id="node-test",
+            make_ant=lambda ant_id: object(),
+            log=log,
+        )
+
+        assert started is False
+        start_supervised.assert_not_called()
+        log.info.assert_called_with("ScoutAnt uitgeschakeld (_SCOUT_ANT_ENABLED=False).")
+
+
 # ---------------------------------------------------------------------------
 # start_colony dashboard port preflight
 # ---------------------------------------------------------------------------
