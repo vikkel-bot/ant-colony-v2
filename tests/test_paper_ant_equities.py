@@ -804,6 +804,30 @@ class TestSignalProcessing:
         assert stats["received"] == 1
         assert stats["opened"] == 1
 
+        records = [
+            json.loads(line)
+            for line in (tmp_path / "paper" / f"{ant.ant_id}.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        opened = next(r["payload"] for r in records if r["payload"]["action"] == "trade_opened")
+        assert opened["strategy_type"] == "momentum"
+
+    def test_watchtower_trade_opened_logs_strategy_type(self, tmp_path):
+        ant = _make_ant(tmp_path)
+        self._mock_price(ant, 200.0)
+        self._write_watchtower_candidate(tmp_path, symbol="AAPL", signal_id="wt-001")
+
+        stats = ant._process_watchtower_candidates()
+
+        assert stats["opened"] == 1
+        records = [
+            json.loads(line)
+            for line in (tmp_path / "paper" / f"{ant.ant_id}.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        opened = next(r["payload"] for r in records if r["payload"]["action"] == "trade_opened")
+        assert opened["strategy_type"] == "watchtower_signal"
+
     def test_sector_ranking_snapshot_opens_position_when_opportunity_log_missing(self, tmp_path):
         ant = _make_ant(tmp_path)
         self._mock_price(ant, 100.0)

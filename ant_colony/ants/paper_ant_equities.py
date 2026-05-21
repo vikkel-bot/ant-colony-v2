@@ -103,6 +103,24 @@ _WATCHTOWER_POSITION_SCALE = min(
 )
 
 
+def _strategy_type_for_equity_source(
+    source: str | None,
+    watchtower_signal_id: str | None = None,
+) -> str:
+    """Bepaal een stabiele strategy_type voor equity trade_opened analytics."""
+    normalized = str(source or "").strip().lower()
+    if normalized == "watchtower" or watchtower_signal_id:
+        return "watchtower_signal"
+    mapping = {
+        "sector_scout": "momentum",
+        "breakout_ant": "breakout",
+        "dividend_scout": "dividend",
+    }
+    if normalized in mapping:
+        return mapping[normalized]
+    return normalized or "equities_paper"
+
+
 class EquitiesPaperAnt:
     """
     Paper trading agent voor equities.
@@ -1155,6 +1173,7 @@ class EquitiesPaperAnt:
     ) -> None:
         """Log trade_opened event."""
         trailing_stop_price = position.entry_price * (1.0 - _TRAILING_STOP_PCT)
+        strategy_type = _strategy_type_for_equity_source(source, position.watchtower_signal_id)
         self._write_log({
             "action":               "trade_opened",
             "position_id":          position.position_id,
@@ -1170,6 +1189,7 @@ class EquitiesPaperAnt:
             "hard_sl_pct":          _HARD_SL_PCT,
             "trailing_stop_pct":    _TRAILING_STOP_PCT,
             "source":               source,
+            "strategy_type":        strategy_type,
             "position_scale":       position_scale,
             "ttl_seconds":          position.ttl,
             "ttl_days":             round(position.ttl / _SECONDS_PER_DAY, 4),

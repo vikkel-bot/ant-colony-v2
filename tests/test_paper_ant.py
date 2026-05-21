@@ -376,8 +376,9 @@ class TestLogEvents:
         records = [json.loads(l) for l in log_path.read_text().splitlines() if l.strip()]
         opened = next(r["payload"] for r in records if r["payload"]["action"] == "trade_opened")
         for field in ("position_id", "symbol", "side", "entry_price", "quantity",
-                      "stop_loss", "take_profit"):
+                      "stop_loss", "take_profit", "strategy_type"):
             assert field in opened, f"Missing field: {field}"
+        assert opened["strategy_type"] == "scout"
 
     def test_trade_closed_event_written(self, tmp_path: Path) -> None:
         ant = make_ant(logs_root=tmp_path)
@@ -985,6 +986,29 @@ class TestResearchCandidates:
         records = [json.loads(l) for l in log_path.read_text().splitlines() if l.strip()]
         opened = next(r["payload"] for r in records if r["payload"]["action"] == "trade_opened")
         assert opened.get("strategy_type") == "momentum"
+
+    def test_approved_long_trade_opened_log_uses_candidate_strategy_type(self, tmp_path: Path) -> None:
+        ant = make_ant(logs_root=tmp_path)
+        ant.biome_registry.get.return_value = _make_adapter_with_price(_PRICE)
+        approved_dir = tmp_path / "approved"
+        approved_dir.mkdir(parents=True, exist_ok=True)
+        record = {
+            "candidate_id": "approved-001",
+            "strategy_type": "volatility_squeeze",
+            "biome": "crypto",
+            "market_scope": {"symbol": "BTC-EUR"},
+            "entry_conditions": {"direction": "long"},
+            "fitness_score": 0.9,
+            "win_rate": 0.62,
+        }
+        (approved_dir / "approved.jsonl").write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+        ant._process_approved_candidates(regime="TRENDING")
+
+        log_path = tmp_path / "paper" / f"{ant.ant_id}.jsonl"
+        records = [json.loads(l) for l in log_path.read_text().splitlines() if l.strip()]
+        opened = next(r["payload"] for r in records if r["payload"]["action"] == "trade_opened")
+        assert opened.get("strategy_type") == "volatility_squeeze"
 
     def test_trade_opened_log_has_sl_pct_and_tp_pct(self, tmp_path: Path) -> None:
         ant = make_ant(logs_root=tmp_path)

@@ -93,6 +93,30 @@ _VOLATILE_SL_MULTIPLIER = 1.5    # SL-percentage 50% groter in VOLATILE regime
 _VOLATILE_CAPITAL_MULT  = 0.5    # positiegrootte halveren in VOLATILE regime
 
 
+def _strategy_type_for_trade_open(
+    strategy_type: str | None,
+    signal_data: dict | None,
+) -> str:
+    """Bepaal een niet-lege strategy_type voor trade_opened analytics."""
+    signal_data = signal_data or {}
+    for value in (
+        strategy_type,
+        signal_data.get("strategy_type"),
+        signal_data.get("candidate_strategy_type"),
+    ):
+        normalized = str(value or "").strip()
+        if normalized and normalized.lower() != "unknown":
+            return normalized
+
+    signal_type = str(signal_data.get("signal_type") or "").strip()
+    if signal_type:
+        if signal_type in {"price_move", "volume_spike", "scout"}:
+            return "scout"
+        return signal_type
+
+    return "scout"
+
+
 class PaperAnt:
     """
     Vertaalt OpportunitySignals van ScoutAnt naar paper trades.
@@ -1023,6 +1047,7 @@ class PaperAnt:
             "confidence":    1.0,
             "biome":         biome,
             "signal_id":     payload.get("candidate_id"),
+            "strategy_type":  strategy_type,
         }
         commodity_fraction = _COMMODITY_CAPITAL_FRACTION if biome == "commodity" else None
         self._try_open_position(
@@ -1340,6 +1365,8 @@ class PaperAnt:
             "current_price": price,
             "confidence":    float(record.get("fitness_score") or 0.7),
             "biome":         biome,
+            "signal_id":     record.get("candidate_id"),
+            "strategy_type":  strategy_type,
         }
         self._try_open_position(
             sig,
@@ -1510,6 +1537,7 @@ class PaperAnt:
         entry_fee_cost = round(position.entry_price * position.quantity * BROKER_FEE_PCT, 6)
         effective_entry = round(position.entry_price * (1.0 + BROKER_FEE_PCT), 8)
         biome = position.biome or ""
+        opened_strategy_type = _strategy_type_for_trade_open(strategy_type, signal_data)
         self._write_log({
             "action":           "trade_opened",
             "position_id":      position.position_id,
@@ -1526,7 +1554,7 @@ class PaperAnt:
             "take_profit":      position.take_profit_price,
             "from_signal_id":   signal_data.get("signal_id"),
             "confidence":       signal_data.get("confidence"),
-            "strategy_type":    strategy_type,
+            "strategy_type":    opened_strategy_type,
             "sl_pct":           sl_pct,
             "tp_pct":           tp_pct,
         })
