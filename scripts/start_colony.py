@@ -833,9 +833,8 @@ def main() -> None:
     scheduler_thread.start()
 
     # --- Stap 8b: bootstrap missions (scout + research + audit) --- #
-    # Geeft alle drie scouting-missions uit via de Queen en start een ScoutAnt thread.
-    # Research en audit missions worden uitgegeven (zichtbaar op dashboard) maar
-    # krijgen geen thread — ResearchAnt en AuditAnt klassen bestaan nog niet.
+    # Geeft de basismissies uit via de Queen en start long-running ants onder
+    # dezelfde supervisor, zodat een crash een fresh-TTL restart krijgt.
     try:
         from ant_colony.ants.audit_ant import AuditAnt
         from ant_colony.ants.execution_ant import ExecutionAnt
@@ -1087,31 +1086,24 @@ def main() -> None:
                 execution_mission = mission
 
         if scout_mission is not None:
-            scout_ant_id = f"scout-{uuid.uuid4().hex[:12]}"
-            scout = ScoutAnt(
-                ant_id=scout_ant_id,
+            _start_supervised_ant(
+                label="ScoutAnt",
+                ant_type="scout_ant",
+                id_prefix="scout",
                 mission=scout_mission,
                 scheduler=scheduler,
-                biome_registry=biome_registry,
-                logs_root=logs_root,
-            )
-            threading.Thread(
-                target=scout.run,
-                name=f"scout-{scout_ant_id[:16]}",
-                daemon=True,
-            ).start()
-            scheduler.register_agent(AgentRecord(
-                ant_id=scout_ant_id,
-                mission_id=scout_mission.mission_id,
                 node_id=args.node_id,
-                ant_type="scout_ant",
-                ttl=scout_mission.ttl,
-                heartbeat_interval=scout_mission.heartbeat_interval,
-            ))
+                make_ant=lambda ant_id: ScoutAnt(
+                    ant_id=ant_id,
+                    mission=scout_mission,
+                    scheduler=scheduler,
+                    biome_registry=biome_registry,
+                    logs_root=logs_root,
+                ),
+                log=log,
+            )
             log.info(
-                "ScoutAnt gestart | ant_id=%s  ttl=%ds  symbols=%s",
-                scout_ant_id,
-                scout_mission.ttl,
+                "ScoutAnt supervisor gestart | symbols=%s",
                 scout_mission.market_scope.symbols,
             )
         else:
@@ -1177,33 +1169,24 @@ def main() -> None:
             log.warning("Paper-missie niet geaccepteerd — geen PaperAnt thread gestart.")
 
         if audit_mission is not None:
-            audit_ant_id = f"audit-{uuid.uuid4().hex[:12]}"
-            audit = AuditAnt(
-                ant_id=audit_ant_id,
+            _start_supervised_ant(
+                label="AuditAnt",
+                ant_type="audit_ant",
+                id_prefix="audit",
                 mission=audit_mission,
                 scheduler=scheduler,
-                biome_registry=biome_registry,
-                logs_root=logs_root,
-                scheduler_tick_interval=args.tick_interval,
-            )
-            threading.Thread(
-                target=audit.run,
-                name=f"audit-{audit_ant_id[:16]}",
-                daemon=True,
-            ).start()
-            scheduler.register_agent(AgentRecord(
-                ant_id=audit_ant_id,
-                mission_id=audit_mission.mission_id,
                 node_id=args.node_id,
-                ant_type="audit_ant",
-                ttl=audit_mission.ttl,
-                heartbeat_interval=audit_mission.heartbeat_interval,
-            ))
-            log.info(
-                "AuditAnt gestart | ant_id=%s  ttl=%ds",
-                audit_ant_id,
-                audit_mission.ttl,
+                make_ant=lambda ant_id: AuditAnt(
+                    ant_id=ant_id,
+                    mission=audit_mission,
+                    scheduler=scheduler,
+                    biome_registry=biome_registry,
+                    logs_root=logs_root,
+                    scheduler_tick_interval=args.tick_interval,
+                ),
+                log=log,
             )
+            log.info("AuditAnt supervisor gestart | ttl=%ds", audit_mission.ttl)
         else:
             log.warning("Audit-missie niet geaccepteerd — geen AuditAnt thread gestart.")
 
@@ -1294,31 +1277,25 @@ def main() -> None:
         _strategy_mission = locals().get("strategy_mission")
         if _strategy_mission is not None:
             from ant_colony.ants.strategy_ant import StrategyAnt
-            from ant_colony.colony.scheduler.colony_scheduler import AgentRecord
-            strategy_ant_id = f"strategy-{uuid.uuid4().hex[:12]}"
-            strategy = StrategyAnt(
-                ant_id=strategy_ant_id,
+
+            _start_supervised_ant(
+                label="StrategyAnt",
+                ant_type="strategy_ant",
+                id_prefix="strategy",
                 mission=_strategy_mission,
                 scheduler=scheduler,
-                biome_registry=biome_registry,
-                logs_root=logs_root,
-            )
-            threading.Thread(
-                target=strategy.run,
-                name=f"strategy-{strategy_ant_id[:16]}",
-                daemon=True,
-            ).start()
-            scheduler.register_agent(AgentRecord(
-                ant_id=strategy_ant_id,
-                mission_id=_strategy_mission.mission_id,
                 node_id=args.node_id,
-                ant_type="strategy_ant",
-                ttl=_strategy_mission.ttl,
-                heartbeat_interval=_strategy_mission.heartbeat_interval,
-            ))
+                make_ant=lambda ant_id: StrategyAnt(
+                    ant_id=ant_id,
+                    mission=_strategy_mission,
+                    scheduler=scheduler,
+                    biome_registry=biome_registry,
+                    logs_root=logs_root,
+                ),
+                log=log,
+            )
             log.info(
-                "StrategyAnt gestart | ant_id=%s  ttl=%ds  symbols=%s",
-                strategy_ant_id,
+                "StrategyAnt supervisor gestart | ttl=%ds  symbols=%s",
                 _strategy_mission.ttl,
                 _strategy_mission.market_scope.symbols,
             )

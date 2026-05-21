@@ -216,6 +216,74 @@ class TestDashboardWatchdog:
 
 
 # ---------------------------------------------------------------------------
+# start_colony._start_supervised_ant() — ant crash restart
+# ---------------------------------------------------------------------------
+
+class TestAntSupervisor:
+    """_start_supervised_ant geeft gecrashte ants een fresh TTL restart."""
+
+    def _get_module(self):
+        import importlib, sys
+        # Force reload zodat we altijd de nieuwste versie pakken
+        if "scripts.start_colony" in sys.modules:
+            del sys.modules["scripts.start_colony"]
+        import scripts.start_colony as sc
+        return sc
+
+    def test_restarts_after_ant_crash(self, monkeypatch):
+        sc = self._get_module()
+
+        class DummyMission:
+            mission_id = "mission-test"
+            ttl = 60
+            heartbeat_interval = 10
+
+        class DummyScheduler:
+            def __init__(self):
+                self.registered = []
+
+            def register_agent(self, record):
+                self.registered.append(record)
+
+        run_calls = []
+
+        class CrashOnceAnt:
+            def __init__(self, ant_id):
+                self.ant_id = ant_id
+
+            def run(self):
+                run_calls.append(self.ant_id)
+                if len(run_calls) == 1:
+                    raise RuntimeError("simulated ant crash")
+                return "completed"
+
+        sleep_calls = []
+        monkeypatch.setattr(sc, "_MAX_RESTARTS_PER_HOUR", 1)
+        monkeypatch.setattr(sc.time, "sleep", lambda seconds: sleep_calls.append(seconds))
+        monkeypatch.setattr(sc.time, "monotonic", lambda: float(len(sleep_calls) * 10))
+
+        scheduler = DummyScheduler()
+        thread = sc._start_supervised_ant(
+            label="DummyAnt",
+            ant_type="dummy_ant",
+            id_prefix="dummy",
+            mission=DummyMission(),
+            scheduler=scheduler,
+            node_id="node-test",
+            make_ant=lambda ant_id: CrashOnceAnt(ant_id),
+            log=MagicMock(spec=logging.Logger),
+        )
+        thread.join(timeout=2.0)
+
+        assert not thread.is_alive()
+        assert len(run_calls) == 2
+        assert run_calls[0] != run_calls[1]
+        assert len(scheduler.registered) == 2
+        assert sleep_calls
+        assert sleep_calls[0] == sc._ANT_RESTART_DELAY_S
+
+
+# ---------------------------------------------------------------------------
 # start_colony dashboard port preflight
 # ---------------------------------------------------------------------------
 
