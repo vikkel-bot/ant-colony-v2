@@ -4,7 +4,7 @@ scripts/harness/harness_trend_following.py
 Standalone trend-following harness voor Donchian Channel breakouts.
 
 Wat het doet:
-  1. Haalt 1h crypto candles op via BitvavoAdapter.get_candles().
+  1. Haalt 1h crypto candles op via CryptoAdapter.get_candles().
   2. Simuleert long/short Donchian breakouts zonder overlappende posities.
   3. Print een compact rapport met Go/No-Go criteria voor paper-testfase.
   4. Schrijft hetzelfde rapport naar ANT_LOGS/harness/trend_following_YYYYMMDD_HHMM.txt.
@@ -38,13 +38,11 @@ try:
 except Exception:  # pragma: no cover - dotenv is optional for this read-only harness
     load_dotenv = None
 
-from ant_colony.biome.adapters.bitvavo_adapter import BitvavoAdapter
 from ant_colony.biome.biome_adapter import MarketData
+from ant_colony.biome.crypto_adapter import CryptoAdapter
 
 SYMBOLS = ["BTC-EUR", "ETH-EUR", "SOL-EUR", "XRP-EUR"]
 TIMEFRAME = "1h"
-LOOKBACK_DAYS = 90
-CANDLE_LIMIT = LOOKBACK_DAYS * 24
 
 ENTRY_LOOKBACK = 20
 EXIT_LOOKBACK = 10
@@ -328,20 +326,33 @@ def write_report(report: str, logs_root: Path | None = None) -> Path:
     return out_path
 
 
-def fetch_candles(adapter: BitvavoAdapter) -> dict[str, list[MarketData]]:
+def _fetch_candles(adapter: CryptoAdapter, symbol: str) -> list[MarketData]:
+    batch1 = adapter.get_candles(symbol, TIMEFRAME, limit=1440)
+    if not batch1:
+        return []
+    if len(batch1) < 1440:
+        return batch1
+    oldest_ms = int(batch1[0].timestamp.timestamp() * 1000)
+    batch2 = adapter.get_candles(symbol, TIMEFRAME, limit=1440, end_ms=oldest_ms - 1)
+    if batch2:
+        return batch2 + batch1
+    return batch1
+
+
+def fetch_candles(adapter: CryptoAdapter) -> dict[str, list[MarketData]]:
     candles_by_symbol: dict[str, list[MarketData]] = {}
     for symbol in SYMBOLS:
         try:
-            candles = adapter.get_candles(symbol, TIMEFRAME, CANDLE_LIMIT)
+            candles = _fetch_candles(adapter, symbol)
         except Exception:
             candles = []
         candles_by_symbol[symbol] = candles or []
     return candles_by_symbol
 
 
-def run_harness(adapter: BitvavoAdapter | None = None) -> tuple[str, Path]:
+def run_harness(adapter: CryptoAdapter | None = None) -> tuple[str, Path]:
     _load_env()
-    adapter = adapter or BitvavoAdapter(paper_only=True)
+    adapter = adapter or CryptoAdapter(paper_only=True)
     candles_by_symbol = fetch_candles(adapter)
     trades_by_symbol = {
         symbol: simulate_symbol(symbol, candles)
