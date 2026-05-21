@@ -51,7 +51,7 @@ from ant_colony.ants.research_ant import (
     _strategy_type_from_signal,
     _strategy_type_from_signal_type,
 )
-from ant_colony.strategies import DISABLED_STRATEGY_TYPES
+from ant_colony.strategies import ACTIVE_STRATEGY_TYPES, DISABLED_STRATEGY_TYPES
 from ant_colony.biome.biome_adapter import MarketData
 from ant_colony.biome.biome_registry import BiomeRegistry
 from ant_colony.schemas.ant import AntStatus
@@ -119,6 +119,38 @@ def make_candles(
         )
         for i, c in enumerate(closes)
     ]
+
+
+def make_squeeze_release_candles(
+    *,
+    symbol: str = "BTC-EUR",
+    final_close: float = 105.0,
+) -> list[MarketData]:
+    """Bouw 199 compressiebars + 1 squeeze-release bar."""
+    base = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    candles: list[MarketData] = []
+    closes = [100.0] * 199 + [final_close]
+    for i, close in enumerate(closes):
+        if i == len(closes) - 1:
+            high = close + 0.2
+            low = close - 0.2
+        else:
+            high = 100.4
+            low = 99.6
+        candles.append(
+            MarketData(
+                symbol=symbol,
+                timeframe="1h",
+                timestamp=base + timedelta(hours=i),
+                open=close,
+                high=high,
+                low=low,
+                close=close,
+                volume=1_000.0,
+                biome_id="crypto",
+            )
+        )
+    return candles
 
 
 def make_adapter(candles: list[MarketData] | None = None, available: bool = True) -> MagicMock:
@@ -556,6 +588,77 @@ class TestMomentumAndMeanReversionDetection:
         payload = mean_reversion_records[0]["payload"]
         assert payload["direction"] == "long"
         assert payload["strategy_type"] == "mean_reversion"
+
+
+# ---------------------------------------------------------------------------
+# Volatility squeeze detectie
+# ---------------------------------------------------------------------------
+
+class TestVolatilitySqueezeDetection:
+    def test_volatility_squeeze_release_generates_long_candidate(self, tmp_path):
+        """BB/KC squeeze-release boven EMA20 → volatility_squeeze long kandidaat."""
+        candles = make_squeeze_release_candles(final_close=105.0)
+        ant = make_ant(tmp_path, registry=make_registry(candles=candles))
+        stub_backtester(ant)
+
+        ant._check_volatility_squeeze(
+            "BTC-EUR",
+            candles,
+            [c.close for c in candles],
+            [c.high for c in candles],
+            [c.low for c in candles],
+        )
+
+        records = read_jsonl(log_path(tmp_path, ant))
+        squeeze_records = [
+            r for r in records
+            if "VOLATILITY_SQUEEZE" in (r.get("payload") or {}).get("signal_type", "").upper()
+        ]
+        assert len(squeeze_records) == 1
+        payload = squeeze_records[0]["payload"]
+        assert payload["direction"] == "long"
+        assert payload["strategy_type"] == "volatility_squeeze"
+
+    def test_volatility_squeeze_release_generates_short_candidate(self, tmp_path):
+        """BB/KC squeeze-release onder EMA20 → volatility_squeeze short kandidaat."""
+        candles = make_squeeze_release_candles(final_close=95.0)
+        ant = make_ant(tmp_path, registry=make_registry(candles=candles))
+        stub_backtester(ant)
+
+        ant._check_volatility_squeeze(
+            "ETH-EUR",
+            candles,
+            [c.close for c in candles],
+            [c.high for c in candles],
+            [c.low for c in candles],
+        )
+
+        records = read_jsonl(log_path(tmp_path, ant))
+        squeeze_records = [
+            r for r in records
+            if "VOLATILITY_SQUEEZE" in (r.get("payload") or {}).get("signal_type", "").upper()
+        ]
+        assert len(squeeze_records) == 1
+        payload = squeeze_records[0]["payload"]
+        assert payload["direction"] == "short"
+        assert payload["strategy_type"] == "volatility_squeeze"
+
+    def test_volatility_squeeze_ignores_non_btc_eth_symbols(self, tmp_path):
+        """Volatility squeeze is bewust beperkt tot BTC-EUR en ETH-EUR."""
+        candles = make_squeeze_release_candles(symbol="SOL-EUR", final_close=105.0)
+        ant = make_ant(tmp_path, registry=make_registry(candles=candles))
+        stub_backtester(ant)
+
+        ant._check_volatility_squeeze(
+            "SOL-EUR",
+            candles,
+            [c.close for c in candles],
+            [c.high for c in candles],
+            [c.low for c in candles],
+        )
+
+        assert read_jsonl(log_path(tmp_path, ant)) == []
+        assert not ant._backtester.run.called
 
 
 # ---------------------------------------------------------------------------
@@ -1050,6 +1153,8 @@ def test_disabled_strategy_types_for_slimming_phase() -> None:
     assert {"rsi_based", "sector_scout", "hybrid", "unknown"}.issubset(
         DISABLED_STRATEGY_TYPES
     )
+    assert "volatility_squeeze" in ACTIVE_STRATEGY_TYPES
+    assert "volatility_squeeze" not in DISABLED_STRATEGY_TYPES
 
 
 # ---------------------------------------------------------------------------
@@ -1402,3 +1507,9 @@ class TestStrategyTypeWatchtower:
 
     def test_strategy_type_from_signal_type_mean_reversion_oversold(self) -> None:
         assert _strategy_type_from_signal_type("MEAN_REVERSION_OVERSOLD") == "mean_reversion"
+
+    def test_strategy_type_from_signal_type_volatility_squeeze(self) -> None:
+        assert _strategy_type_from_signal_type("VOLATILITY_SQUEEZE") == "volatility_squeeze"
+
+    def test_strategy_type_from_signal_volatility_squeeze(self) -> None:
+        assert _strategy_type_from_signal("volatility_squeeze", []) == "volatility_squeeze"

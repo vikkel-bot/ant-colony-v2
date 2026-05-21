@@ -67,6 +67,16 @@
 
 **Geschikt voor:** Crypto na consolidatie, aandelen voor earnings, commodities voor seizoenspatronen.
 
+**Backtest-status 2026-05-21 (harness):**
+
+- Script: `scripts/harness/harness_volatility_squeeze.py --days 90 --params bb=2.0,kc=1.5,sl=0.02,tp=0.06`
+- Data: Bitvavo 1h candles, 90 dagen, fixed parameters (geen sweep/optimalisatie)
+- BTC-EUR: 32 trades, win rate 59.4%, Sharpe 4.75, max DD 4.7% → GO op harness-criteria
+- ETH-EUR: 29 trades, win rate 62.1%, Sharpe 5.39, max DD 5.8% → technisch sterk, maar één trade onder 30-trade criterium
+- SOL-EUR: 29 trades, win rate 48.3%, Sharpe 2.24, max DD 17.2% → uitgesloten voor ResearchAnt activatie
+- XRP-EUR: 27 trades, win rate 48.1%, Sharpe 0.96, max DD 12.8% → uitgesloten voor ResearchAnt activatie
+- Besluit: `volatility_squeeze` alleen actief maken voor BTC-EUR en ETH-EUR in ResearchAnt paper-fase. Geen live-promotie zonder minimaal 30 dagen paper-validatie.
+
 ---
 
 ## 4. Cross-Sectional Momentum (Factor-Based)

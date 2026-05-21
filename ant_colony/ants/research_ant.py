@@ -5,12 +5,13 @@ ResearchAnt — analyseert markten en genereert StrategyCandidate objecten.
 
 Verantwoordelijkheden:
   - Historische OHLCV data ophalen via BiomeAdapter (100 candles, 1h)
-  - Vijf technische signalen detecteren per symbool:
+  - Zes technische signalen detecteren per symbool:
       1. SMA-crossover    — SMA20 kruist SMA50
       2. RSI              — oversold (< 30) of overbought (> 70)
       3. Bollinger bands  — prijs raakt boven- of onderband
       4. Momentum breakout — close breekt boven vorige 20-bar high
       5. Mean reversion   — close heeft Z-score < scanner-drempel over 20 bars
+      6. Volatility squeeze — BB/Keltner squeeze-release op BTC/ETH
   - Per signaal een backtest uitvoeren via Backtester
   - Kandidaten met sharpe > 0.5 en win_rate > 0.45 loggen als JSON naar
     ANT_LOGS/research/{ant_id}.jsonl
@@ -63,6 +64,10 @@ _MAX_BARS_HELD      = 10
 _ZSCORE_OVERSOLD_THRESHOLD = -1.5   # paper-fase: -1.5; productie: -2.0
 _RESEARCH_WATCHDOG_SECONDS = float(os.getenv("RESEARCH_ANT_WATCHDOG_SECONDS", "600"))
 _REJECT_LOG_COOLDOWN_SECONDS = float(os.getenv("RESEARCH_REJECT_LOG_COOLDOWN_SECONDS", "1800"))
+_VOLATILITY_SQUEEZE_SYMBOLS = {"BTC-EUR", "ETH-EUR"}
+_VOLATILITY_SQUEEZE_TP_PCT = 0.06
+_VOLATILITY_SQUEEZE_SL_PCT = 0.02
+_VOLATILITY_SQUEEZE_MAX_BARS_HELD = 48
 
 # Commodity symbool → yfinance ticker mapping
 _COMMODITY_YFINANCE_TICKERS: dict[str, str] = {
@@ -280,11 +285,13 @@ class ResearchAnt:
 
             closes = [c.close for c in candles]
             highs = [c.high for c in candles]
+            lows = [c.low for c in candles]
             self._check_sma_crossover(symbol, candles, closes)
             self._check_rsi(symbol, candles, closes)
             self._check_bollinger(symbol, candles, closes)
             self._check_momentum_breakout(symbol, candles, closes, highs)
             self._check_mean_reversion_oversold(symbol, candles, closes)
+            self._check_volatility_squeeze(symbol, candles, closes, highs, lows)
 
         self._process_ingestion_candidates()
         self._process_commodity_watchtower_signals()
@@ -532,6 +539,93 @@ class ResearchAnt:
             logic_summary=(
                 f"Close {closes[-1]:.4f} is oversold met Z-score "
                 f"{z_score:.2f} over 20 bars op {symbol}"
+            ),
+        )
+
+    def _check_volatility_squeeze(
+        self,
+        symbol: str,
+        candles: list[MarketData],
+        closes: list[float],
+        highs: list[float],
+        lows: list[float],
+    ) -> None:
+        """BB/Keltner squeeze-release voor BTC-EUR en ETH-EUR."""
+        if symbol not in _VOLATILITY_SQUEEZE_SYMBOLS:
+            return
+        if min(len(closes), len(highs), len(lows)) < 21:
+            return
+
+        bb_curr = _bollinger(closes, period=20, std_dev=2.0)
+        bb_prev = _bollinger(closes[:-1], period=20, std_dev=2.0)
+        ema20 = _ema(closes, period=20)
+        atr_curr = _atr_last(highs, lows, closes, period=14)
+        atr_prev = _atr_last(highs[:-1], lows[:-1], closes[:-1], period=14)
+        if bb_curr is None or bb_prev is None or len(ema20) < 2:
+            return
+        if atr_curr is None or atr_prev is None or atr_curr <= 0 or atr_prev <= 0:
+            return
+
+        curr_upper, _, curr_lower = bb_curr
+        prev_upper, _, prev_lower = bb_prev
+        ema_prev, ema_curr = ema20[-2], ema20[-1]
+
+        curr_bb_width = curr_upper - curr_lower
+        prev_bb_width = prev_upper - prev_lower
+        curr_kc_width = 2 * 1.5 * atr_curr
+        prev_kc_width = 2 * 1.5 * atr_prev
+        prev_squeeze = prev_bb_width < prev_kc_width
+        curr_squeeze = curr_bb_width < curr_kc_width
+        if not prev_squeeze or curr_squeeze:
+            return
+
+        last_close = closes[-1]
+        if last_close > ema_curr:
+            direction = "long"
+        elif last_close < ema_curr:
+            direction = "short"
+        else:
+            return
+
+        self._evaluate_and_emit(
+            symbol=symbol,
+            candles=candles,
+            signal_type="volatility_squeeze",
+            direction=direction,
+            parameters={
+                "bb_period": 20,
+                "bb_std": 2.0,
+                "ema_period": 20,
+                "atr_period": 14,
+                "kc_atr_multiplier": 1.5,
+                "bb_width": round(curr_bb_width, 6),
+                "kc_width": round(curr_kc_width, 6),
+                "prev_bb_width": round(prev_bb_width, 6),
+                "prev_kc_width": round(prev_kc_width, 6),
+                "ema20": round(ema_curr, 4),
+                "take_profit_pct": _VOLATILITY_SQUEEZE_TP_PCT,
+                "stop_loss_pct": _VOLATILITY_SQUEEZE_SL_PCT,
+                "max_bars_held": _VOLATILITY_SQUEEZE_MAX_BARS_HELD,
+            },
+            entry_conditions={
+                "squeeze_release": True,
+                "previous_squeeze": True,
+                "current_squeeze": False,
+                "close": round(last_close, 4),
+                "ema20": round(ema_curr, 4),
+                "ema20_previous": round(ema_prev, 4),
+                "momentum_filter": "above_ema20" if direction == "long" else "below_ema20",
+            },
+            logic_summary=(
+                f"Volatility squeeze release {direction} op {symbol}: "
+                f"BB width {curr_bb_width:.4f} breekt buiten KC width {curr_kc_width:.4f}"
+            ),
+            backtest_config=BacktestConfig(
+                direction=direction,
+                take_profit_pct=_VOLATILITY_SQUEEZE_TP_PCT,
+                stop_loss_pct=_VOLATILITY_SQUEEZE_SL_PCT,
+                max_bars_held=_VOLATILITY_SQUEEZE_MAX_BARS_HELD,
+                strategy_type="volatility_squeeze",
             ),
         )
 
@@ -1264,6 +1358,8 @@ def _strategy_type_from_signal(
     # --- Directe signalen van ResearchAnt ---
     if "sma_crossover" in st or ("sma" in st and "cross" in st):
         return "sma_crossover"
+    if "volatility_squeeze" in st:
+        return "volatility_squeeze"
     if "momentum_breakout" in st:
         return "momentum"
     if "mean_reversion_oversold" in st:
@@ -1329,6 +1425,8 @@ def _strategy_type_from_signal_type(signal_type: str) -> str | None:
         return "sma_crossover"
     if st.startswith("rsi"):
         return "rsi_based"
+    if "volatility_squeeze" in st:
+        return "volatility_squeeze"
     if st.startswith("bb") or "bollinger" in st:
         return "bollinger_bands"
     if "momentum" in st:
@@ -1386,6 +1484,40 @@ def _sma(closes: list[float], period: int) -> list[float]:
     if len(closes) < period:
         return []
     return [sum(closes[i : i + period]) / period for i in range(len(closes) - period + 1)]
+
+
+def _ema(values: list[float], period: int) -> list[float]:
+    """Rolling EMA met SMA-seed. Retourneert lege lijst bij onvoldoende data."""
+    if len(values) < period:
+        return []
+    alpha = 2.0 / (period + 1.0)
+    ema_values = [sum(values[:period]) / period]
+    for value in values[period:]:
+        ema_values.append((value * alpha) + (ema_values[-1] * (1.0 - alpha)))
+    return ema_values
+
+
+def _atr_last(
+    highs: list[float],
+    lows: list[float],
+    closes: list[float],
+    period: int = 14,
+) -> float | None:
+    """ATR voor de laatste `period` bars, inclusief gap t.o.v. vorige close."""
+    if min(len(highs), len(lows), len(closes)) < period:
+        return None
+    start = len(closes) - period
+    true_ranges: list[float] = []
+    for i in range(start, len(closes)):
+        prev_close = closes[i - 1] if i > 0 else closes[i]
+        true_ranges.append(
+            max(
+                highs[i] - lows[i],
+                abs(highs[i] - prev_close),
+                abs(lows[i] - prev_close),
+            )
+        )
+    return sum(true_ranges) / period
 
 
 def _rsi(closes: list[float], period: int = 14) -> float | None:
