@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -95,14 +94,12 @@ def _normalise_strategy(record: dict[str, Any]) -> str:
             "signal_type",
             "source",
             "entry_source",
-            # additional field name variants found in production log formats
             "entry_strategy",
             "strategy_id",
             "strategy_name",
             "trade_type",
             "signal_source",
             "entry_type",
-            "_ant_source",
         )
         or "unknown"
     )
@@ -231,34 +228,7 @@ def load_closed_trades(
 
             if "exit_time" not in payload and "timestamp" in record:
                 payload["exit_time"] = record["timestamp"]
-            # Inject outer AuditEvent source (ant_id) as fallback for strategy lookup
-            if "source" in record and "_ant_source" not in payload:
-                payload["_ant_source"] = str(record["source"])
             closed_payloads.append(payload)
-
-    # --- DEBUG: diagnose join ---
-    print(f"[DEBUG] trade_opened gevonden: {len(opened_by_id)}", file=sys.stderr, flush=True)
-    print(f"[DEBUG] trade_closed gevonden: {len(closed_payloads)}", file=sys.stderr, flush=True)
-    for i, (pid, p) in enumerate(list(opened_by_id.items())[:5]):
-        print(
-            f"[DEBUG]  opened[{i}] position_id={pid!r}"
-            f"  strategy_type={p.get('strategy_type')!r}"
-            f"  source={p.get('source')!r}"
-            f"  symbol={p.get('symbol')!r}",
-            file=sys.stderr, flush=True,
-        )
-    for i, p in enumerate(closed_payloads[:5]):
-        pid = str(p.get("position_id") or p.get("id") or "").strip()
-        in_opened = pid in opened_by_id
-        print(
-            f"[DEBUG]  closed[{i}] position_id={pid!r}"
-            f"  join_hit={in_opened}"
-            f"  _ant_source={p.get('_ant_source')!r}"
-            f"  symbol={p.get('symbol')!r}"
-            f"  keys={sorted(p.keys())}",
-            file=sys.stderr, flush=True,
-        )
-    # --- END DEBUG ---
 
     for payload in closed_payloads:
         trade = _closed_trade_from_payload(payload, opened_by_id)
