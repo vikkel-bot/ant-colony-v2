@@ -69,6 +69,7 @@ _SHORT_TP_PCT = 0.04             # shorts: 4% take-profit onder entry
 _SIGNAL_VALIDITY_TICKS = 2       # signal geldig voor heartbeat_interval × 2 seconden
 _MAX_OPEN_POSITIONS    = 10      # maximaal 10 open posities tegelijk (1 per symbool)
 _MAX_OPEN_SHORT_POSITIONS = 2    # shorts apart gelimiteerd naast long posities
+_MAX_APPROVED_PER_TICK = 5       # verwerk max 5 approved kandidaten per tick
 _STALE_SIGNAL_MINUTES  = 5       # signalen ouder dan dit worden genegeerd
 _STALE_APPROVED_MINUTES = 1440   # approved kandidaten blijven 24 uur geldig
 _ZOMBIE_POSITION_HOURS = 168     # posities zonder close ouder dan dit → zombie (7 dagen)
@@ -115,6 +116,16 @@ def _strategy_type_for_trade_open(
         return signal_type
 
     return "scout"
+
+
+def _approved_candidate_symbol(record: dict) -> str:
+    """Haal het eerste symbool uit een APPROVED candidate record."""
+    market_scope = record.get("market_scope") or {}
+    raw_symbol = market_scope.get("symbol") or ""
+    if not raw_symbol:
+        symbols_list = market_scope.get("symbols") or []
+        raw_symbol = symbols_list[0] if symbols_list else ""
+    return str(raw_symbol or "")
 
 
 class PaperAnt:
@@ -1263,6 +1274,7 @@ class PaperAnt:
             return 0
 
         count = 0
+        skipped_symbols: dict[str, int] = {}
         for jsonl_path in sorted(approved_dir.glob("*.jsonl")):
             try:
                 for line in jsonl_path.read_text(encoding="utf-8").splitlines():
@@ -1276,12 +1288,35 @@ class PaperAnt:
                     candidate_id = str(record.get("candidate_id") or "")
                     if not candidate_id or candidate_id in self._seen_approved_ids:
                         continue
+                    if count >= _MAX_APPROVED_PER_TICK:
+                        self._log.debug(
+                            "Approved verwerking gepauzeerd: max_per_tick=%d bereikt",
+                            _MAX_APPROVED_PER_TICK,
+                        )
+                        return count
                     count += 1
+                    symbol = _approved_candidate_symbol(record)
 
                     if self._is_stale_approved(record.get("promoted_at") or record.get("timestamp")):
                         self._log.debug(
                             "Stale approved-kandidaat %s overgeslagen (promoted_at=%s)",
                             candidate_id, record.get("promoted_at") or record.get("timestamp"),
+                        )
+                        continue
+
+                    if symbol and skipped_symbols.get(symbol, 0) >= 3:
+                        self._log.debug(
+                            "Approved kandidaat deze tick overgeslagen: %s heeft al %d open-position skips",
+                            symbol,
+                            skipped_symbols[symbol],
+                        )
+                        continue
+
+                    if symbol and self._has_open_position(symbol):
+                        skipped_symbols[symbol] = skipped_symbols.get(symbol, 0) + 1
+                        self._log.info(
+                            "Approved kandidaat overgeslagen: al open positie voor %s | %s",
+                            symbol, candidate_id,
                         )
                         continue
 
@@ -1298,13 +1333,7 @@ class PaperAnt:
 
         Retourneert True als _try_open_position aangeroepen is, False bij elke vroege return.
         """
-        market_scope = record.get("market_scope") or {}
-        # Ondersteunt zowel "symbol": "BTC-EUR" als "symbols": ["BTC-EUR", ...]
-        raw_symbol = market_scope.get("symbol") or ""
-        if not raw_symbol:
-            symbols_list = market_scope.get("symbols") or []
-            raw_symbol = symbols_list[0] if symbols_list else ""
-        symbol = str(raw_symbol)
+        symbol = _approved_candidate_symbol(record)
         if not symbol:
             self._log.info(
                 "Approved kandidaat overgeslagen: geen symbool | %s",

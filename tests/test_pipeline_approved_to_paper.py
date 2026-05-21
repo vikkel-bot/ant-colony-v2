@@ -28,7 +28,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from ant_colony.ants.paper_ant import PaperAnt
+from ant_colony.ants.paper_ant import PaperAnt, _MAX_APPROVED_PER_TICK
 from ant_colony.exit_chain.position import PaperPosition, PositionSide
 from ant_colony.lab.backtester import BacktestResults
 from ant_colony.schemas.ant import AntStatus
@@ -304,6 +304,21 @@ def test_multiple_candidates_each_considered(tmp_path: Path) -> None:
     ant._process_approved_candidates()
 
     assert len(ant._ledger.open_positions) == 3
+
+
+def test_approved_processing_stops_after_max_per_tick(tmp_path: Path) -> None:
+    """Approved-loop verwerkt per tick maximaal _MAX_APPROVED_PER_TICK kandidaten."""
+    ant = make_ant(tmp_path, price=_PRICE)
+    symbols = [f"SYM{i}-EUR" for i in range(_MAX_APPROVED_PER_TICK + 3)]
+    for symbol in symbols:
+        write_approved(tmp_path / "approved", make_approved_candidate(symbol=symbol))
+
+    ant._open_from_candidate = MagicMock(return_value=False)
+
+    count = ant._process_approved_candidates()
+
+    assert count == _MAX_APPROVED_PER_TICK
+    assert ant._open_from_candidate.call_count == _MAX_APPROVED_PER_TICK
 
 
 def test_trade_opened_event_in_log(tmp_path: Path) -> None:
