@@ -68,6 +68,23 @@ def _normalise_biome(record: dict[str, Any]) -> str:
     return "unknown"
 
 
+def normalize_exit_reason(reason: str) -> str:
+    if not reason:
+        return "UNKNOWN"
+    r = str(reason).lower()
+    if r.startswith("stop_loss") or "stop_loss" in r:
+        return "STOP_LOSS"
+    if r.startswith("take_profit") or "take_profit" in r:
+        return "TAKE_PROFIT"
+    if "momentum" in r:
+        return "MOMENTUM_LOST"
+    if "ttl" in r or "timeout" in r or "expired" in r or "age=" in r:
+        return "TTL_EXPIRED"
+    if "manual" in r:
+        return "MANUAL"
+    return str(reason).strip().upper()
+
+
 def _normalise_strategy(record: dict[str, Any]) -> str:
     return str(
         _first(
@@ -171,7 +188,7 @@ def _closed_trade_from_payload(
         "symbol": str(_first(combined, "symbol", "asset") or "unknown"),
         "strategy_type": _normalise_strategy(combined),
         "biome": _normalise_biome(combined),
-        "exit_reason": str(_first(combined, "exit_reason", "exit_type", "status") or "unknown"),
+        "exit_reason": normalize_exit_reason(str(_first(combined, "exit_reason", "exit_type", "status") or "")),
         "pnl": _normalise_pnl(combined),
         "closed_at": closed_at,
         "duration_hours": _duration_hours(combined, closed_at),
@@ -279,6 +296,16 @@ def build_report(trades: list[dict[str, Any]]) -> str:
             lines.append(f"{strategy}: {avg_duration:.1f} uur gemiddeld")
         else:
             lines.append(f"{strategy}: onbekend")
+
+    n = len(trades)
+    unknown_strategy = sum(1 for t in trades if str(t.get("strategy_type", "")).lower() == "unknown")
+    unknown_exit = sum(1 for t in trades if str(t.get("exit_reason", "")) == "UNKNOWN")
+    lines.extend([
+        "",
+        "--- DIAGNOSE ---",
+        f"Trades met unknown strategy_type: {unknown_strategy} / {n}",
+        f"Trades zonder exit_reason: {unknown_exit} / {n}",
+    ])
 
     return "\n".join(lines)
 
