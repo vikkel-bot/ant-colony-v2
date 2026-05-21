@@ -153,6 +153,55 @@ class CryptoAdapter:
             )
         return None
 
+    def get_candles(
+        self,
+        symbol: str,
+        timeframe: str,
+        limit: int = 1440,
+        end_ms: int | None = None,
+    ) -> list[MarketData]:
+        """
+        Haal meerdere historische candles op voor symbol/timeframe.
+
+        limit:  max aantal candles per request (Bitvavo max ≈ 1440).
+        end_ms: optioneel einde in epoch-ms — retourneert candles vóór dit tijdstip.
+        Retourneert lege lijst bij fout of onbekend timeframe.
+        Candles worden gesorteerd van oud naar nieuw.
+        """
+        interval = _TIMEFRAME_MAP.get(timeframe)
+        if not interval:
+            log.warning("CryptoAdapter.get_candles: onbekend timeframe %r", timeframe)
+            return []
+        try:
+            params: dict[str, Any] = {"limit": limit}
+            if end_ms is not None:
+                params["end"] = end_ms
+            raw = self._client.candles(symbol, interval, params)
+            if not raw or isinstance(raw, dict):
+                return []
+            result: list[MarketData] = []
+            for row in raw:
+                try:
+                    ts_ms, open_, high, low, close, volume = row
+                    result.append(MarketData(
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        timestamp=datetime.fromtimestamp(float(ts_ms) / 1000.0, tz=timezone.utc),
+                        open=float(open_),
+                        high=float(high),
+                        low=float(low),
+                        close=float(close),
+                        volume=float(volume),
+                        biome_id=self.biome_id,
+                    ))
+                except (ValueError, TypeError):
+                    continue
+            result.sort(key=lambda m: m.timestamp)
+            return result
+        except Exception:
+            log.exception("CryptoAdapter.get_candles: fout voor %s/%s", symbol, timeframe)
+            return []
+
     def get_positions(self) -> list[LivePosition] | None:
         """
         Bitvavo is een spot-exchange — geen margin posities.
