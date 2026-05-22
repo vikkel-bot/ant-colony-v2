@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ANT COLONY v2 · Trade Journal</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #F1EFE8; --card: #fff; --border: rgba(0,0,0,.08);
+      --text: #111827; --muted: #6b7280; --faint: #9ca3af;
+      --green: #166534; --green-bg: #ecfdf5; --red: #991b1b;
+      --top: #16213e; --queen: #7c3aed;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      background: var(--bg); color: var(--text); font-size: 13px; line-height: 1.5;
+      min-height: 100vh;
+    }
+    header {
+      background: var(--top); color: #f0ede6; min-height: 54px;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0 22px; box-shadow: 0 2px 12px rgba(0,0,0,.25);
+    }
+    .brand { font-weight: 800; letter-spacing: .2px; }
+    .sub { color: #9ca3af; font-size: 11px; margin-top: 1px; }
+    a { color: inherit; text-decoration: none; }
+    .back {
+      border: 1px solid rgba(255,255,255,.15); border-radius: 5px;
+      padding: 5px 10px; color: #d1d5db; font-weight: 700; font-size: 11px;
+    }
+    main { max-width: 1180px; margin: 0 auto; padding: 18px; }
+    .title-row { display: flex; align-items: end; justify-content: space-between; margin-bottom: 12px; }
+    h1 { font-size: 22px; letter-spacing: 0; }
+    .meta { color: var(--muted); font-size: 12px; }
+    .trade-list { display: grid; gap: 8px; }
+    .trade {
+      background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+      padding: 12px 14px; display: grid; grid-template-columns: 42px 1fr auto;
+      gap: 12px; align-items: start; box-shadow: 0 1px 3px rgba(0,0,0,.03);
+    }
+    .rank {
+      width: 32px; height: 32px; border-radius: 999px; display: grid; place-items: center;
+      background: var(--green-bg); color: var(--green); font-weight: 900;
+    }
+    .headline { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+    .symbol { font-weight: 900; font-size: 15px; }
+    .side { text-transform: uppercase; color: var(--muted); font-size: 11px; font-weight: 800; }
+    .strategy { color: var(--queen); font-weight: 800; font-size: 12px; }
+    .details {
+      color: var(--muted); font-size: 11px; margin-top: 3px;
+      display: flex; gap: 8px; flex-wrap: wrap;
+    }
+    .why { margin-top: 7px; color: #374151; font-size: 12px; }
+    .pnl { text-align: right; font-weight: 900; color: var(--green); min-width: 120px; }
+    .pnl .pct { display: block; color: var(--muted); font-size: 11px; font-weight: 700; }
+    .empty {
+      background: var(--card); border: 1px dashed var(--border); color: var(--muted);
+      padding: 22px; border-radius: 8px; text-align: center;
+    }
+    @media (max-width: 760px) {
+      .trade { grid-template-columns: 34px 1fr; }
+      .pnl { grid-column: 2; text-align: left; }
+      header { align-items: flex-start; flex-direction: column; gap: 8px; padding: 12px 16px; }
+      main { padding: 14px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <div class="brand">ANT COLONY v2 · Trade Journal</div>
+      <div class="sub">Top-10 gesloten paper trades, gesorteerd op PnL</div>
+    </div>
+    <a class="back" href="/">Terug naar dashboard</a>
+  </header>
+  <main>
+    <div class="title-row">
+      <h1>Beste gesloten trades</h1>
+      <div class="meta" id="journal-meta">Laden...</div>
+    </div>
+    <div id="journal-list" class="trade-list">
+      <div class="empty">Trade journal laden...</div>
+    </div>
+  </main>
+
+  <script>
+    'use strict';
+    const eur = v => v == null ? '—' : '€\u202f' + Number(v).toLocaleString('nl-NL', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const price = v => v == null ? '—' : '€\u202f' + Number(v).toLocaleString('nl-NL', { minimumFractionDigits: 2, maximumFractionDigits: 6 });
+    const pct = v => v == null ? '—' : `${Number(v) >= 0 ? '+' : ''}${Number(v).toFixed(2)}%`;
+    const hours = v => v == null ? 'duur onbekend' : `${Number(v).toFixed(1)} uur`;
+    const ts = iso => {
+      if (!iso) return '—';
+      const d = new Date(iso);
+      return d.toLocaleString('nl-NL', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+    };
+
+    function row(t) {
+      return `<article class="trade">
+        <div class="rank">${t.rank}</div>
+        <div>
+          <div class="headline">
+            <span class="symbol">${t.symbol}</span>
+            <span class="side">${t.direction}</span>
+            <span class="strategy">${t.strategy_type}</span>
+          </div>
+          <div class="details">
+            <span>${t.biome}</span>
+            <span>${hours(t.duration_hours)}</span>
+            <span>entry ${price(t.entry_price)}</span>
+            <span>exit ${price(t.exit_price)}</span>
+            <span>regime ${t.regime}</span>
+            <span>${t.exit_reason}</span>
+            <span>${ts(t.closed_at)}</span>
+          </div>
+          <div class="why">${t.why}</div>
+        </div>
+        <div class="pnl">${eur(t.pnl_eur)}<span class="pct">${pct(t.pnl_pct)}</span></div>
+      </article>`;
+    }
+
+    async function loadJournal() {
+      const list = document.getElementById('journal-list');
+      const meta = document.getElementById('journal-meta');
+      try {
+        const response = await fetch('/api/journal/top-trades?limit=10');
+        const data = await response.json();
+        const trades = data.trades || [];
+        meta.textContent = `${trades.length} trade${trades.length === 1 ? '' : 's'} · ${ts(data.fetched_at)}`;
+        list.innerHTML = trades.length
+          ? trades.map(row).join('')
+          : '<div class="empty">Nog geen gesloten paper trades gevonden.</div>';
+      } catch (err) {
+        meta.textContent = 'fout';
+        list.innerHTML = `<div class="empty">Trade journal kon niet laden: ${err.message}</div>`;
+      }
+    }
+
+    document.addEventListener('DOMContentLoaded', loadJournal);
+  </script>
+</body>
+</html>

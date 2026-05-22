@@ -174,20 +174,6 @@
       gap: 5px;
     }
 
-    .btn-ks-tb {
-      background: rgba(226,75,74,.15);
-      color: #f87171;
-      border: 1px solid rgba(226,75,74,.3);
-      padding: 4px 9px;
-      border-radius: 5px;
-      font-size: 10px; font-weight: 800;
-      letter-spacing: .3px;
-      cursor: pointer; transition: all .15s;
-      white-space: nowrap;
-    }
-    .btn-ks-tb:hover { background: var(--danger); color: #fff; border-color: var(--danger); }
-    .btn-ks-tb:active { transform: scale(.97); }
-
     .btn-claude-ant {
       background: rgba(124,58,237,.12);
       color: #7c3aed;
@@ -203,6 +189,20 @@
     .btn-claude-ant:active { transform: scale(.97); }
     .btn-claude-ant.active { background: #7c3aed; color: #fff; border-color: #7c3aed; }
     .btn-claude-ant:disabled { opacity: .45; cursor: not-allowed; }
+
+    .btn-journal {
+      background: rgba(255,255,255,.08);
+      color: #d1d5db;
+      border: 1px solid rgba(255,255,255,.12);
+      padding: 4px 9px;
+      border-radius: 5px;
+      font-size: 10px; font-weight: 800;
+      letter-spacing: .3px;
+      cursor: pointer; transition: all .15s;
+      white-space: nowrap;
+      text-decoration: none;
+    }
+    .btn-journal:hover { background: rgba(255,255,255,.16); color: #fff; }
 
     .btn-noodstop {
       background: var(--danger);
@@ -983,6 +983,45 @@
     }
     .sltp-lbl-trail { color: #a855f7; font-size: 8px; }
 
+    .override-panel {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+      gap: 7px;
+      margin-top: 7px;
+    }
+    .override-item {
+      border: 1px solid var(--border-soft);
+      border-radius: 7px;
+      padding: 8px;
+      background: #fff;
+    }
+    .override-name {
+      font-size: 11px;
+      font-weight: 800;
+      color: var(--text);
+      margin-bottom: 5px;
+    }
+    .override-actions { display: flex; gap: 5px; flex-wrap: wrap; }
+    .override-btn {
+      border: 1px solid var(--border);
+      background: var(--bg);
+      border-radius: 5px;
+      padding: 3px 7px;
+      font-size: 9px;
+      font-weight: 800;
+      cursor: pointer;
+      color: var(--muted);
+    }
+    .override-btn.prefer.active { background: var(--pnl-pos-bg); color: var(--pnl-pos); border-color: rgba(22,101,52,.25); }
+    .override-btn.avoid.active { background: var(--pnl-neg-bg); color: var(--pnl-neg); border-color: rgba(153,27,27,.25); }
+    .override-btn.neutral.active { background: #f3f4f6; color: var(--text); }
+    .override-days {
+      margin-top: 5px;
+      font-size: 9px;
+      color: var(--muted);
+      font-weight: 700;
+    }
+
   </style>
 </head>
 <body>
@@ -1021,9 +1060,7 @@
   </div>
 
   <div class="tb-kills">
-    <button class="btn-ks-tb" onclick="doKill(1)" title="Stop één agent (geeft prompt voor agent ID)">L1 Agent</button>
-    <button class="btn-ks-tb" onclick="doKill(2)" title="Stop node (geeft prompt voor node ID)">L2 Node</button>
-    <button class="btn-ks-tb" onclick="doKill(3)" title="Stop de volledige colony">L3 Colony</button>
+    <a class="btn-journal" href="/journal" title="Open Trade Journal top-10">JOURNAL</a>
     <button id="btn-claude-ant" class="btn-claude-ant" onclick="activateClaudeAnt()" title="Activeer Claude Ant voor AI-analyse van top kandidaten">🧠 CLAUDE ANT</button>
     <button class="btn-noodstop" onclick="noodstop()">⛔ NOODSTOP</button>
   </div>
@@ -1114,6 +1151,14 @@
       <div class="card">
         <div class="card-title">Queen · Regime &amp; Strategie</div>
         <div id="queen-content">
+          <div class="empty">Laden...</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Operator override</div>
+        <div style="font-size:10px;color:var(--muted);margin-top:-2px">Tijdelijke voorkeuren voor Queen-kandidaatselectie, max 20% weging, vervalt na 5 dagen.</div>
+        <div id="operator-override-content">
           <div class="empty">Laden...</div>
         </div>
       </div>
@@ -1214,6 +1259,7 @@ const S = {
   equities:    null,
   equitiesPositions: { open_positions:[], closed_positions:[], summary:{}, fetched_at:'' },
   watchtowerReceived: { signals:[], summary:{}, fetched_at:'' },
+  operatorOverrides: { strategies:[], ttl_days:5, fetched_at:'' },
   news:        null,
   briefing:    null,
   antEvents:   {},
@@ -1287,7 +1333,7 @@ async function fetchAll() {
   const get = url => _fetchQ(() => fetch(url)
     .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
     .catch(e => { console.error(`[dashboard] GET ${url} failed:`, e.message); return null; }));
-  const [st, me, br, cap, pos, ti, act, qs, pc, pd, eq, eqp, wtr, oq, nw, brf, wt] = await Promise.all([
+  const [st, me, br, cap, pos, ti, act, qs, pc, pd, eq, eqp, wtr, ov, oq, nw, brf, wt] = await Promise.all([
     get('/api/status'), get('/api/metrics'),
     get('/api/brokers'), get('/api/capital'),
     get('/api/positions'),
@@ -1297,6 +1343,7 @@ async function fetchAll() {
     get('/api/equities/status'),
     get('/api/equities/positions'),
     get('/api/watchtower/signals/received'),
+    get('/api/operator/overrides'),
     get('/api/operator/queue'),
     get('/api/news/latest'),
     get('/api/equities/briefing'),
@@ -1329,6 +1376,7 @@ async function fetchAll() {
   if (eq)  S.equities    = eq;
   if (eqp) S.equitiesPositions = eqp;
   if (wtr) S.watchtowerReceived = wtr;
+  if (ov)  S.operatorOverrides = ov;
   if (nw)  S.news        = nw;
   if (brf) S.briefing    = brf;
   if (wt)  S.watchtower  = wt;
@@ -1348,6 +1396,7 @@ function render() {
   renderOpenPositions();
   renderBrokers();
   renderQueen();
+  renderOperatorOverrides();
   renderEquities();
   renderWarningsBanner();
 }
@@ -1771,6 +1820,56 @@ function renderQueen() {
   el.innerHTML = regimeHtml + stratHtml + wtHtml + decisionHtml;
 }
 
+function _overrideDays(entry) {
+  if (!entry || !entry.active || !entry.days_remaining) return '';
+  const days = Math.max(1, Math.ceil(Number(entry.days_remaining)));
+  return `<div class="override-days">nog ${days} dag${days === 1 ? '' : 'en'}</div>`;
+}
+
+function renderOperatorOverrides() {
+  const el = document.getElementById('operator-override-content');
+  if (!el) return;
+  const rows = (S.operatorOverrides && S.operatorOverrides.strategies) || [];
+  if (!rows.length) {
+    el.innerHTML = '<div class="empty">Geen actieve strategy types gevonden</div>';
+    return;
+  }
+  el.innerHTML = `<div class="override-panel">${rows.map(entry => {
+    const mode = entry.mode || 'neutral';
+    const st = entry.strategy_type;
+    return `<div class="override-item">
+      <div class="override-name">${st}</div>
+      <div class="override-actions">
+        <button class="override-btn prefer ${mode === 'prefer' ? 'active' : ''}" onclick="setOperatorOverride('${st}','prefer')">Voorkeur</button>
+        <button class="override-btn avoid ${mode === 'avoid' ? 'active' : ''}" onclick="setOperatorOverride('${st}','avoid')">Vermijd</button>
+        <button class="override-btn neutral ${mode === 'neutral' ? 'active' : ''}" onclick="setOperatorOverride('${st}','neutral')">Neutraal</button>
+      </div>
+      ${_overrideDays(entry)}
+    </div>`;
+  }).join('')}</div>`;
+}
+
+async function setOperatorOverride(strategyType, mode) {
+  try {
+    const r = await fetch('/api/operator/overrides', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ strategy_type: strategyType, mode }),
+    });
+    const d = await r.json();
+    if (!r.ok || !d.accepted) {
+      alert('Override niet opgeslagen: ' + (d.detail || JSON.stringify(d)));
+      return;
+    }
+    const latest = await fetch('/api/operator/overrides').then(res => res.json());
+    S.operatorOverrides = latest;
+    renderOperatorOverrides();
+    fetch('/api/queen/status').then(res => res.json()).then(q => { S.queenStatus = q; renderQueen(); }).catch(() => {});
+  } catch (e) {
+    alert('Override fout: ' + e.message);
+  }
+}
+
 // ── Brokers ───────────────────────────────────
 
 // Bouw een lookup van biome_id → capital entry (uit /api/capital)
@@ -2190,23 +2289,6 @@ async function sendKill(level, scope) {
   } catch (e) {
     alert('Verbindingsfout: ' + e.message);
   }
-}
-
-function doKill(level) {
-  let scope = null;
-  if (level === 1) {
-    scope = prompt('Agent ID om te stoppen:');
-    if (!scope) return;
-  } else if (level === 2) {
-    scope = prompt('Node ID om te stoppen:');
-    if (!scope) return;
-  }
-  const labels = {1:'AGENT', 2:'NODE', 3:'COLONY'};
-  const extra  = level === 3
-    ? '\n\n⚠️ Dit stopt de VOLLEDIGE colony en vereist handmatige herstart.'
-    : '';
-  if (!confirm(`Kill-switch Level ${level} (${labels[level]}) activeren${scope ? ' op "' + scope + '"' : ''}?${extra}`)) return;
-  sendKill(level, scope);
 }
 
 function noodstop() {

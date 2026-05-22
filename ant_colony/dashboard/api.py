@@ -47,6 +47,7 @@ from ant_colony.colony.scheduler.colony_scheduler import ColonyScheduler
 from ant_colony.queen.queen import Queen
 from ant_colony.queen.regime_schema import build_regime_snapshot
 from ant_colony.schemas.mission import Mission
+from ant_colony.strategies import ACTIVE_STRATEGY_TYPES, DISABLED_STRATEGY_TYPES
 
 # Referentie-markt per biome voor live prijsweergave in het dashboard
 _BIOME_REFERENCE_MARKET: dict[str, str] = {
@@ -676,6 +677,34 @@ class OperatorQueueResponse(BaseModel):
     items: list[OperatorQueueItem]
 
 
+class OperatorOverrideEntry(BaseModel):
+    strategy_type: str
+    mode: str
+    set_at: str | None = None
+    expires_at: str | None = None
+    days_remaining: float = 0.0
+    active: bool = False
+
+
+class OperatorOverridesResponse(BaseModel):
+    strategies: list[OperatorOverrideEntry]
+    ttl_days: int = 5
+    fetched_at: str
+
+
+class OperatorOverrideRequest(BaseModel):
+    strategy_type: str
+    mode: str
+
+
+class OperatorOverrideResponse(BaseModel):
+    accepted: bool
+    strategy_type: str
+    mode: str
+    message: str
+    entry: OperatorOverrideEntry | None = None
+
+
 class KillSwitchRequest(BaseModel):
     level: int              # 1 = agent, 2 = node, 3 = colony
     scope: str | None = None
@@ -732,6 +761,29 @@ class PaperDiagnosticsResponse(BaseModel):
     by_strategy: list[PaperDiagnosticsBucket] = Field(default_factory=list)
     by_biome: list[PaperDiagnosticsBucket] = Field(default_factory=list)
     by_source: list[PaperDiagnosticsBucket] = Field(default_factory=list)
+
+
+class JournalTradeEntry(BaseModel):
+    rank: int
+    symbol: str
+    direction: str
+    strategy_type: str
+    biome: str
+    duration_hours: float | None = None
+    entry_price: float | None = None
+    exit_price: float | None = None
+    regime: str
+    exit_reason: str
+    pnl_eur: float
+    pnl_pct: float | None = None
+    closed_at: str
+    why: str
+
+
+class JournalTopTradesResponse(BaseModel):
+    trades: list[JournalTradeEntry]
+    count: int
+    fetched_at: str
 
 
 class QueenStrategyEntry(BaseModel):
@@ -1078,6 +1130,107 @@ def _read_operator_queue(logs_root: Path, limit: int = 10) -> list[OperatorQueue
             message=result_msg,
         ))
     return items
+
+
+_OPERATOR_OVERRIDE_TTL_DAYS = 5
+_OPERATOR_OVERRIDE_TTL = timedelta(days=_OPERATOR_OVERRIDE_TTL_DAYS)
+_OPERATOR_OVERRIDE_MODES = {"prefer", "avoid", "neutral"}
+
+
+def _allowed_operator_strategy_types() -> list[str]:
+    return sorted(str(s).lower() for s in (ACTIVE_STRATEGY_TYPES - DISABLED_STRATEGY_TYPES))
+
+
+def _operator_override_path(logs_root: Path) -> Path:
+    return logs_root / "queen" / "operator_override.json"
+
+
+def _read_operator_override_raw(logs_root: Path | None) -> dict[str, dict[str, Any]]:
+    if logs_root is None:
+        return {}
+    path = _operator_override_path(logs_root)
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        logger.warning("operator_override.json kon niet gelezen worden", exc_info=True)
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    result: dict[str, dict[str, Any]] = {}
+    for strategy_type, entry in data.items():
+        if isinstance(entry, dict):
+            result[str(strategy_type).lower()] = dict(entry)
+    return result
+
+
+def _operator_override_entry(
+    strategy_type: str,
+    raw: dict[str, Any] | None,
+    *,
+    now: datetime | None = None,
+) -> OperatorOverrideEntry:
+    now = now or datetime.now(tz=timezone.utc)
+    mode = str((raw or {}).get("mode") or "neutral").lower()
+    if mode not in {"prefer", "avoid"}:
+        return OperatorOverrideEntry(strategy_type=strategy_type, mode="neutral")
+
+    set_at = _parse_ts((raw or {}).get("set_at"))
+    if set_at is None:
+        return OperatorOverrideEntry(strategy_type=strategy_type, mode="neutral")
+
+    expires_at = set_at + _OPERATOR_OVERRIDE_TTL
+    remaining = (expires_at - now).total_seconds()
+    if remaining <= 0:
+        return OperatorOverrideEntry(
+            strategy_type=strategy_type,
+            mode="neutral",
+            set_at=set_at.isoformat(),
+            expires_at=expires_at.isoformat(),
+            days_remaining=0.0,
+            active=False,
+        )
+
+    return OperatorOverrideEntry(
+        strategy_type=strategy_type,
+        mode=mode,
+        set_at=set_at.isoformat(),
+        expires_at=expires_at.isoformat(),
+        days_remaining=round(remaining / 86400.0, 2),
+        active=True,
+    )
+
+
+def _operator_override_entries(logs_root: Path | None) -> list[OperatorOverrideEntry]:
+    raw = _read_operator_override_raw(logs_root)
+    now = datetime.now(tz=timezone.utc)
+    return [
+        _operator_override_entry(strategy_type, raw.get(strategy_type), now=now)
+        for strategy_type in _allowed_operator_strategy_types()
+    ]
+
+
+def _write_operator_override(
+    logs_root: Path,
+    strategy_type: str,
+    mode: str,
+) -> OperatorOverrideEntry:
+    path = _operator_override_path(logs_root)
+    data = _read_operator_override_raw(logs_root)
+    if mode == "neutral":
+        data.pop(strategy_type, None)
+    else:
+        data[strategy_type] = {
+            "mode": mode,
+            "set_at": datetime.now(tz=timezone.utc).isoformat(),
+        }
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
+    return _operator_override_entry(strategy_type, data.get(strategy_type))
 
 
 # ---------------------------------------------------------------------------
@@ -1861,6 +2014,41 @@ def create_router(ctx: ColonyContext) -> APIRouter:
             return OperatorQueueResponse(items=[])
         return OperatorQueueResponse(items=_read_operator_queue(ctx.logs_root))
 
+    @router.get("/operator/overrides", response_model=OperatorOverridesResponse)
+    def get_operator_overrides() -> OperatorOverridesResponse:
+        """Operator voorkeuren per actieve strategy_type."""
+        if ctx.logs_root is None:
+            return OperatorOverridesResponse(
+                strategies=_operator_override_entries(None),
+                fetched_at=datetime.now(tz=timezone.utc).isoformat(),
+            )
+        return OperatorOverridesResponse(
+            strategies=_operator_override_entries(ctx.logs_root),
+            fetched_at=datetime.now(tz=timezone.utc).isoformat(),
+        )
+
+    @router.post("/operator/overrides", response_model=OperatorOverrideResponse)
+    def post_operator_override(req: OperatorOverrideRequest) -> OperatorOverrideResponse:
+        """Schrijf een tijdelijke operator-voorkeur voor QueenAdvisor."""
+        strategy_type = req.strategy_type.strip().lower()
+        mode = req.mode.strip().lower()
+        allowed = _allowed_operator_strategy_types()
+        if strategy_type not in allowed:
+            raise HTTPException(status_code=400, detail=f"Onbekende of uitgeschakelde strategy_type: {strategy_type}")
+        if mode not in _OPERATOR_OVERRIDE_MODES:
+            raise HTTPException(status_code=400, detail="mode moet prefer, avoid of neutral zijn")
+        if ctx.logs_root is None:
+            raise HTTPException(status_code=503, detail="logs_root niet geconfigureerd")
+
+        entry = _write_operator_override(ctx.logs_root, strategy_type, mode)
+        return OperatorOverrideResponse(
+            accepted=True,
+            strategy_type=strategy_type,
+            mode=mode,
+            message=f"{strategy_type} staat nu op {mode}",
+            entry=entry,
+        )
+
     # ------------------------------------------------------------------
     # GET /api/ants/activity
     # ------------------------------------------------------------------
@@ -2048,6 +2236,23 @@ def create_router(ctx: ColonyContext) -> APIRouter:
         if ctx.logs_root is None:
             return PaperDiagnosticsResponse()
         return PaperDiagnosticsResponse(**_read_paper_diagnostics(ctx.logs_root))
+
+    @router.get("/journal/top-trades", response_model=JournalTopTradesResponse)
+    def get_journal_top_trades(limit: int = 10) -> JournalTopTradesResponse:
+        """Top gesloten paper trades voor de Trade Journal view."""
+        limit_ = max(1, min(int(limit or 10), 10))
+        if ctx.logs_root is None:
+            return JournalTopTradesResponse(
+                trades=[],
+                count=0,
+                fetched_at=datetime.now(tz=timezone.utc).isoformat(),
+            )
+        trades = _read_journal_top_trades(ctx.logs_root, limit=limit_)
+        return JournalTopTradesResponse(
+            trades=[JournalTradeEntry(**trade) for trade in trades],
+            count=len(trades),
+            fetched_at=datetime.now(tz=timezone.utc).isoformat(),
+        )
 
     # ------------------------------------------------------------------
     # GET /api/queen/status
@@ -2810,6 +3015,192 @@ def _paper_diagnostics_from_trades(trades: list[dict]) -> dict[str, Any]:
     return overall
 
 
+def _journal_first(record: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        value = record.get(key)
+        if value is not None and value != "":
+            return value
+    return None
+
+
+def _journal_payload(record: dict[str, Any]) -> dict[str, Any]:
+    payload = record.get("payload")
+    if isinstance(payload, dict):
+        row = dict(payload)
+    else:
+        row = dict(record)
+    if "timestamp" not in row and record.get("timestamp"):
+        row["timestamp"] = record["timestamp"]
+    return row
+
+
+def _journal_normalize_exit_reason(reason: Any) -> str:
+    if not reason:
+        return "UNKNOWN"
+    text = str(reason).strip()
+    lower = text.lower()
+    if "stop" in lower:
+        return "STOP_LOSS"
+    if "take" in lower or "target" in lower:
+        return "TAKE_PROFIT"
+    if "trail" in lower:
+        return "TRAILING"
+    if "momentum" in lower:
+        return "MOMENTUM_LOST"
+    if "ttl" in lower or "timeout" in lower or "expired" in lower:
+        return "TTL"
+    if "manual" in lower:
+        return "MANUAL"
+    return text.upper()
+
+
+def _journal_normalize_biome(record: dict[str, Any]) -> str:
+    biome = str(_journal_first(record, "biome", "asset_class", "source_field") or "").strip().lower()
+    if biome:
+        return biome
+    symbol = str(_journal_first(record, "symbol", "asset") or "").upper()
+    if symbol.endswith("-EUR") or symbol.endswith("-USD") or symbol.endswith("-USDT"):
+        return "crypto"
+    if symbol in {"BRENT", "NATGAS", "COPPER", "SILVER", "GOLD"}:
+        return "commodities"
+    return "unknown"
+
+
+def _journal_pnl_eur(record: dict[str, Any]) -> float:
+    for key in (
+        "pnl_net",
+        "pnl_gross",
+        "realized_pnl",
+        "realized_pnl_eur",
+        "pnl_eur",
+        "net_pnl",
+        "profit",
+        "pnl",
+    ):
+        value = _float_or_none(record.get(key))
+        if value is not None:
+            return value
+    return 0.0
+
+
+def _journal_duration_hours(record: dict[str, Any], closed_at: datetime) -> float | None:
+    direct = _float_or_none(_journal_first(record, "duration_hours", "holding_hours"))
+    if direct is not None:
+        return round(direct, 2)
+    opened_at = _parse_ts(_journal_first(record, "opened_at", "entry_time", "entry_timestamp", "open_time"))
+    if opened_at is None:
+        return None
+    return round(max(0.0, (closed_at - opened_at).total_seconds()) / 3600.0, 2)
+
+
+def _journal_pnl_pct(record: dict[str, Any], side: str) -> float | None:
+    direct = _float_or_none(_journal_first(record, "pnl_pct", "return_pct"))
+    if direct is not None:
+        return round(direct, 4)
+    entry = _float_or_none(_journal_first(record, "entry_price", "open_price"))
+    exit_price = _float_or_none(_journal_first(record, "exit_price", "close_price", "current_price"))
+    if entry is None or exit_price is None or entry <= 0:
+        return None
+    if side == "short":
+        return round((entry - exit_price) / entry * 100.0, 4)
+    return round((exit_price - entry) / entry * 100.0, 4)
+
+
+def _journal_why(row: dict[str, Any], pnl_eur: float, exit_reason: str) -> str:
+    strategy = str(_journal_first(row, "strategy_type", "strategy", "signal_type") or "unknown")
+    regime = str(_journal_first(row, "regime", "entry_regime", "queen_regime", "best_regime") or "unknown")
+    symbol = str(_journal_first(row, "symbol", "asset") or "unknown")
+    if pnl_eur > 0:
+        return f"{symbol} bevestigde de {strategy}-hypothese in regime {regime}; exit via {exit_reason} leverde winst op."
+    if pnl_eur < 0:
+        return f"{symbol} sprak de {strategy}-hypothese tegen in regime {regime}; exit via {exit_reason} beperkte het verlies."
+    return f"{symbol} sloot neutraal; {strategy} gaf in regime {regime} geen duidelijke edge."
+
+
+def _journal_trade_from_payload(
+    payload: dict[str, Any],
+    opened_by_id: dict[str, dict[str, Any]],
+) -> dict[str, Any] | None:
+    position_id = str(_journal_first(payload, "position_id", "id") or "").strip()
+    base = opened_by_id.get(position_id, {}) if position_id else {}
+    row = dict(base)
+    row.update(payload)
+
+    closed_at = _parse_ts(_journal_first(row, "closed_at", "exit_time", "closed_time", "timestamp"))
+    if closed_at is None:
+        return None
+
+    side = str(_journal_first(row, "side", "direction") or "long").lower()
+    pnl_eur = round(_journal_pnl_eur(row), 4)
+    exit_reason = _journal_normalize_exit_reason(_journal_first(row, "exit_reason", "exit_type", "status"))
+    entry_price = _float_or_none(_journal_first(row, "entry_price", "open_price"))
+    exit_price = _float_or_none(_journal_first(row, "exit_price", "close_price", "current_price"))
+    return {
+        "symbol": str(_journal_first(row, "symbol", "asset") or "unknown"),
+        "direction": side if side in {"long", "short"} else "long",
+        "strategy_type": str(_journal_first(row, "strategy_type", "strategy", "signal_type") or "unknown"),
+        "biome": _journal_normalize_biome(row),
+        "duration_hours": _journal_duration_hours(row, closed_at),
+        "entry_price": _round_or_none(entry_price),
+        "exit_price": _round_or_none(exit_price),
+        "regime": str(_journal_first(row, "regime", "entry_regime", "queen_regime", "best_regime") or "unknown"),
+        "exit_reason": exit_reason,
+        "pnl_eur": pnl_eur,
+        "pnl_pct": _journal_pnl_pct(row, side),
+        "closed_at": closed_at.isoformat(),
+        "why": _journal_why(row, pnl_eur, exit_reason),
+    }
+
+
+def _read_journal_top_trades(logs_root: Path, limit: int = 10) -> list[dict[str, Any]]:
+    paper_dir = logs_root / "paper"
+    if not paper_dir.exists():
+        return []
+
+    opened_by_id: dict[str, dict[str, Any]] = {}
+    closed_payloads: list[dict[str, Any]] = []
+
+    for path in sorted(paper_dir.glob("*.jsonl")):
+        for record in _read_jsonl_tail_cached(path, limit=1000):
+            payload = _journal_payload(record)
+            action = str(payload.get("action") or "").lower()
+            position_id = _journal_first(payload, "position_id", "id")
+            if action in {"trade_opened", "position_opened"}:
+                if "opened_at" not in payload and record.get("timestamp"):
+                    payload["opened_at"] = record["timestamp"]
+                if position_id:
+                    opened_by_id[str(position_id)] = payload
+                continue
+            if action in {"trade_closed", "position_closed"}:
+                if "exit_time" not in payload and record.get("timestamp"):
+                    payload["exit_time"] = record["timestamp"]
+                closed_payloads.append(payload)
+                continue
+            if payload.get("closed_at") and (
+                payload.get("realized_pnl") is not None
+                or payload.get("realized_pnl_eur") is not None
+                or payload.get("pnl_eur") is not None
+            ):
+                closed_payloads.append(payload)
+
+    deduped: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for payload in closed_payloads:
+        trade = _journal_trade_from_payload(payload, opened_by_id)
+        if trade is None:
+            continue
+        key = (
+            str(_journal_first(payload, "position_id", "id") or ""),
+            trade["symbol"],
+            trade["closed_at"],
+        )
+        deduped[key] = trade
+
+    best = sorted(deduped.values(), key=lambda t: float(t.get("pnl_eur") or 0.0), reverse=True)[:limit]
+    for idx, trade in enumerate(best, start=1):
+        trade["rank"] = idx
+    return best
+
+
 def _path_fingerprint(path: Path) -> tuple[int, int]:
     try:
         stat = path.stat()
@@ -3373,8 +3764,12 @@ def _read_queen_status_data(logs_root: Path) -> dict:
         regime = Counter(regimes).most_common(1)[0][0]
 
     # Top 3 by sharpe — diversiteit: max 1 per symbool, max 1 per strategy_type
-    from ant_colony.queen.queen_advisor import select_diverse_top_n
-    top_3 = select_diverse_top_n(candidates, n=3)
+    from ant_colony.queen.queen_advisor import read_operator_overrides, select_diverse_top_n
+    top_3 = select_diverse_top_n(
+        candidates,
+        n=3,
+        operator_overrides=read_operator_overrides(logs_root),
+    )
     top_strategies = [
         {
             "strategy_type": c.get("strategy_type") or c.get("strategy") or "unknown",

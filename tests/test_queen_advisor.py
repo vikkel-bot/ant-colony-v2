@@ -35,7 +35,7 @@ import pytest
 
 from ant_colony.queen.queen_advisor import (
     QueenDecision, QueenAdvisor, _WIN_HIGH, _WIN_LOW,
-    select_diverse_top_n,
+    read_operator_overrides, select_diverse_top_n,
 )
 from ant_colony.schemas.mission import (
     AbortConditions, MarketScope, Mission, RiskLimits, SuccessConditions,
@@ -732,6 +732,44 @@ def test_diverse_top_n_btc_dominantie_doorbroken() -> None:
     assert symbols.count("BTC-EUR") == 1
     assert "ETH-EUR" in symbols
     assert "SOL-EUR" in symbols
+
+
+def test_diverse_top_n_applies_operator_override_weight() -> None:
+    cands = [
+        _make_candidate("BTC-EUR", "sma_crossover", 1.00),
+        _make_candidate("ETH-EUR", "mean_reversion", 0.86),
+    ]
+
+    result = select_diverse_top_n(
+        cands,
+        n=2,
+        operator_overrides={"sma_crossover": "avoid", "mean_reversion": "prefer"},
+    )
+
+    assert result[0]["strategy_type"] == "mean_reversion"
+
+
+def test_read_operator_overrides_ignores_expired_entries(tmp_path: Path) -> None:
+    path = tmp_path / "queen" / "operator_override.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({
+            "mean_reversion": {
+                "mode": "prefer",
+                "set_at": (datetime.now(tz=timezone.utc) - timedelta(days=6)).isoformat(),
+            },
+            "volatility_squeeze": {
+                "mode": "avoid",
+                "set_at": datetime.now(tz=timezone.utc).isoformat(),
+            },
+        }),
+        encoding="utf-8",
+    )
+
+    overrides = read_operator_overrides(tmp_path)
+
+    assert "mean_reversion" not in overrides
+    assert overrides["volatility_squeeze"] == "avoid"
 
 
 def test_diverse_top_n_logs_selected_mix(caplog) -> None:

@@ -178,13 +178,66 @@ _CLAUDE_MIN_CONF  = 6      # minimale confidence voor Claude advies
 # dit venster worden genegeerd bij win_rate berekening.
 _STATS_WINDOW_DAYS = 7
 _STAGNANT_TOP3_AGE = timedelta(days=14)
+_OPERATOR_OVERRIDE_TTL = timedelta(days=5)
+_OPERATOR_OVERRIDE_WEIGHT = 0.20
 
 
 # ---------------------------------------------------------------------------
 # Diversiteitselectie — top-N met unieke symbolen én strategy_types
 # ---------------------------------------------------------------------------
 
-def select_diverse_top_n(candidates: list[dict], n: int = 3) -> list[dict]:
+def read_operator_overrides(logs_root: Path | None) -> dict[str, str]:
+    """
+    Lees actieve operator-voorkeuren voor strategy_types.
+
+    Retourneert strategy_type -> "prefer" | "avoid". Verlopen of ongeldige
+    entries worden genegeerd zodat de default neutraal blijft.
+    """
+    if logs_root is None:
+        return {}
+    path = logs_root / "queen" / "operator_override.json"
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        _log.warning("operator_override.json kon niet gelezen worden", exc_info=True)
+        return {}
+    if not isinstance(data, dict):
+        return {}
+
+    now = datetime.now(tz=timezone.utc)
+    active: dict[str, str] = {}
+    for strategy_type, entry in data.items():
+        if not isinstance(entry, dict):
+            continue
+        mode = str(entry.get("mode") or "").lower().strip()
+        if mode not in {"prefer", "avoid"}:
+            continue
+        ts = _parse_context_ts(entry.get("set_at"))
+        if ts is None or now - ts > _OPERATOR_OVERRIDE_TTL:
+            continue
+        active[str(strategy_type).lower().strip()] = mode
+    return active
+
+
+def _operator_adjusted_sharpe(candidate: dict, operator_overrides: dict[str, str] | None = None) -> float:
+    base = float(candidate.get("sharpe_ratio") or candidate.get("sharpe") or 0)
+    if not operator_overrides:
+        return base
+    mode = operator_overrides.get(_candidate_strategy_type_key(candidate))
+    if mode == "prefer":
+        return base * (1.0 + _OPERATOR_OVERRIDE_WEIGHT)
+    if mode == "avoid":
+        return base * (1.0 - _OPERATOR_OVERRIDE_WEIGHT)
+    return base
+
+
+def select_diverse_top_n(
+    candidates: list[dict],
+    n: int = 3,
+    operator_overrides: dict[str, str] | None = None,
+) -> list[dict]:
     """
     Selecteer top-N kandidaten op sharpe met diversiteitsconstraint.
 
@@ -202,7 +255,7 @@ def select_diverse_top_n(candidates: list[dict], n: int = 3) -> list[dict]:
     """
     sorted_cands = sorted(
         candidates,
-        key=lambda c: float(c.get("sharpe_ratio") or c.get("sharpe") or 0),
+        key=lambda c: _operator_adjusted_sharpe(c, operator_overrides),
         reverse=True,
     )
 
@@ -228,9 +281,10 @@ def select_diverse_top_n(candidates: list[dict], n: int = 3) -> list[dict]:
         result.append(c)
 
     _log.info(
-        "queen_selection_diversity | layer=queen_selection top3=%s typen=%s",
+        "queen_selection_diversity | layer=queen_selection top3=%s typen=%s overrides=%s",
         [c.get("symbol") or c.get("asset") or "unknown" for c in result],
         [c.get("strategy_type") or c.get("strategy") or "unknown" for c in result],
+        operator_overrides or {},
     )
     return result
 
@@ -1113,7 +1167,11 @@ class QueenAdvisor:
         candidates: list[dict],
         paper_stats: dict[str, dict],
     ) -> list[dict]:
-        top3 = select_diverse_top_n(candidates, n=3)
+        top3 = select_diverse_top_n(
+            candidates,
+            n=3,
+            operator_overrides=read_operator_overrides(self._logs_root),
+        )
         if not top3:
             return []
 

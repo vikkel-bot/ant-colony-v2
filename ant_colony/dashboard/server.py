@@ -94,6 +94,17 @@ def create_app(ctx: ColonyContext | None = None) -> FastAPI:
             )
         return FileResponse(str(index))
 
+    @app.get("/journal", include_in_schema=False)
+    def serve_journal() -> FileResponse:
+        journal = _STATIC_DIR / "journal.html"
+        if not journal.exists():
+            from fastapi.responses import HTMLResponse
+            return HTMLResponse(
+                "<h1>ANT COLONY v2</h1><p>journal.html not found in static/</p>",
+                status_code=503,
+            )
+        return FileResponse(str(journal))
+
     # --- Health check (voor process monitors) ---
     @app.get("/health", include_in_schema=False)
     def health() -> dict:

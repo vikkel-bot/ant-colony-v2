@@ -110,6 +110,12 @@ def _write_jsonl(path: Path, records: list[dict]) -> None:
             fh.write(json.dumps(r, default=str) + "\n")
 
 
+def _static_index_text() -> str:
+    return (Path(__file__).parent.parent / "ant_colony" / "dashboard" / "static" / "index.html").read_text(
+        encoding="utf-8"
+    )
+
+
 def _now_iso() -> str:
     return datetime.now(tz=timezone.utc).isoformat()
 
@@ -169,6 +175,30 @@ class TestEmptyContext:
     def test_killswitch_no_colony(self):
         r = self.client.post("/api/killswitch", json={"level": 3, "operator_confirm": True})
         assert r.status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# TestDashboardRedesignStatic
+# ---------------------------------------------------------------------------
+
+class TestDashboardRedesignStatic:
+
+    def test_l1_l2_l3_buttons_removed_but_noodstop_remains(self):
+        html = _static_index_text()
+        assert "L1 Agent" not in html
+        assert "L2 Node" not in html
+        assert "L3 Colony" not in html
+        assert "doKill(" not in html
+        assert "btn-ks-tb" not in html
+        assert "NOODSTOP" in html
+
+    def test_position_bars_snapshot_present(self):
+        html = _static_index_text()
+        assert "paper-positions-slot" in html
+        assert "function renderSltpBar" in html
+        assert "sltp-bar" in html
+        assert "pos-pnl-pos" in html
+        assert "pos-pnl-neg" in html
 
 
 # ---------------------------------------------------------------------------
@@ -1534,3 +1564,111 @@ class TestPerformanceChartEndpoint:
             assert d["total_pnl"] == 0.0
             assert d["dag"]     == 0.0
             assert d["alltime"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# TestTradeJournal
+# ---------------------------------------------------------------------------
+
+class TestTradeJournal:
+
+    def _trade_events(self, idx: int, pnl: float) -> list[dict]:
+        position_id = f"pos-{idx}"
+        opened = datetime.now(tz=timezone.utc) - timedelta(hours=idx + 2)
+        closed = opened + timedelta(hours=2)
+        return [
+            {
+                "timestamp": opened.isoformat(),
+                "payload": {
+                    "action": "trade_opened",
+                    "position_id": position_id,
+                    "symbol": f"SYM{idx}",
+                    "side": "long",
+                    "strategy_type": "volatility_squeeze",
+                    "biome": "crypto",
+                    "entry_price": 100.0,
+                    "regime": "SIDEWAYS",
+                },
+            },
+            {
+                "timestamp": closed.isoformat(),
+                "payload": {
+                    "action": "trade_closed",
+                    "position_id": position_id,
+                    "symbol": f"SYM{idx}",
+                    "exit_price": 100.0 + pnl,
+                    "pnl_net": pnl,
+                    "exit_reason": "take_profit" if pnl > 0 else "stop_loss",
+                },
+            },
+        ]
+
+    def test_journal_top_trades_returns_top_10_sorted_by_pnl(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            logs = Path(tmp)
+            records: list[dict] = []
+            for idx in range(12):
+                records.extend(self._trade_events(idx, pnl=float(idx)))
+            _write_jsonl(logs / "paper" / "paper-ant.jsonl", records)
+
+            r = _client(ColonyContext(logs_root=logs)).get("/api/journal/top-trades")
+
+        assert r.status_code == 200
+        d = r.json()
+        assert d["count"] == 10
+        assert d["trades"][0]["rank"] == 1
+        assert d["trades"][0]["pnl_eur"] == pytest.approx(11.0)
+        assert d["trades"][-1]["pnl_eur"] == pytest.approx(2.0)
+        assert d["trades"][0]["strategy_type"] == "volatility_squeeze"
+        assert "hypothese" in d["trades"][0]["why"]
+
+    def test_journal_route_serves_html(self) -> None:
+        r = _client(ColonyContext()).get("/journal")
+        assert r.status_code == 200
+        assert "Trade Journal" in r.text
+
+
+# ---------------------------------------------------------------------------
+# TestOperatorOverrides
+# ---------------------------------------------------------------------------
+
+class TestOperatorOverrides:
+
+    def test_operator_overrides_get_lists_active_strategy_types(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            r = _client(ColonyContext(logs_root=Path(tmp))).get("/api/operator/overrides")
+        assert r.status_code == 200
+        strategies = {row["strategy_type"]: row for row in r.json()["strategies"]}
+        assert "volatility_squeeze" in strategies
+        assert "mean_reversion" in strategies
+        assert "rsi_based" not in strategies
+        assert strategies["volatility_squeeze"]["mode"] == "neutral"
+
+    def test_operator_override_post_writes_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            logs = Path(tmp)
+            client = _client(ColonyContext(logs_root=logs))
+            r = client.post(
+                "/api/operator/overrides",
+                json={"strategy_type": "volatility_squeeze", "mode": "prefer"},
+            )
+            data = json.loads((logs / "queen" / "operator_override.json").read_text(encoding="utf-8"))
+            get_r = client.get("/api/operator/overrides")
+
+        assert r.status_code == 200
+        assert r.json()["accepted"] is True
+        assert data["volatility_squeeze"]["mode"] == "prefer"
+        entry = next(row for row in get_r.json()["strategies"] if row["strategy_type"] == "volatility_squeeze")
+        assert entry["mode"] == "prefer"
+        assert entry["active"] is True
+
+    def test_operator_override_neutral_removes_active_preference(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            logs = Path(tmp)
+            client = _client(ColonyContext(logs_root=logs))
+            client.post("/api/operator/overrides", json={"strategy_type": "mean_reversion", "mode": "avoid"})
+            r = client.post("/api/operator/overrides", json={"strategy_type": "mean_reversion", "mode": "neutral"})
+            data = json.loads((logs / "queen" / "operator_override.json").read_text(encoding="utf-8"))
+
+        assert r.status_code == 200
+        assert "mean_reversion" not in data
