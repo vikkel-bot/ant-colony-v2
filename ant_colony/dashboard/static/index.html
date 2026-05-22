@@ -991,10 +991,13 @@
     }
     .override-item {
       border: 1px solid var(--border-soft);
+      border-left: 3px solid transparent;
       border-radius: 7px;
       padding: 8px;
       background: #fff;
     }
+    .override-item.prefer-active { border-left-color: #1D9E75; }
+    .override-item.avoid-active { border-left-color: #E24B4A; }
     .override-name {
       font-size: 11px;
       font-weight: 800;
@@ -1012,15 +1015,33 @@
       cursor: pointer;
       color: var(--muted);
     }
-    .override-btn.prefer.active { background: var(--pnl-pos-bg); color: var(--pnl-pos); border-color: rgba(22,101,52,.25); }
-    .override-btn.avoid.active { background: var(--pnl-neg-bg); color: var(--pnl-neg); border-color: rgba(153,27,27,.25); }
-    .override-btn.neutral.active { background: #f3f4f6; color: var(--text); }
+    .override-btn.prefer {
+      background: #1D9E75;
+      color: #fff;
+      border-color: #1D9E75;
+    }
+    .override-btn.prefer:hover { background: #167c5c; border-color: #167c5c; }
+    .override-btn.avoid {
+      background: #E24B4A;
+      color: #fff;
+      border-color: #E24B4A;
+    }
+    .override-btn.avoid:hover { background: #bf3635; border-color: #bf3635; }
+    .override-btn.neutral {
+      background: transparent;
+      color: var(--muted);
+      border-color: var(--border);
+    }
+    .override-btn.neutral:hover { background: #f3f4f6; color: var(--text); }
+    .override-btn.active { box-shadow: inset 0 0 0 1px rgba(255,255,255,.55); }
     .override-days {
       margin-top: 5px;
       font-size: 9px;
       color: var(--muted);
       font-weight: 700;
     }
+    .override-days.prefer { color: #1D9E75; }
+    .override-days.avoid { color: #E24B4A; }
 
   </style>
 </head>
@@ -1820,10 +1841,11 @@ function renderQueen() {
   el.innerHTML = regimeHtml + stratHtml + wtHtml + decisionHtml;
 }
 
-function _overrideDays(entry) {
+function _overrideDays(entry, mode) {
   if (!entry || !entry.active || !entry.days_remaining) return '';
   const days = Math.max(1, Math.ceil(Number(entry.days_remaining)));
-  return `<div class="override-days">nog ${days} dag${days === 1 ? '' : 'en'}</div>`;
+  const cls = mode === 'prefer' ? 'prefer' : (mode === 'avoid' ? 'avoid' : '');
+  return `<div class="override-days ${cls}">nog ${days} dag${days === 1 ? '' : 'en'}</div>`;
 }
 
 function renderOperatorOverrides() {
@@ -1836,15 +1858,16 @@ function renderOperatorOverrides() {
   }
   el.innerHTML = `<div class="override-panel">${rows.map(entry => {
     const mode = entry.mode || 'neutral';
+    const cardClass = mode === 'prefer' ? 'prefer-active' : (mode === 'avoid' ? 'avoid-active' : '');
     const st = entry.strategy_type;
-    return `<div class="override-item">
+    return `<div class="override-item ${cardClass}">
       <div class="override-name">${st}</div>
       <div class="override-actions">
         <button class="override-btn prefer ${mode === 'prefer' ? 'active' : ''}" onclick="setOperatorOverride('${st}','prefer')">Voorkeur</button>
         <button class="override-btn avoid ${mode === 'avoid' ? 'active' : ''}" onclick="setOperatorOverride('${st}','avoid')">Vermijd</button>
         <button class="override-btn neutral ${mode === 'neutral' ? 'active' : ''}" onclick="setOperatorOverride('${st}','neutral')">Neutraal</button>
       </div>
-      ${_overrideDays(entry)}
+      ${_overrideDays(entry, mode)}
     </div>`;
   }).join('')}</div>`;
 }

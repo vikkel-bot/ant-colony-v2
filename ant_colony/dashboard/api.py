@@ -3183,19 +3183,30 @@ def _read_journal_top_trades(logs_root: Path, limit: int = 10) -> list[dict[str,
             ):
                 closed_payloads.append(payload)
 
-    deduped: dict[tuple[str, str, str], dict[str, Any]] = {}
+    deduped: list[dict[str, Any]] = []
+    seen_position_ids: set[str] = set()
+    seen_fallback_keys: set[tuple[str, str, str]] = set()
     for payload in closed_payloads:
         trade = _journal_trade_from_payload(payload, opened_by_id)
         if trade is None:
             continue
-        key = (
-            str(_journal_first(payload, "position_id", "id") or ""),
-            trade["symbol"],
-            trade["closed_at"],
-        )
-        deduped[key] = trade
+        position_id = str(_journal_first(payload, "position_id", "id") or "").strip()
+        if position_id:
+            if position_id in seen_position_ids:
+                continue
+            seen_position_ids.add(position_id)
+        else:
+            fallback_key = (
+                str(trade.get("symbol") or "unknown"),
+                str(trade.get("entry_price") or ""),
+                str(trade.get("closed_at") or ""),
+            )
+            if fallback_key in seen_fallback_keys:
+                continue
+            seen_fallback_keys.add(fallback_key)
+        deduped.append(trade)
 
-    best = sorted(deduped.values(), key=lambda t: float(t.get("pnl_eur") or 0.0), reverse=True)[:limit]
+    best = sorted(deduped, key=lambda t: float(t.get("pnl_eur") or 0.0), reverse=True)[:limit]
     for idx, trade in enumerate(best, start=1):
         trade["rank"] = idx
     return best

@@ -200,6 +200,18 @@ class TestDashboardRedesignStatic:
         assert "pos-pnl-pos" in html
         assert "pos-pnl-neg" in html
 
+    def test_operator_override_buttons_are_color_coded(self):
+        html = _static_index_text()
+        assert ".override-btn.prefer" in html
+        assert "background: #1D9E75" in html
+        assert ".override-btn.avoid" in html
+        assert "background: #E24B4A" in html
+        assert ".override-btn.neutral" in html
+        assert "background: transparent" in html
+        assert ".override-item.prefer-active" in html
+        assert ".override-item.avoid-active" in html
+        assert "override-days ${cls}" in html
+
 
 # ---------------------------------------------------------------------------
 # TestStatusEndpoint
@@ -1621,6 +1633,57 @@ class TestTradeJournal:
         assert d["trades"][-1]["pnl_eur"] == pytest.approx(2.0)
         assert d["trades"][0]["strategy_type"] == "volatility_squeeze"
         assert "hypothese" in d["trades"][0]["why"]
+
+    def test_journal_top_trades_deduplicates_position_id_across_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            logs = Path(tmp)
+            records = self._trade_events(1, pnl=10.0)
+            duplicate_records = self._trade_events(1, pnl=999.0)
+            _write_jsonl(logs / "paper" / "a.jsonl", records)
+            _write_jsonl(logs / "paper" / "b.jsonl", duplicate_records)
+
+            r = _client(ColonyContext(logs_root=logs)).get("/api/journal/top-trades")
+
+        assert r.status_code == 200
+        d = r.json()
+        assert d["count"] == 1
+        assert d["trades"][0]["pnl_eur"] == pytest.approx(10.0)
+
+    def test_journal_top_trades_deduplicates_missing_position_id_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            logs = Path(tmp)
+            closed_at = datetime.now(tz=timezone.utc).isoformat()
+            duplicate = {
+                "timestamp": closed_at,
+                "payload": {
+                    "action": "trade_closed",
+                    "symbol": "BTC-EUR",
+                    "entry_price": 100.0,
+                    "exit_price": 110.0,
+                    "pnl_net": 10.0,
+                    "exit_reason": "take_profit",
+                },
+            }
+            duplicate_higher = {
+                "timestamp": closed_at,
+                "payload": {
+                    "action": "trade_closed",
+                    "symbol": "BTC-EUR",
+                    "entry_price": 100.0,
+                    "exit_price": 999.0,
+                    "pnl_net": 999.0,
+                    "exit_reason": "take_profit",
+                },
+            }
+            _write_jsonl(logs / "paper" / "a.jsonl", [duplicate])
+            _write_jsonl(logs / "paper" / "b.jsonl", [duplicate_higher])
+
+            r = _client(ColonyContext(logs_root=logs)).get("/api/journal/top-trades")
+
+        assert r.status_code == 200
+        d = r.json()
+        assert d["count"] == 1
+        assert d["trades"][0]["pnl_eur"] == pytest.approx(10.0)
 
     def test_journal_route_serves_html(self) -> None:
         r = _client(ColonyContext()).get("/journal")
