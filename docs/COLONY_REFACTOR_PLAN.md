@@ -138,3 +138,74 @@ C:\Trading\nssm.exe restart "AntColony"
 ```
 
 Doe dit in administrator PowerShell.
+
+## Ideeën voor later — uitbreidingen na validatie
+
+Deze ideeën pakken we pas op nadat `volatility_squeeze` minimaal 30 dagen paper
+trading heeft doorlopen met bewezen Sharpe > 1.0. Geen features stapelen op een
+ongevalideerd systeem.
+
+### Macro-context ant (hoogste prioriteit)
+
+Aparte ant die real-time macro-data leest en doorzet naar Queen voor verbeterde
+regime-detectie. Verandert Queen's regime van "BULL/BEAR op prijs" naar
+"BULL/BEAR op fundamentals".
+
+Bronnen om te integreren:
+- Fed rate decisions + statements (FOMC kalender)
+- ECB rate decisions + statements
+- Inflation prints (CPI, PCE, PPI)
+- Employment data (NFP, unemployment rate)
+- GDP releases
+- Yield curve (10Y - 2Y spread)
+- VIX level
+- DXY (dollar index)
+
+### Sector- en industrie-data
+
+- Sector rotatie modellen (XLE/XLF/XLK/XLY relative strength)
+- Industrie cyclus-fase detectie
+- Cross-sectional momentum tussen sectoren
+
+### News & sentiment uitbreiding
+
+Naast huidige Watchtower:
+- Premium news API's (Bloomberg, Reuters, FT)
+- Earnings call transcripts NLP
+- SEC filings real-time monitoring
+- Social sentiment (Twitter/X, Reddit financial subs)
+- Insider transaction filings (Form 4)
+- Hedge fund 13F filings (quarterly positioning)
+- Analyst rating changes
+
+### Crypto-specifieke uitbreidingen
+
+- On-chain metrics (whale movements, exchange flows)
+- Funding rates (perpetual futures sentiment)
+- Open interest changes
+- Stablecoin supply (USDC/USDT als liquiditeitsindicator)
+- Network metrics (BTC hashrate, ETH gas)
+
+### Event-driven entries
+
+- Earnings calendars (pre/post earnings positioning)
+- Fed/ECB meeting dates
+- Options expiry dates (gamma squeeze potentieel)
+- Index rebalancing dates
+- Crypto halving events
+
+### Marktstructuur-signalen
+
+- Killzones (London/NY/Asia opens) — al eerder gebouwd, weer activeren
+- Volume profile analysis
+- Order flow imbalance
+- Bid/ask spread anomalies
+
+### Selectiecriteria — wanneer iets toevoegen?
+
+Een nieuwe data-bron of strategie wordt pas overwogen als:
+1. Huidige strategieën hebben bewezen Sharpe > 1.0 over 30 dagen paper
+2. Er is een meetbare hypothese — niet "voor de zekerheid"
+3. Backtest op historische data laat verbetering zien
+4. De toevoeging breekt geen bestaande functionaliteit
+5. Onderhoudskosten staan in verhouding tot verwachte alpha
