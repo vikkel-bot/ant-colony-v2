@@ -401,9 +401,10 @@ class TestLogEvents:
         records = [json.loads(l) for l in log_path.read_text().splitlines() if l.strip()]
         opened = next(r["payload"] for r in records if r["payload"]["action"] == "trade_opened")
         for field in ("position_id", "symbol", "side", "entry_price", "quantity",
-                      "stop_loss", "take_profit", "strategy_type"):
+                      "stop_loss", "take_profit", "strategy_type", "ttl_seconds"):
             assert field in opened, f"Missing field: {field}"
         assert opened["strategy_type"] == "scout"
+        assert opened["ttl_seconds"] == ant.mission.ttl
 
     def test_trade_closed_event_written(self, tmp_path: Path) -> None:
         ant = make_ant(logs_root=tmp_path)

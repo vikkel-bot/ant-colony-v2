@@ -609,12 +609,18 @@ class OpenPositionEntry(BaseModel):
     entry_price: float
     current_price: float | None = None     # None als live prijs niet beschikbaar
     quantity: float
+    invested_eur: float | None = None
     stop_loss_price: float
     take_profit_price: float
+    stop_loss_pct: float | None = None
+    take_profit_pct: float | None = None
+    distance_to_sl_pct: float | None = None
+    distance_to_tp_pct: float | None = None
     pnl_eur: float | None = None           # None als current_price ontbreekt
     pnl_pct: float | None = None           # None als current_price ontbreekt
     opened_at: str                         # ISO timestamp
     age_seconds: float
+    ttl_remaining_seconds: float | None = None
     strategy_type: str | None = None
     sl_tp_progress: float | None = None    # 0.0=bij SL, 1.0=bij TP; None als geen prijs
     trailing_stop_price: float | None = None   # paarse lijn in dashboard (equities only)
@@ -795,6 +801,7 @@ class JournalTopTradesResponse(BaseModel):
     trades: list[JournalTradeEntry]
     count: int
     fetched_at: str
+    available_filters: dict[str, list[str]] = Field(default_factory=dict)
 
 
 class QueenStrategyEntry(BaseModel):
@@ -1767,6 +1774,7 @@ def create_router(ctx: ColonyContext) -> APIRouter:
                         "stop_loss_price":    pos.stop_loss_price,
                         "take_profit_price":  pos.take_profit_price,
                         "opened_at":          pos.opened_at.isoformat(),
+                        "ttl_seconds":        getattr(pos, "ttl", None),
                         "strategy_type":      None,  # niet beschikbaar via ledger
                         "trailing_stop_price": trailing_stop_price,
                     })
@@ -1789,6 +1797,7 @@ def create_router(ctx: ColonyContext) -> APIRouter:
             tp_price = float(r.get("take_profit_price") or r.get("take_profit") or 0)
             side     = str(r.get("side") or "long")
             biome_id = str(r.get("biome") or "crypto")
+            invested_eur = round(entry * qty, 4) if entry > 0 and qty > 0 else None
 
             # Live prijs ophalen
             current: float | None = None
@@ -1807,6 +1816,10 @@ def create_router(ctx: ColonyContext) -> APIRouter:
 
             # SL/TP progress
             progress = _compute_sl_tp_progress(side, current, sl_price, tp_price)
+            stop_loss_pct = _position_target_pct(side, entry, sl_price, target="sl")
+            take_profit_pct = _position_target_pct(side, entry, tp_price, target="tp")
+            distance_to_sl_pct, distance_to_tp_pct = _position_distances_pct(side, current, sl_price, tp_price)
+            ttl_remaining_seconds = _position_ttl_remaining_seconds(r, age_sec)
 
             # trailing_stop_price: uit log (equities) of berekend via ledger-positie
             trailing_stop_raw = r.get("trailing_stop_price")
@@ -1825,12 +1838,18 @@ def create_router(ctx: ColonyContext) -> APIRouter:
                 entry_price=entry,
                 current_price=current,
                 quantity=qty,
+                invested_eur=invested_eur,
                 stop_loss_price=sl_price,
                 take_profit_price=tp_price,
+                stop_loss_pct=stop_loss_pct,
+                take_profit_pct=take_profit_pct,
+                distance_to_sl_pct=distance_to_sl_pct,
+                distance_to_tp_pct=distance_to_tp_pct,
                 pnl_eur=pnl_eur,
                 pnl_pct=pnl_pct,
                 opened_at=opened_at_str,
                 age_seconds=round(age_sec, 0),
+                ttl_remaining_seconds=ttl_remaining_seconds,
                 strategy_type=r.get("strategy_type"),
                 sl_tp_progress=progress,
                 trailing_stop_price=trailing_stop,
@@ -2250,7 +2269,12 @@ def create_router(ctx: ColonyContext) -> APIRouter:
         return PaperDiagnosticsResponse(**_read_paper_diagnostics(ctx.logs_root))
 
     @router.get("/journal/top-trades", response_model=JournalTopTradesResponse)
-    def get_journal_top_trades(limit: int = 10) -> JournalTopTradesResponse:
+    def get_journal_top_trades(
+        limit: int = 10,
+        strategy_type: str | None = None,
+        exit_reason: str | None = None,
+        biome: str | None = None,
+    ) -> JournalTopTradesResponse:
         """Top gesloten paper trades voor de Trade Journal view."""
         limit_ = max(1, min(int(limit or 10), 10))
         if ctx.logs_root is None:
@@ -2258,12 +2282,20 @@ def create_router(ctx: ColonyContext) -> APIRouter:
                 trades=[],
                 count=0,
                 fetched_at=datetime.now(tz=timezone.utc).isoformat(),
+                available_filters=_journal_filter_options([]),
             )
-        trades = _read_journal_top_trades(ctx.logs_root, limit=limit_)
+        trades, available_filters = _read_journal_top_trades(
+            ctx.logs_root,
+            limit=limit_,
+            strategy_type=strategy_type,
+            exit_reason=exit_reason,
+            biome=biome,
+        )
         return JournalTopTradesResponse(
             trades=[JournalTradeEntry(**trade) for trade in trades],
             count=len(trades),
             fetched_at=datetime.now(tz=timezone.utc).isoformat(),
+            available_filters=available_filters,
         )
 
     # ------------------------------------------------------------------
@@ -2699,6 +2731,7 @@ def _read_open_positions_from_logs(logs_root: Path) -> list[dict]:
                 "take_profit_price": float(payload.get("take_profit") or 0),
                 "strategy_type":     payload.get("strategy_type"),
                 "opened_at":         r.get("timestamp") or "",
+                "ttl_seconds":       payload.get("ttl_seconds") or payload.get("ttl"),
                 "trailing_stop_price": None,
             }
             if rec_ts is not None:
@@ -2730,6 +2763,7 @@ def _read_open_positions_from_logs(logs_root: Path) -> list[dict]:
                 "take_profit_price": float(payload.get("take_profit") or 0),
                 "strategy_type":     payload.get("strategy_type"),
                 "opened_at":         r.get("timestamp") or "",
+                "ttl_seconds":       payload.get("ttl_seconds") or payload.get("ttl"),
                 "trailing_stop_price": payload.get("trailing_stop_price"),
             }
             if rec_ts is not None:
@@ -2792,6 +2826,42 @@ def _get_live_price(
         except Exception:
             logger.exception("_get_live_price: fout voor %s/%s", bid, symbol)
     return None
+
+
+def _position_target_pct(side: str, entry: float, target_price: float, *, target: str) -> float | None:
+    if entry <= 0 or target_price <= 0:
+        return None
+    side = (side or "long").lower()
+    if target == "sl":
+        raw = (target_price - entry) / entry * 100.0 if side == "long" else (entry - target_price) / entry * 100.0
+    else:
+        raw = (target_price - entry) / entry * 100.0 if side == "long" else (entry - target_price) / entry * 100.0
+    return round(raw, 4)
+
+
+def _position_distances_pct(
+    side: str,
+    current: float | None,
+    sl: float,
+    tp: float,
+) -> tuple[float | None, float | None]:
+    if current is None or current <= 0 or sl <= 0 or tp <= 0:
+        return None, None
+    side = (side or "long").lower()
+    if side == "short":
+        dist_sl = (sl - current) / current * 100.0
+        dist_tp = (current - tp) / current * 100.0
+    else:
+        dist_sl = (current - sl) / current * 100.0
+        dist_tp = (tp - current) / current * 100.0
+    return round(max(0.0, dist_sl), 4), round(max(0.0, dist_tp), 4)
+
+
+def _position_ttl_remaining_seconds(row: dict[str, Any], age_seconds: float) -> float | None:
+    ttl = _float_or_none(row.get("ttl_seconds"))
+    if ttl is None or ttl <= 0:
+        return None
+    return round(max(0.0, ttl - max(0.0, age_seconds)), 0)
 
 
 def _compute_sl_tp_progress(
@@ -3061,7 +3131,7 @@ def _journal_normalize_exit_reason(reason: Any) -> str:
     if "momentum" in lower:
         return "MOMENTUM_LOST"
     if "ttl" in lower or "timeout" in lower or "expired" in lower:
-        return "TTL"
+        return "TTL_EXPIRED"
     if "manual" in lower:
         return "MANUAL"
     return text.upper()
@@ -3119,15 +3189,35 @@ def _journal_pnl_pct(record: dict[str, Any], side: str) -> float | None:
     return round((exit_price - entry) / entry * 100.0, 4)
 
 
-def _journal_why(row: dict[str, Any], pnl_eur: float, exit_reason: str) -> str:
+def _journal_why(row: dict[str, Any], pnl_eur: float, exit_reason: str, side: str) -> str:
     strategy = str(_journal_first(row, "strategy_type", "strategy", "signal_type") or "unknown")
+    strategy_key = strategy.lower()
     regime = str(_journal_first(row, "regime", "entry_regime", "queen_regime", "best_regime") or "unknown")
     symbol = str(_journal_first(row, "symbol", "asset") or "unknown")
-    if pnl_eur > 0:
-        return f"{symbol} bevestigde de {strategy}-hypothese in regime {regime}; exit via {exit_reason} leverde winst op."
-    if pnl_eur < 0:
-        return f"{symbol} sprak de {strategy}-hypothese tegen in regime {regime}; exit via {exit_reason} beperkte het verlies."
-    return f"{symbol} sloot neutraal; {strategy} gaf in regime {regime} geen duidelijke edge."
+    direction = "short" if side == "short" else "long"
+    if strategy_key == "volatility_squeeze":
+        ema_side = "onder" if direction == "short" else "boven"
+        base = f"BB brak buiten Keltner op {symbol}, close {ema_side} EMA20 → {direction}"
+    elif strategy_key == "mean_reversion":
+        base = f"Z-score daalde onder -1.5 op {symbol} → mean reversion verwacht"
+    elif strategy_key == "bollinger_bands":
+        band = "bovenste" if direction == "short" or "upper" in str(_journal_first(row, "signal_type", "strategy") or "").lower() else "onderste"
+        base = f"Prijs raakte BB {band} band op {symbol}"
+    else:
+        if pnl_eur > 0:
+            base = f"{symbol} bevestigde de {strategy}-hypothese in regime {regime}"
+        elif pnl_eur < 0:
+            base = f"{symbol} sprak de {strategy}-hypothese tegen in regime {regime}"
+        else:
+            base = f"{symbol} sloot neutraal; {strategy} gaf in regime {regime} geen duidelijke edge"
+
+    if exit_reason == "STOP_LOSS":
+        return f"{base} — hypothesis incorrect"
+    if exit_reason == "TAKE_PROFIT":
+        return f"{base} — hypothesis bevestigd"
+    if exit_reason in {"TTL", "TTL_EXPIRED"}:
+        return f"{base} — trade te traag, geen richting"
+    return f"{base} — exit via {exit_reason}"
 
 
 def _journal_trade_from_payload(
@@ -3161,14 +3251,38 @@ def _journal_trade_from_payload(
         "pnl_eur": pnl_eur,
         "pnl_pct": _journal_pnl_pct(row, side),
         "closed_at": closed_at.isoformat(),
-        "why": _journal_why(row, pnl_eur, exit_reason),
+        "why": _journal_why(row, pnl_eur, exit_reason, side),
     }
 
 
-def _read_journal_top_trades(logs_root: Path, limit: int = 10) -> list[dict[str, Any]]:
+def _journal_filter_options(trades: list[dict[str, Any]]) -> dict[str, list[str]]:
+    def values(key: str) -> list[str]:
+        return sorted({str(trade.get(key) or "unknown") for trade in trades})
+
+    return {
+        "strategy_type": values("strategy_type"),
+        "exit_reason": values("exit_reason"),
+        "biome": values("biome"),
+    }
+
+
+def _journal_matches_filter(trade: dict[str, Any], key: str, value: str | None) -> bool:
+    if not value:
+        return True
+    return str(trade.get(key) or "unknown").lower() == str(value).lower()
+
+
+def _read_journal_top_trades(
+    logs_root: Path,
+    limit: int = 10,
+    *,
+    strategy_type: str | None = None,
+    exit_reason: str | None = None,
+    biome: str | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, list[str]]]:
     paper_dir = logs_root / "paper"
     if not paper_dir.exists():
-        return []
+        return [], _journal_filter_options([])
 
     opened_by_id: dict[str, dict[str, Any]] = {}
     closed_payloads: list[dict[str, Any]] = []
@@ -3219,10 +3333,17 @@ def _read_journal_top_trades(logs_root: Path, limit: int = 10) -> list[dict[str,
             seen_fallback_keys.add(fallback_key)
         deduped.append(trade)
 
-    best = sorted(deduped, key=lambda t: float(t.get("pnl_eur") or 0.0), reverse=True)[:limit]
+    available_filters = _journal_filter_options(deduped)
+    filtered = [
+        trade for trade in deduped
+        if _journal_matches_filter(trade, "strategy_type", strategy_type)
+        and _journal_matches_filter(trade, "exit_reason", exit_reason)
+        and _journal_matches_filter(trade, "biome", biome)
+    ]
+    best = sorted(filtered, key=lambda t: float(t.get("pnl_eur") or 0.0), reverse=True)[:limit]
     for idx, trade in enumerate(best, start=1):
         trade["rank"] = idx
-    return best
+    return best, available_filters
 
 
 def _path_fingerprint(path: Path) -> tuple[int, int]:

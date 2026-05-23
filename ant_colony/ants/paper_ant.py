@@ -1611,6 +1611,7 @@ class PaperAnt:
             "strategy_type":    opened_strategy_type,
             "sl_pct":           sl_pct,
             "tp_pct":           tp_pct,
+            "ttl_seconds":      position.ttl,
         })
 
     def _emit_trade_closed(self, position) -> None:

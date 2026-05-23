@@ -33,6 +33,20 @@
     .title-row { display: flex; align-items: end; justify-content: space-between; margin-bottom: 12px; }
     h1 { font-size: 22px; letter-spacing: 0; }
     .meta { color: var(--muted); font-size: 12px; }
+    .filters {
+      background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+      padding: 10px 12px; margin-bottom: 12px; display: flex; gap: 10px; flex-wrap: wrap;
+      align-items: end;
+    }
+    .filter { display: grid; gap: 3px; min-width: 170px; }
+    .filter label {
+      color: var(--muted); font-size: 10px; font-weight: 800; text-transform: uppercase;
+      letter-spacing: .4px;
+    }
+    .filter select {
+      border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px;
+      background: #fff; color: var(--text); font-weight: 700;
+    }
     .trade-list { display: grid; gap: 8px; }
     .trade {
       background: var(--card); border: 1px solid var(--border); border-radius: 8px;
@@ -79,6 +93,20 @@
       <h1>Beste gesloten trades</h1>
       <div class="meta" id="journal-meta">Laden...</div>
     </div>
+    <section class="filters" aria-label="Trade journal filters">
+      <div class="filter">
+        <label for="filter-strategy">Strategy type</label>
+        <select id="filter-strategy"></select>
+      </div>
+      <div class="filter">
+        <label for="filter-exit">Exit reden</label>
+        <select id="filter-exit"></select>
+      </div>
+      <div class="filter">
+        <label for="filter-biome">Biome</label>
+        <select id="filter-biome"></select>
+      </div>
+    </section>
     <div id="journal-list" class="trade-list">
       <div class="empty">Trade journal laden...</div>
     </div>
@@ -90,6 +118,7 @@
     const price = v => v == null ? '—' : '€\u202f' + Number(v).toLocaleString('nl-NL', { minimumFractionDigits: 2, maximumFractionDigits: 6 });
     const pct = v => v == null ? '—' : `${Number(v) >= 0 ? '+' : ''}${Number(v).toFixed(2)}%`;
     const hours = v => v == null ? 'duur onbekend' : `${Number(v).toFixed(1)} uur`;
+    const state = { strategy_type: '', exit_reason: '', biome: '' };
     const ts = iso => {
       if (!iso) return '—';
       const d = new Date(iso);
@@ -120,13 +149,34 @@
       </article>`;
     }
 
+    function setOptions(selectId, values, selected) {
+      const el = document.getElementById(selectId);
+      const opts = [''].concat(values || []);
+      el.innerHTML = opts.map(v => `<option value="${v}" ${v === selected ? 'selected' : ''}>${v || 'Alles'}</option>`).join('');
+    }
+
+    function applyFilterOptions(filters) {
+      setOptions('filter-strategy', filters.strategy_type || [], state.strategy_type);
+      setOptions('filter-exit', filters.exit_reason || [], state.exit_reason);
+      setOptions('filter-biome', filters.biome || [], state.biome);
+    }
+
+    function queryString() {
+      const params = new URLSearchParams({ limit: '10' });
+      Object.entries(state).forEach(([key, value]) => {
+        if (value) params.set(key, value);
+      });
+      return params.toString();
+    }
+
     async function loadJournal() {
       const list = document.getElementById('journal-list');
       const meta = document.getElementById('journal-meta');
       try {
-        const response = await fetch('/api/journal/top-trades?limit=10');
+        const response = await fetch('/api/journal/top-trades?' + queryString());
         const data = await response.json();
         const trades = data.trades || [];
+        applyFilterOptions(data.available_filters || {});
         meta.textContent = `${trades.length} trade${trades.length === 1 ? '' : 's'} · ${ts(data.fetched_at)}`;
         list.innerHTML = trades.length
           ? trades.map(row).join('')
@@ -137,7 +187,21 @@
       }
     }
 
-    document.addEventListener('DOMContentLoaded', loadJournal);
+    document.addEventListener('DOMContentLoaded', () => {
+      document.getElementById('filter-strategy').addEventListener('change', ev => {
+        state.strategy_type = ev.target.value;
+        loadJournal();
+      });
+      document.getElementById('filter-exit').addEventListener('change', ev => {
+        state.exit_reason = ev.target.value;
+        loadJournal();
+      });
+      document.getElementById('filter-biome').addEventListener('change', ev => {
+        state.biome = ev.target.value;
+        loadJournal();
+      });
+      loadJournal();
+    });
   </script>
 </body>
 </html>

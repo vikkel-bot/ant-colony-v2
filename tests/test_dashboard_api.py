@@ -197,6 +197,10 @@ class TestDashboardRedesignStatic:
         assert "paper-positions-slot" in html
         assert "function renderSltpBar" in html
         assert "sltp-bar" in html
+        assert "pos-cards" in html
+        assert "Afstand tot SL" in html
+        assert "Afstand tot TP" in html
+        assert "ttl_remaining_seconds" in html
         assert "pos-pnl-pos" in html
         assert "pos-pnl-neg" in html
 
@@ -1059,6 +1063,7 @@ class TestPositionsEndpoint:
                 "position_id": "pos-1", "symbol": "BTC-EUR", "biome": "crypto",
                 "side": "long", "entry_price": 100.0, "quantity": 1.0,
                 "stop_loss": 90.0, "take_profit": 120.0,
+                "strategy_type": "volatility_squeeze", "ttl_seconds": 7200,
             })
             adapter = self._make_adapter(close_price=110.0)
             registry = MagicMock()
@@ -1072,6 +1077,13 @@ class TestPositionsEndpoint:
         assert pos["current_price"] == pytest.approx(110.0)
         assert pos["pnl_eur"]       == pytest.approx(10.0)
         assert pos["pnl_pct"]       == pytest.approx(10.0)
+        assert pos["invested_eur"]  == pytest.approx(100.0)
+        assert pos["strategy_type"] == "volatility_squeeze"
+        assert pos["stop_loss_pct"] == pytest.approx(-10.0)
+        assert pos["take_profit_pct"] == pytest.approx(20.0)
+        assert pos["distance_to_sl_pct"] == pytest.approx(round((110.0 - 90.0) / 110.0 * 100.0, 4))
+        assert pos["distance_to_tp_pct"] == pytest.approx(round((120.0 - 110.0) / 110.0 * 100.0, 4))
+        assert pos["ttl_remaining_seconds"] is not None
         assert d["total_pnl_eur"]   == pytest.approx(10.0)
 
     def test_sl_tp_progress_at_entry(self):
@@ -1674,7 +1686,9 @@ class TestTradeJournal:
         assert d["trades"][0]["pnl_eur"] == pytest.approx(11.0)
         assert d["trades"][-1]["pnl_eur"] == pytest.approx(2.0)
         assert d["trades"][0]["strategy_type"] == "volatility_squeeze"
-        assert "hypothese" in d["trades"][0]["why"]
+        assert "BB brak buiten Keltner" in d["trades"][0]["why"]
+        assert d["available_filters"]["strategy_type"] == ["volatility_squeeze"]
+        assert "TAKE_PROFIT" in d["available_filters"]["exit_reason"]
 
     def test_journal_top_trades_deduplicates_position_id_across_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1731,6 +1745,47 @@ class TestTradeJournal:
         r = _client(ColonyContext()).get("/journal")
         assert r.status_code == 200
         assert "Trade Journal" in r.text
+        assert "filter-strategy" in r.text
+        assert "filter-exit" in r.text
+        assert "filter-biome" in r.text
+
+    def test_journal_top_trades_filters_by_strategy_exit_and_biome(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            logs = Path(tmp)
+            records = self._trade_events(1, pnl=10.0)
+            other = self._trade_events(2, pnl=20.0)
+            other[0]["payload"]["strategy_type"] = "mean_reversion"
+            other[0]["payload"]["biome"] = "equities"
+            other[1]["payload"]["exit_reason"] = "stop_loss"
+            _write_jsonl(logs / "paper" / "paper-ant.jsonl", records + other)
+
+            r = _client(ColonyContext(logs_root=logs)).get(
+                "/api/journal/top-trades?strategy_type=mean_reversion&exit_reason=STOP_LOSS&biome=equities"
+            )
+
+        assert r.status_code == 200
+        d = r.json()
+        assert d["count"] == 1
+        assert d["trades"][0]["strategy_type"] == "mean_reversion"
+        assert d["trades"][0]["biome"] == "equities"
+        assert d["trades"][0]["exit_reason"] == "STOP_LOSS"
+        assert "Z-score daalde onder -1.5" in d["trades"][0]["why"]
+        assert "hypothesis incorrect" in d["trades"][0]["why"]
+
+    def test_journal_why_mentions_ttl_expired(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            logs = Path(tmp)
+            events = self._trade_events(3, pnl=0.0)
+            events[0]["payload"]["strategy_type"] = "bollinger_bands"
+            events[1]["payload"]["exit_reason"] = "ttl_trading_days"
+            _write_jsonl(logs / "paper" / "paper-ant.jsonl", events)
+
+            r = _client(ColonyContext(logs_root=logs)).get("/api/journal/top-trades")
+
+        trade = r.json()["trades"][0]
+        assert trade["exit_reason"] == "TTL_EXPIRED"
+        assert "Prijs raakte BB" in trade["why"]
+        assert "trade te traag, geen richting" in trade["why"]
 
 
 # ---------------------------------------------------------------------------

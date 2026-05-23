@@ -905,11 +905,16 @@
       margin-bottom: 5px;
     }
 
+    .pos-cards { display: grid; gap: 7px; }
     .pos-entry {
-      padding: 5px 0 7px;
-      border-bottom: .5px solid var(--border-soft);
+      padding: 8px;
+      border: 1px solid var(--border-soft);
+      border-left: 3px solid #9ca3af;
+      border-radius: 7px;
+      background: #fff;
     }
-    .pos-entry:last-child { border-bottom: none; }
+    .pos-entry.pos-positive { border-left-color: #1D9E75; }
+    .pos-entry.pos-negative { border-left-color: #E24B4A; }
 
     .pos-hdr {
       display: flex; align-items: baseline;
@@ -927,6 +932,16 @@
       margin-bottom: 5px;
       display: flex; flex-wrap: wrap; align-items: center; gap: 4px;
     }
+    .pos-detail-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(155px, 1fr));
+      gap: 3px 8px;
+      margin: 5px 0;
+      font-size: 9px;
+      color: var(--muted);
+      font-variant-numeric: tabular-nums;
+    }
+    .pos-detail-grid strong { color: var(--text); font-weight: 700; }
 
     .pos-arrow { color: var(--faint); }
     .pos-pnl-pos { color: var(--pnl-pos); font-weight: 700; }
@@ -1997,6 +2012,30 @@ function fPosPnl(eur, pct) {
   return `<span class="${cls}">${sign}€ ${abs}${pctTxt}</span>`;
 }
 
+function fSignedPct(v) {
+  if (v == null) return '—';
+  const n = Number(v);
+  return `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`;
+}
+
+function fPlainPct(v) {
+  if (v == null) return '—';
+  return `${Number(v).toFixed(2)}%`;
+}
+
+function fOpenTs(iso) {
+  if (!iso) return 'tijd onbekend';
+  const d = new Date(iso);
+  return d.toLocaleString('nl-NL', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+}
+
+function fTTL(seconds) {
+  if (seconds == null) return 'TTL onbekend';
+  const h = Math.max(0, Number(seconds) / 3600);
+  if (h >= 48) return `nog ${Math.ceil(h / 24)} dagen`;
+  return `nog ${Math.ceil(h)} uur`;
+}
+
 function renderSltpBar(pos) {
   const progress = pos.sl_tp_progress;
   if (progress == null) return '';
@@ -2017,7 +2056,7 @@ function renderSltpBar(pos) {
   }
 
   const tpLabel = pos.trailing_stop_price != null
-    ? `<span class="sltp-lbl-tp">Dummy TP</span>`
+    ? `<span class="sltp-lbl-tp">TP ${fPosPrice(pos.take_profit_price)}</span>`
     : `<span class="sltp-lbl-tp">TP ${fPosPrice(pos.take_profit_price)}</span>`;
 
   return `<div class="sltp-wrap">
@@ -2048,25 +2087,30 @@ function renderOpenPositions() {
   const rows = list.map(pos => {
     const side     = (pos.side || 'long').toUpperCase();
     const strategy = pos.strategy_type ? ` · ${pos.strategy_type}` : '';
-    const age      = fAge(pos.age_seconds);
     const sltpBar  = renderSltpBar(pos);
-    const arrow    = '<span class="pos-arrow">→</span>';
-    const curHtml  = pos.current_price != null
-      ? `${arrow} <span style="color:var(--text);font-weight:600">${fPosPrice(pos.current_price)}</span>`
-      : '';
+    const pnlClass = (pos.pnl_eur || 0) > 0 ? 'pos-positive' : (pos.pnl_eur || 0) < 0 ? 'pos-negative' : '';
+    const current = pos.current_price != null ? fPosPrice(pos.current_price) : 'prijs onbekend';
 
-    return `<div class="pos-entry">
+    return `<div class="pos-entry ${pnlClass}">
       <div class="pos-hdr">
         <div>
           <span class="pos-sym">${pos.symbol}</span>
           <span class="pos-meta">${side}${strategy}</span>
         </div>
-        <span class="pos-age">${age}</span>
+        <span class="pos-age">${fTTL(pos.ttl_remaining_seconds)}</span>
       </div>
       <div class="pos-prices">
-        <span>${fPosPrice(pos.entry_price)}</span>
-        ${curHtml}
-        <span style="margin-left:4px">${fPosPnl(pos.pnl_eur, pos.pnl_pct)}</span>
+        <span>Ingezet: <strong>${fPosPrice(pos.invested_eur)}</strong></span>
+        <span>Entry: <strong>${fPosPrice(pos.entry_price)}</strong></span>
+        <span>${fOpenTs(pos.opened_at)}</span>
+      </div>
+      <div class="pos-detail-grid">
+        <span>Stop-loss: <strong>${fPosPrice(pos.stop_loss_price)} (${fSignedPct(pos.stop_loss_pct)})</strong></span>
+        <span>Take-profit: <strong>${fPosPrice(pos.take_profit_price)} (${fSignedPct(pos.take_profit_pct)})</strong></span>
+        <span>Huidige prijs: <strong>${current}</strong></span>
+        <span>${fPosPnl(pos.pnl_eur, pos.pnl_pct)}</span>
+        <span>Afstand tot SL: <strong>${fPlainPct(pos.distance_to_sl_pct)}</strong></span>
+        <span>Afstand tot TP: <strong>${fPlainPct(pos.distance_to_tp_pct)}</strong></span>
       </div>
       ${sltpBar}
     </div>`;
@@ -2080,7 +2124,7 @@ function renderOpenPositions() {
 
   slot.innerHTML = `<div class="pos-section">
     <div class="pos-section-title">${list.length} open positie${list.length !== 1 ? 's' : ''}</div>
-    ${rows}
+    <div class="pos-cards">${rows}</div>
     ${totalHtml}
   </div>`;
 }
