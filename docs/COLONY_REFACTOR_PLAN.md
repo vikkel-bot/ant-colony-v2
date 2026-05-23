@@ -1,17 +1,10 @@
 # Colony Refactor Plan — Mei 2026
 
-Prompt-context:
-
-TAAK: Maak `docs/COLONY_REFACTOR_PLAN.md` met de structurele aanpak.
-Maak een nieuw document `docs/COLONY_REFACTOR_PLAN.md` met onderstaande inhoud.
-Geen bestaande documenten aanpassen — dit is een nieuw, separaat plan.
-
 ## Context
 
 De colony werkt technisch (`RUNNING_GREEN`, paper trades worden geopend en gesloten),
-maar Vik kan niet leren van het systeem omdat het een black box is. Vier structurele
-problemen zijn geïdentificeerd op 22 mei 2026 die niet met quick fixes opgelost
-moeten worden.
+maar Vik moet ook kunnen leren van het systeem. Dit plan houdt de structurele
+verbeteringen bij en voorkomt dat we terugvallen in losse quick fixes.
 
 ## Niet-onderhandelbare principes
 
@@ -22,67 +15,92 @@ moeten worden.
 4. **Dashboard krijgt eigen testdekking** — minimaal één snapshot-test per view
 5. **Geen v3** — de codebase is solide, de problemen zijn architectureel
 
-## Drie sessies, in deze volgorde
+## Voltooide Sessies
 
-### Sessie A — Pool Reset (eerst)
+### Sessie A — Pool Reset ✅
 
-**Probleem:** Queen's top-3 toont al 2 maanden dezelfde strategieën
-(`rsi_based`, `sma_crossover`, `bollinger_bands`) ondanks dat deze zijn uitgeschakeld.
-Oorzaak: 25.000+ historische kandidaten in research-pool die nooit zijn opgeschoond.
+Commit: `fc05c4b`
 
-**Acceptatiecriteria:**
+Status:
 
-- Alle research-logs van vóór 21 mei 2026 verplaatst naar `ANT_LOGS/archive/`
-- Queen leest alleen actuele research-pool
-- Top-3 op dashboard toont nu `volatility_squeeze` of `mean_reversion`
-- `scripts/reset_research_pool.py` bestaat en is idempotent
-- Test bevestigt dat reset script geen actuele data verwijdert
-- Backup-mechanisme: archive is reversible
+- 25.043 historische kandidaten gearchiveerd
+- Queen toont nu `volatility_squeeze` als #1
+- `scripts/reset_research_pool.py` gebouwd
+- Reset-script is idempotent en reversible
+- Backup-mechanisme via archive aanwezig
 
-### Sessie B — Dashboard Redesign
+### Sessie B — Dashboard Redesign ✅
 
-**Probleem:** Dashboard is statusscherm in plaats van leerinstrument.
+Commits: `c08e65c`, `3c73399`
 
-- Drie ongebruikte L1/L2/L3 knoppen
-- Paper diagnostiek toont alleen aggregaten, geen "waarom"
-- Positie-balkjes met PnL-indicatoren zijn verdwenen (regressie)
-- Watchtower signaal-status onduidelijk (laatste veto vs heartbeat)
+Status:
 
-**Aanpak:**
+- L1/L2/L3 knoppen verwijderd
+- `/journal` route toegevoegd met top-10 gesloten trades
+- Operator override paneel toegevoegd
+- Operator override kleuren:
+  - groen = voorkeur
+  - rood = vermijd
+  - grijs = neutraal
+- Operator override gewichten vervallen automatisch na 5 dagen
+- Positie-balkjes met PnL-indicatoren hersteld
+- Watchtower toont nu aparte heartbeat- en signaal-tijdstempel
+- Dashboard-regressietests toegevoegd
 
-1. Eerst ontwerp op papier — wat moet erin, wat moet eruit
-2. Pas dan bouwen
-3. Visuele regressie-test toevoegen
+## Extra Fixes Buiten Sessies
 
-**Acceptatiecriteria:**
+Voltooide technische schuld:
 
-- L1/L2/L3 knoppen verwijderd of functioneel gemaakt
-- Positie-balkjes met PnL terug zichtbaar
-- Watchtower toont aparte heartbeat- en signaal-tijdstempel
-- Minimaal één snapshot-test in `tests/test_dashboard_*`
+- StrategyPromoter warning verwijderd (`66a243b`)
+- Watchtower heartbeat toegevoegd (`66a243b`)
+- Colony draait als Windows Service via NSSM: `AntColony`
+- Watchtower draait als Windows Service via NSSM: `AntWatchtower`
+- Beide services starten automatisch bij reboot
+- Beide services herstarten automatisch na crash
+- Beheer via:
+
+```powershell
+C:\Trading\nssm.exe restart "AntColony"
+```
+
+Belangrijk na elke `git pull` op PC2:
+
+```powershell
+C:\Trading\nssm.exe restart "AntColony"
+```
+
+Voer dit uit in een administrator PowerShell.
+
+## Nog Te Doen
 
 ### Sessie C — Trade Journal
 
-**Probleem:** Vik kan niet leren omdat trades als getallen worden getoond,
-niet als verhalen. Geen "hypothesis vs werkelijkheid" inzicht.
+Probleem:
 
-**Aanpak:**
+De `/journal` route bestaat, maar de trade-verhalen zijn nog niet volledig
+leerbaar. De huidige "waarom" zin is nog generiek, vooral omdat historische
+trades vaak geen volledig `regime` en `strategy_type` veld bevatten.
 
-Aparte view die elke gesloten trade toont als één leesbare regel:
+Nog te bouwen:
 
-- Welke ant + strategie
-- Entry-hypothesis
-- Wat Queen's regime was
-- Exit-reden + interpretatie: klopte de hypothesis?
+- Betere "waarom" zin op basis van complete trade-context
+- Filtering per `strategy_type`
+- Filtering per `biome`
+- Filtering per `exit_reason`
+- Export naar markdown
+- Export naar CSV
 
-**Acceptatiecriteria:**
+Acceptatiecriteria:
 
-- Nieuwe route `/journal` in dashboard
-- Per trade één regel met volledige narrative
-- Filtering per `strategy_type`, `biome`, `exit_reason`
-- Export naar markdown/CSV mogelijk
+- Per trade één leesbare narrative
+- Entry-hypothesis zichtbaar
+- Queen-regime bij entry zichtbaar als data beschikbaar is
+- Exit-reden vertaald naar interpretatie
+- Filters werken zonder dashboard-crash bij lege data
+- Markdown/CSV export werkt
+- Regressietests toegevoegd
 
-## Werkwijze per sessie
+## Werkwijze Per Sessie
 
 1. Start sessie met expliciete verwijzing naar dit document
 2. Acceptatiecriteria bovenaan elke Codex/Claude Code prompt
@@ -90,7 +108,7 @@ Aparte view die elke gesloten trade toont als één leesbare regel:
 4. Sessie eindigt pas als alle acceptatiecriteria groen zijn
 5. Volgende sessie start nooit voordat vorige afgerond is
 
-## Wat we niet meer doen
+## Wat We Niet Meer Doen
 
 - Reactief debuggen zonder root cause analyse
 - Features stapelen op kapotte fundamenten
@@ -98,7 +116,7 @@ Aparte view die elke gesloten trade toont als één leesbare regel:
 - Parallel werken aan meerdere problemen
 - Dashboard-wijzigingen zonder visuele check
 
-## Toetssteen bij elke nieuwe sessie
+## Toetssteen Bij Elke Nieuwe Sessie
 
 Voordat we beginnen vraagt Claude:
 
@@ -107,3 +125,16 @@ Voordat we beginnen vraagt Claude:
 3. Is dit een fundamenteel probleem of een symptoom?
 
 Als één van deze drie "nee" is, stoppen we.
+
+## Operationele Herinnering
+
+- Eén probleem tegelijk
+- Elke fix krijgt een regressie-test
+- Sessie eindigt pas als acceptatiecriteria groen zijn
+- Na `git pull` altijd herstarten:
+
+```powershell
+C:\Trading\nssm.exe restart "AntColony"
+```
+
+Doe dit in administrator PowerShell.
