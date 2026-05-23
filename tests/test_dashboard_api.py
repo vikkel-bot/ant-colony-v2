@@ -200,6 +200,12 @@ class TestDashboardRedesignStatic:
         assert "pos-pnl-pos" in html
         assert "pos-pnl-neg" in html
 
+    def test_watchtower_panel_shows_signal_and_heartbeat_timestamps(self):
+        html = _static_index_text()
+        assert "Laatste signaal" in html
+        assert "Laatste heartbeat" in html
+        assert "watchtower_heartbeat" in html
+
     def test_operator_override_buttons_are_color_coded(self):
         html = _static_index_text()
         assert ".override-btn.prefer" in html
@@ -360,6 +366,42 @@ class TestStatusEndpoint:
         signal_path.write_text("", encoding="utf-8")
 
         assert _derive_watchtower_status(tmp_path) in {"ONLINE", "STALE"}
+
+    def test_watchtower_status_prefers_heartbeat_file(self, monkeypatch, tmp_path: Path):
+        monkeypatch.setenv("WATCHTOWER_ENABLED", "true")
+        heartbeat_path = tmp_path / "queen" / "watchtower_heartbeat.json"
+        heartbeat_path.parent.mkdir(parents=True)
+        heartbeat_path.write_text(
+            json.dumps({
+                "last_heartbeat": datetime.now(tz=timezone.utc).isoformat(),
+                "status": "alive",
+                "signals_today": 0,
+                "last_signal_at": None,
+            }),
+            encoding="utf-8",
+        )
+
+        assert _derive_watchtower_status(tmp_path) == "ONLINE"
+
+    def test_queen_status_returns_watchtower_heartbeat(self, tmp_path: Path):
+        heartbeat_path = tmp_path / "queen" / "watchtower_heartbeat.json"
+        heartbeat_path.parent.mkdir(parents=True)
+        heartbeat_path.write_text(
+            json.dumps({
+                "last_heartbeat": "2026-05-23T15:00:00Z",
+                "status": "alive",
+                "signals_today": 3,
+                "last_signal_at": "2026-05-23T07:33:00Z",
+            }),
+            encoding="utf-8",
+        )
+
+        r = _client(ColonyContext(logs_root=tmp_path)).get("/api/queen/status")
+        d = r.json()
+
+        assert r.status_code == 200
+        assert d["watchtower_heartbeat"]["status"] == "alive"
+        assert d["watchtower_heartbeat"]["signals_today"] == 3
 
     def test_status_stale_tick_has_specific_warning(self):
         scheduler = _make_scheduler()

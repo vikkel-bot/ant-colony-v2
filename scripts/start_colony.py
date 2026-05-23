@@ -801,11 +801,6 @@ def main() -> None:
         logs_root=logs_root,
     )
     log.info("Queen aangemaakt — kapitaal: €%.2f", capital)
-    log.warning(
-        "StrategyPromoter is niet gekoppeld aan start_colony runtime — "
-        "RESEARCH kandidaten worden niet automatisch via promoter gepromoveerd."
-    )
-
     # --- Stap 6b: StrategyPromoter ---
     try:
         from ant_colony.colony.promoter import StrategyPromoter as _StrategyPromoter

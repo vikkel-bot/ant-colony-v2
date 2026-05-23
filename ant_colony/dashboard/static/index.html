@@ -1792,8 +1792,12 @@ function renderQueen() {
 
   const wt24 = q.watchtower_signals_24h || {};
   const wtLast = q.watchtower_last_signal || null;
+  const wtHeartbeat = q.watchtower_heartbeat || null;
   const wtLastTxt = wtLast && wtLast.timestamp
     ? `${fTS(wtLast.timestamp) || wtLast.timestamp} · ${wtLast.asset || '—'}`
+    : '—';
+  const wtHeartbeatTxt = wtHeartbeat && wtHeartbeat.last_heartbeat
+    ? `${fTS(wtHeartbeat.last_heartbeat) || wtHeartbeat.last_heartbeat} · ${wtHeartbeat.status || 'unknown'}`
     : '—';
   const wtScore = wtLast && wtLast.entry_score != null ? Number(wtLast.entry_score).toFixed(2) : '0';
   const wtRegime = wtLast && wtLast.regime ? wtLast.regime : 'unknown';
@@ -1804,6 +1808,7 @@ function renderQueen() {
     <div class="queen-dec-ts">Watchtower → Queen</div>
     <div style="display:grid;grid-template-columns:1fr auto;gap:3px 8px;font-size:10px;color:var(--muted)">
       <span>Laatste signaal</span><strong style="color:var(--text);font-weight:600">${wtLastTxt}</strong>
+      <span>Laatste heartbeat</span><strong style="color:var(--text);font-weight:600">${wtHeartbeatTxt}</strong>
       <span>24u ontvangen</span><strong style="color:var(--text);font-weight:600">${wt24.received || 0} · ${wt24.accepted || 0} gebruikt · ${wt24.rejected || 0} genegeerd</strong>
       <span>Context</span><strong style="color:var(--text);font-weight:600">regime=${wtRegime} · score=${wtScore} · risk_flags=${wtFlags}</strong>
     </div>

@@ -111,8 +111,29 @@ def test_fetch_candles_paginates_when_first_batch_hits_bitvavo_limit() -> None:
 
 
 def test_fetch_candles_uses_days_cutoff() -> None:
-    old = _candle(-240, close=90.0)
-    recent = _candle(-12, close=100.0)
+    now = datetime.now(timezone.utc)
+    old = MarketData(
+        symbol="BTC-EUR",
+        timeframe="1h",
+        timestamp=now - timedelta(days=10),
+        open=90.0,
+        high=91.0,
+        low=89.0,
+        close=90.0,
+        volume=100.0,
+        biome_id="crypto",
+    )
+    recent = MarketData(
+        symbol="BTC-EUR",
+        timeframe="1h",
+        timestamp=now - timedelta(hours=12),
+        open=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.0,
+        volume=100.0,
+        biome_id="crypto",
+    )
 
     class Adapter:
         def get_candles(self, symbol, timeframe, limit=1440, end_ms=None):

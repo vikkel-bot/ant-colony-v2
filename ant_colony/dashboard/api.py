@@ -439,6 +439,17 @@ def _derive_watchtower_status(logs_root: Path | None) -> str:
     if logs_root is None:
         return "UNKNOWN"
     try:
+        heartbeat = _read_watchtower_heartbeat(logs_root)
+        if heartbeat:
+            heartbeat_ts = _parse_ts(heartbeat.get("last_heartbeat"))
+            if heartbeat_ts is not None:
+                age = (datetime.now(tz=timezone.utc) - heartbeat_ts).total_seconds()
+                if age <= 2 * max(60, _env_int("WATCHTOWER_POLL_INTERVAL", 300)):
+                    return "ONLINE"
+                if age <= 3600:
+                    return "STALE"
+                return "OFFLINE"
+
         signal_path = logs_root / "watchtower" / "signals.jsonl"
         if not signal_path.exists():
             return "STALE"
@@ -798,6 +809,7 @@ class QueenStatusResponse(BaseModel):
     top_strategies: list[QueenStrategyEntry]
     last_decision: dict[str, Any] | None
     watchtower_last_signal: dict[str, Any] | None = None
+    watchtower_heartbeat: dict[str, Any] | None = None
     watchtower_signals_24h: dict[str, int] = Field(default_factory=dict)
     watchtower_rejection_reasons: dict[str, int] = Field(default_factory=dict)
 
@@ -2271,6 +2283,7 @@ def create_router(ctx: ColonyContext) -> APIRouter:
             top_strategies=[QueenStrategyEntry(**s) for s in data["top_strategies"]],
             last_decision=data["last_decision"],
             watchtower_last_signal=wt_summary.get("last_signal"),
+            watchtower_heartbeat=wt_summary.get("heartbeat"),
             watchtower_signals_24h={
                 "received": int(wt_summary.get("received_24h") or 0),
                 "accepted": int(wt_summary.get("accepted_24h") or 0),
@@ -4738,6 +4751,7 @@ def _read_watchtower_stats(logs_root: Path) -> dict:
 def _empty_watchtower_received_summary() -> dict[str, Any]:
     return {
         "last_signal": None,
+        "heartbeat": None,
         "received_24h": 0,
         "accepted_24h": 0,
         "rejected_24h": 0,
@@ -4763,6 +4777,17 @@ def _empty_watchtower_received_summary() -> dict[str, Any]:
 
 def _read_queen_watchtower_state(logs_root: Path) -> dict[str, Any] | None:
     path = logs_root / "queen" / "watchtower_state.json"
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _read_watchtower_heartbeat(logs_root: Path) -> dict[str, Any] | None:
+    path = logs_root / "queen" / "watchtower_heartbeat.json"
     if not path.exists():
         return None
     try:
@@ -4939,6 +4964,7 @@ def _read_watchtower_received_signals(logs_root: Path, limit: int = 50) -> dict[
     signal_path = logs_root / "watchtower" / "signals.jsonl"
     summary = _empty_watchtower_received_summary()
     queen_wt_state = _read_queen_watchtower_state(logs_root)
+    summary["heartbeat"] = _read_watchtower_heartbeat(logs_root)
 
     now = datetime.now(tz=timezone.utc)
     cutoff = now - timedelta(hours=24)

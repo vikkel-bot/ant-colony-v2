@@ -111,6 +111,10 @@ class WatchtowerAnt:
 
         self._log = logging.getLogger(f"ant.watchtower.{ant_id[:8]}")
         self._out_dir = (Path(logs_root) / "watchtower") if logs_root else None
+        self._queen_dir = (Path(logs_root) / "queen") if logs_root else None
+        self._heartbeat_signal_date: str | None = None
+        self._heartbeat_signal_keys: set[str] = set()
+        self._last_signal_at: str | None = None
 
     # ------------------------------------------------------------------
     # Publieke interface
@@ -148,11 +152,13 @@ class WatchtowerAnt:
                 self._client.base_url,
             )
             self._write_veto(now, False, "watchtower_offline")
+            self._write_status_heartbeat(now, [])
             self._send_heartbeat(now, "tick:offline")
             return
 
         received = len(signals)
         unique_signals, duplicate_count = self._dedupe_signals(signals)
+        self._write_status_heartbeat(now, unique_signals)
         veto, veto_reason, veto_signal = self._evaluate_veto(unique_signals)
         self._write_veto(now, veto, veto_reason, veto_signal)
         filtered: list[dict] = []
@@ -625,6 +631,52 @@ class WatchtowerAnt:
             )
         except Exception:
             self._log.exception("WatchtowerAnt heartbeat mislukt — poll-loop gaat door")
+
+    def _write_status_heartbeat(self, now: datetime, signals: list[dict]) -> None:
+        """Schrijf een klein statusbestand zodat het dashboard stilte van uitval kan scheiden."""
+        if self._queen_dir is None:
+            return
+
+        today = now.date().isoformat()
+        if self._heartbeat_signal_date != today:
+            self._heartbeat_signal_date = today
+            self._heartbeat_signal_keys.clear()
+            self._last_signal_at = None
+
+        for signal in signals:
+            if not isinstance(signal, dict):
+                continue
+            key = str(
+                signal.get("signal_id")
+                or signal.get("id")
+                or "|".join(str(part) for part in _signal_dedupe_key(signal))
+            )
+            if key:
+                self._heartbeat_signal_keys.add(key)
+            signal_ts = (
+                signal.get("timestamp")
+                or signal.get("created_at")
+                or signal.get("published_at")
+                or now.isoformat()
+            )
+            parsed = _parse_signal_datetime(signal_ts)
+            if parsed is not None:
+                current = _parse_signal_datetime(self._last_signal_at) if self._last_signal_at else None
+                if current is None or parsed >= current:
+                    self._last_signal_at = parsed.isoformat()
+
+        payload = {
+            "last_heartbeat": now.isoformat(),
+            "status": "alive",
+            "signals_today": len(self._heartbeat_signal_keys),
+            "last_signal_at": self._last_signal_at,
+        }
+        path = self._queen_dir / "watchtower_heartbeat.json"
+        try:
+            self._queen_dir.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        except OSError:
+            self._log.exception("Kon Watchtower heartbeat niet schrijven: %s", path)
 
 
 def _safe_float(value: object) -> float:

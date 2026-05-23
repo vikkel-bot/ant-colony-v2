@@ -299,6 +299,10 @@ class TestOffline:
         ant = _make_ant(tmp_path, client)
         ant._tick()
         assert not (tmp_path / "watchtower" / "signals.jsonl").exists()
+        heartbeat = json.loads((tmp_path / "queen" / "watchtower_heartbeat.json").read_text(encoding="utf-8"))
+        assert heartbeat["status"] == "alive"
+        assert heartbeat["signals_today"] == 0
+        assert heartbeat["last_signal_at"] is None
 
     def test_online_but_empty_signals_logs_zero(self, tmp_path):
         """Watchtower online maar geen signalen — schrijft snapshot met 0 ontvangen."""
@@ -316,6 +320,30 @@ class TestOffline:
         rec = json.loads(log_path.read_text(encoding="utf-8").strip())
         assert rec["received"] == 0
         assert rec["passed_filter"] == 0
+        heartbeat = json.loads((tmp_path / "queen" / "watchtower_heartbeat.json").read_text(encoding="utf-8"))
+        assert heartbeat["status"] == "alive"
+        assert heartbeat["signals_today"] == 0
+        assert heartbeat["last_heartbeat"]
+
+    def test_tick_writes_watchtower_heartbeat_with_signal_counts(self, tmp_path):
+        signal = {
+            "signal_id": "sig-heartbeat",
+            "asset": "AAPL",
+            "direction": "LONG",
+            "entry_score": 0.8,
+            "confidence": 0.7,
+            "risk_flags": [],
+            "timestamp": "2026-05-23T07:33:00Z",
+        }
+        client = _make_client(healthy=True, signals=[signal])
+        ant = _make_ant(tmp_path, client)
+
+        ant._tick()
+
+        heartbeat = json.loads((tmp_path / "queen" / "watchtower_heartbeat.json").read_text(encoding="utf-8"))
+        assert heartbeat["status"] == "alive"
+        assert heartbeat["signals_today"] == 1
+        assert heartbeat["last_signal_at"] == "2026-05-23T07:33:00+00:00"
 
     def test_tick_sends_scheduler_heartbeat(self, tmp_path):
         client = _make_client(healthy=True, signals=[])
