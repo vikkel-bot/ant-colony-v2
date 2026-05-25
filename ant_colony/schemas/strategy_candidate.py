@@ -38,6 +38,7 @@ class BacktestResults(BaseModel):
     max_drawdown_pct: float | None = None
     total_trades: int | None = None
     win_rate: float | None = None
+    total_fees_pct: float = 0.0      # cumulatieve fee+slippage drag over alle trades
     avg_win: float | None = None        # gemiddeld rendement per winnende trade
     avg_loss: float | None = None       # gemiddeld verlies per verliezende trade (positief getal)
     best_streak: int | None = None      # langste reeks winstgevende trades

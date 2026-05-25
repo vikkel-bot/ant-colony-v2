@@ -52,6 +52,8 @@ class SweepRow:
     win_rate: float | None
     max_drawdown: float | None
     profit_factor: float | None
+    total_return_pct: float | None
+    total_fees_pct: float
     result: Any
 
 
@@ -85,18 +87,26 @@ def _run_variant(
     slow: int,
     take_profit_pct: float,
     stop_loss_pct: float,
+    fee_pct: float | None = None,
+    slippage_pct: float | None = None,
 ) -> SweepRow:
     old_fast = backtester_module._SMA_FAST
     old_slow = backtester_module._SMA_SLOW
     try:
         backtester_module._SMA_FAST = fast
         backtester_module._SMA_SLOW = slow
+        kwargs: dict[str, Any] = {}
+        if fee_pct is not None:
+            kwargs["fee_pct"] = fee_pct
+        if slippage_pct is not None:
+            kwargs["slippage_pct"] = slippage_pct
         config = BacktestConfig(
             direction="long",
             take_profit_pct=take_profit_pct,
             stop_loss_pct=stop_loss_pct,
             max_bars_held=10,
             strategy_type="sma_crossover",
+            **kwargs,
         )
         result = Backtester().run(bars, config)
     finally:
@@ -113,6 +123,8 @@ def _run_variant(
         win_rate=result.win_rate,
         max_drawdown=result.max_drawdown_pct,
         profit_factor=_profit_factor(result),
+        total_return_pct=result.extra.get("total_return_pct"),
+        total_fees_pct=result.total_fees_pct,
         result=result,
     )
 
@@ -127,7 +139,7 @@ def _rank_key(row: SweepRow) -> tuple[float, int, float]:
 def _fee_slippage_visibility(result: Any) -> str:
     payload = result.model_dump()
     text = json.dumps(_json_safe(payload), sort_keys=True).lower()
-    markers = ("fee", "fees", "fee_cost", "slippage", "cost")
+    markers = ("fee", "fees", "fee_cost", "total_fees_pct", "slippage", "cost")
     found = [marker for marker in markers if marker in text]
     if not found:
         return "geen fees/slippage in resultaat zichtbaar"
@@ -140,6 +152,7 @@ def main() -> int:
     print(f"Periode totaal: {FROM_DT.isoformat()} -> {TO_DT.isoformat()}")
     print(f"Train: 2021-01-01 -> 2022-12-31")
     print(f"Test:  2023-01-01 -> 2024-12-31")
+    print("Kostenmodel: BacktestConfig defaults = fee_pct=0.0025, slippage_pct=0.001 per kant")
     print(f"Loader: ant_colony.lab.edge_audit.load_bars_for_asset")
     print(f"Cache: {CACHE_DIR}")
 
@@ -186,6 +199,24 @@ def main() -> int:
         take_profit_pct=best.take_profit_pct,
         stop_loss_pct=best.stop_loss_pct,
     )
+    train_no_costs = _run_variant(
+        train_bars,
+        fast=best.fast,
+        slow=best.slow,
+        take_profit_pct=best.take_profit_pct,
+        stop_loss_pct=best.stop_loss_pct,
+        fee_pct=0.0,
+        slippage_pct=0.0,
+    )
+    test_no_costs = _run_variant(
+        test_bars,
+        fast=best.fast,
+        slow=best.slow,
+        take_profit_pct=best.take_profit_pct,
+        stop_loss_pct=best.stop_loss_pct,
+        fee_pct=0.0,
+        slippage_pct=0.0,
+    )
     degradation = None
     if best.sharpe is not None and test.sharpe is not None:
         degradation = best.sharpe - test.sharpe
@@ -196,7 +227,8 @@ def main() -> int:
         print(
             f"{idx:02d}. SMA {row.fast}/{row.slow} TP={row.take_profit_pct:.2f} "
             f"SL={row.stop_loss_pct:.2f} | sharpe={row.sharpe} trades={row.trades} "
-            f"win_rate={row.win_rate} max_dd={row.max_drawdown} pf={row.profit_factor}"
+            f"win_rate={row.win_rate} max_dd={row.max_drawdown} pf={row.profit_factor} "
+            f"return={row.total_return_pct} fees={row.total_fees_pct}"
         )
 
     print("")
@@ -210,6 +242,29 @@ def main() -> int:
     print(f"Degradatie (train - test): {degradation}")
     print(f"Train trades/winrate/max_dd/pf: {best.trades} / {best.win_rate} / {best.max_drawdown} / {best.profit_factor}")
     print(f"Test trades/winrate/max_dd/pf: {test.trades} / {test.win_rate} / {test.max_drawdown} / {test.profit_factor}")
+    print(f"Train total_return/fees: {best.total_return_pct} / {best.total_fees_pct}")
+    print(f"Test total_return/fees: {test.total_return_pct} / {test.total_fees_pct}")
+
+    print("")
+    print("=== FEE IMPACT (zelfde params, kosten versus fee_pct=0/slippage_pct=0) ===")
+    print(f"Train Sharpe zonder kosten: {train_no_costs.sharpe}")
+    print(f"Train Sharpe met kosten: {best.sharpe}")
+    print(
+        "Train Sharpe impact: "
+        f"{None if train_no_costs.sharpe is None or best.sharpe is None else train_no_costs.sharpe - best.sharpe}"
+    )
+    print(f"Test Sharpe zonder kosten: {test_no_costs.sharpe}")
+    print(f"Test Sharpe met kosten: {test.sharpe}")
+    print(
+        "Test Sharpe impact: "
+        f"{None if test_no_costs.sharpe is None or test.sharpe is None else test_no_costs.sharpe - test.sharpe}"
+    )
+    print(f"Test total return zonder kosten: {test_no_costs.total_return_pct}")
+    print(f"Test total return met kosten: {test.total_return_pct}")
+    print(
+        "Test total return impact: "
+        f"{None if test_no_costs.total_return_pct is None or test.total_return_pct is None else test_no_costs.total_return_pct - test.total_return_pct}"
+    )
 
     print("")
     print("=== FEES / SLIPPAGE ZICHTBAARHEID ===")
@@ -229,6 +284,15 @@ def main() -> int:
     payload["train_sharpe"] = best.sharpe
     payload["test_sharpe"] = test.sharpe
     payload["sharpe_degradation_train_minus_test"] = degradation
+    payload["fee_impact"] = {
+        "train_sharpe_no_costs": train_no_costs.sharpe,
+        "train_sharpe_with_costs": best.sharpe,
+        "test_sharpe_no_costs": test_no_costs.sharpe,
+        "test_sharpe_with_costs": test.sharpe,
+        "test_total_return_no_costs": test_no_costs.total_return_pct,
+        "test_total_return_with_costs": test.total_return_pct,
+        "test_total_fees_pct": test.total_fees_pct,
+    }
     print(json.dumps(_json_safe(payload), indent=2, sort_keys=True))
     return 0
 

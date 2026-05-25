@@ -13,7 +13,7 @@ Werking:
 Regels:
   - Volledig deterministisch — geen random elementen
   - Alleen sluitingsprijzen gebruikt voor entry en exit beslissingen
-  - Geen kosten, geen slippage (paper-equivalent)
+  - Fee en slippage worden toegepast op effectieve entry/exit-prijzen
   - Minimaal 2 bars vereist voor minstens één volledige trade
   - Stale bars (close ≤ 0) worden overgeslagen
   - Geen code wordt uitgevoerd bij import (P7)
@@ -80,12 +80,16 @@ class BacktestConfig:
     max_bars_held:    Maximaal aantal bars in positie voor TTL-exit (≥ 1)
     strategy_type:    Optioneel — bepaalt entry-logica (sma_crossover, rsi_based,
                       bollinger_bands, momentum, mean_reversion). None = elke bar.
+    fee_pct:          Fee per kant als fractie (0.0025 = 0.25%)
+    slippage_pct:     Slippage per kant als fractie (0.001 = 0.1%)
     """
     direction: str
     take_profit_pct: float
     stop_loss_pct: float
     max_bars_held: int = 10
     strategy_type: str | None = None
+    fee_pct: float = 0.0025
+    slippage_pct: float = 0.001
 
     def __post_init__(self) -> None:
         if self.direction not in ("long", "short"):
@@ -104,6 +108,16 @@ class BacktestConfig:
             raise ValueError(
                 f"max_bars_held must be >= 1, got {self.max_bars_held}"
             )
+        if self.fee_pct < 0:
+            raise ValueError(f"fee_pct must be >= 0, got {self.fee_pct}")
+        if self.slippage_pct < 0:
+            raise ValueError(
+                f"slippage_pct must be >= 0, got {self.slippage_pct}"
+            )
+        if self.fee_pct + self.slippage_pct >= 1.0:
+            raise ValueError(
+                "fee_pct + slippage_pct must be < 1.0 for positive effective prices"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -119,9 +133,9 @@ class Backtester:
       - Exit zodra TP, SL of TTL bereikt is (geëvalueerd op sluitingsprijzen)
       - Na exit: direct herentry op de volgende bar
 
-    PnL berekening:
-      - LONG:  return = (exit − entry) / entry
-      - SHORT: return = (entry − exit) / entry
+    PnL berekening gebruikt effectieve prijzen na fee en slippage:
+      - LONG entry hoger, exit lager
+      - SHORT entry lager, exit hoger
 
     Statistieken:
       - sharpe_ratio:      mean(returns) / std(returns)  — None bij < 2 trades
@@ -170,8 +184,11 @@ class Backtester:
 
         closes: list[float] = [b.close for b in bars]
         trade_returns: list[float] = []
+        gross_trade_returns: list[float] = []
         trade_entry_indices: list[int] = []
         equity: list[float] = [1.0]
+        gross_equity: list[float] = [1.0]
+        total_fee_drag = 0.0
         signal_count = 0
 
         i = 0
@@ -187,10 +204,17 @@ class Backtester:
 
             signal_count += 1
             exit_price, exit_idx = self._find_exit(bars, i, entry_close, config)
-            ret = self._trade_return(entry_close, exit_price, config.direction)
+            effective_entry, effective_exit = self._effective_prices(
+                entry_close, exit_price, config
+            )
+            gross_ret = self._trade_return(entry_close, exit_price, config.direction)
+            ret = self._trade_return(effective_entry, effective_exit, config.direction)
             trade_returns.append(ret)
+            gross_trade_returns.append(gross_ret)
+            total_fee_drag += max(0.0, gross_ret - ret)
             trade_entry_indices.append(i)
             equity.append(equity[-1] * (1.0 + ret))
+            gross_equity.append(gross_equity[-1] * (1.0 + gross_ret))
             i = exit_idx + 1
 
         if st is not None:
@@ -219,11 +243,18 @@ class Backtester:
             max_drawdown_pct=self._max_drawdown(equity),
             total_trades=len(trade_returns),
             win_rate=self._win_rate(trade_returns),
+            total_fees_pct=total_fee_drag,
             avg_win=avg_win,
             avg_loss=avg_loss,
             best_streak=best_streak,
             regime_stats=regime_stats,
             best_regime=best_regime,
+            extra={
+                "total_return_pct": equity[-1] - 1.0,
+                "gross_total_return_pct": gross_equity[-1] - 1.0,
+                "fee_pct_per_side": config.fee_pct,
+                "slippage_pct_per_side": config.slippage_pct,
+            },
         )
 
     # ------------------------------------------------------------------
@@ -283,6 +314,24 @@ class Backtester:
                 entry_price * (1.0 - config.take_profit_pct),
                 entry_price * (1.0 + config.stop_loss_pct),
             )
+
+    @staticmethod
+    def _effective_prices(
+        entry_price: float,
+        exit_price: float,
+        config: BacktestConfig,
+    ) -> tuple[float, float]:
+        """Pas fee en slippage per kant toe op entry en exit."""
+        cost = config.fee_pct + config.slippage_pct
+        if config.direction == "long":
+            return (
+                entry_price * (1.0 + cost),
+                exit_price * (1.0 - cost),
+            )
+        return (
+            entry_price * (1.0 - cost),
+            exit_price * (1.0 + cost),
+        )
 
     # ------------------------------------------------------------------
     # Intern — strategy-specifieke entry logica

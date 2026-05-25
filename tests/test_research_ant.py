@@ -1387,6 +1387,13 @@ class TestCommodityWatchtowerSignals:
             "lean_win_rate": None, "lean_trades": None,
             "lean_status": "unavailable", "lean_reason": "test",
         }
+        ant._backtester = MagicMock()
+        ant._backtester.run.return_value = BacktestResults(
+            sharpe_ratio=0.5,
+            win_rate=0.6,
+            total_trades=20,
+            max_drawdown_pct=0.05,
+        )
 
         with patch.dict(sys.modules, {"yfinance": mock_yf}):
             ant._process_commodity_watchtower_signals()
