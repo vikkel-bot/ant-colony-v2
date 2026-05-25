@@ -222,6 +222,13 @@ class TestDashboardRedesignStatic:
         assert ".override-item.avoid-active" in html
         assert "override-days ${cls}" in html
 
+    def test_disabled_scout_ant_is_excluded_from_warning_banner(self):
+        html = _static_index_text()
+        assert "const _WARNING_EXCLUDED_ANTS = new Set(['scout_ant']);" in html
+        assert "function _isWarningMonitoredAnt(ant)" in html
+        assert "runtimeState === 'disabled' || runtimeState === 'inactive'" in html
+        assert "if (!_isWarningMonitoredAnt(a)) return;" in html
+
 
 # ---------------------------------------------------------------------------
 # TestStatusEndpoint

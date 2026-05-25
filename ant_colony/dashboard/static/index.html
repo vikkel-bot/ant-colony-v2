@@ -1441,6 +1441,18 @@ function render() {
 const _MONITORED_ANTS = new Set([
   'scout_ant','research_ant','paper_ant','strategy_ant','audit_ant','operator_ant',
 ]);
+// Ants die bewust uit de runtime zijn gehaald mogen niet als stale alarmen tonen.
+// /api/status geeft nu geen per-ant disabled vlag terug; deze lijst is de veilige fallback.
+const _WARNING_EXCLUDED_ANTS = new Set(['scout_ant']);
+function _isWarningMonitoredAnt(ant) {
+  const antType = ant && ant.ant_type;
+  if (!_MONITORED_ANTS.has(antType)) return false;
+  const runtimeState = String(
+    (ant && (ant.status || ant.state || ant.runtime_status)) || ''
+  ).toLowerCase();
+  if (runtimeState === 'disabled' || runtimeState === 'inactive') return false;
+  return !_WARNING_EXCLUDED_ANTS.has(antType);
+}
 // Ants die standaard verborgen zijn in Mieren Activiteit
 // (tenzij recent actief — events binnen 15 min)
 const _HIDDEN_ANTS = new Set(['ingestion_ant','claude_ant','execution_ant']);
@@ -1459,7 +1471,7 @@ function renderWarningsBanner() {
   // Trigger 1: gemonitorde ant > 15 min geen events
   const ants = (S.activity && S.activity.ants) || [];
   ants.forEach(a => {
-    if (!_MONITORED_ANTS.has(a.ant_type)) return;
+    if (!_isWarningMonitoredAnt(a)) return;
     const mins = _minsAgo(a.last_seen);
     if (!isFinite(mins) || isNaN(mins)) return;  // geen data → geen waarschuwing
     if (mins > 15) {
