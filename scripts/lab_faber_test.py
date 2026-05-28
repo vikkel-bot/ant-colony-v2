@@ -46,7 +46,7 @@ COST_CONFIG = BacktestConfig(
     take_profit_pct=0.01,
     stop_loss_pct=0.01,
     max_bars_held=1,
-    fee_pct=0.0025,
+    fee_pct=0.0002,
     slippage_pct=0.0010,
 )
 

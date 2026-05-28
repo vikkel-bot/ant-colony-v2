@@ -80,7 +80,7 @@ class BacktestConfig:
     max_bars_held:    Maximaal aantal bars in positie voor TTL-exit (≥ 1)
     strategy_type:    Optioneel — bepaalt entry-logica (sma_crossover, rsi_based,
                       bollinger_bands, momentum, mean_reversion). None = elke bar.
-    fee_pct:          Fee per kant als fractie (0.0025 = 0.25%)
+    fee_pct:          Fee per kant als fractie (0.0002 = 0.02%)
     slippage_pct:     Slippage per kant als fractie (0.001 = 0.1%)
     """
     direction: str
@@ -88,7 +88,7 @@ class BacktestConfig:
     stop_loss_pct: float
     max_bars_held: int = 10
     strategy_type: str | None = None
-    fee_pct: float = 0.0025
+    fee_pct: float = 0.0002
     slippage_pct: float = 0.001
 
     def __post_init__(self) -> None:
