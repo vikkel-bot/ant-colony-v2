@@ -2,8 +2,8 @@
 Isolated lab test for the Liquidity Sweep Sniper rule on BTC-EUR and ETH-EUR.
 
 No colony, order, brain, or live code is imported here. Data is fetched from
-public Binance 4H klines and the script aborts if the required bear windows are
-not available at 4H fidelity.
+public Binance 4H klines. Optional diagnostic windows are skipped per-window
+when full 4H data is unavailable.
 """
 
 from __future__ import annotations
@@ -37,10 +37,16 @@ TAKER_FEE = 0.0025
 TRAIN_FRACTION = 0.60
 REQUIRED_FETCH_START = datetime(2017, 12, 1, tzinfo=timezone.utc)
 MAIN_START = datetime(2018, 1, 1, tzinfo=timezone.utc)
-BEAR_WINDOWS = (
-    ("bear_2018", datetime(2018, 1, 1, tzinfo=timezone.utc), datetime(2019, 1, 1, tzinfo=timezone.utc)),
-    ("bear_2022", datetime(2022, 1, 1, tzinfo=timezone.utc), datetime(2023, 1, 1, tzinfo=timezone.utc)),
+CALENDAR_YEAR_WINDOWS = tuple(
+    (str(year), datetime(year, 1, 1, tzinfo=timezone.utc), datetime(year + 1, 1, 1, tzinfo=timezone.utc))
+    for year in range(2020, 2026)
 )
+REGIME_WINDOWS = (
+    ("BEAR_2018", datetime(2018, 1, 1, tzinfo=timezone.utc), datetime(2019, 1, 1, tzinfo=timezone.utc)),
+    ("BULL_2021", datetime(2021, 1, 1, tzinfo=timezone.utc), datetime(2022, 1, 1, tzinfo=timezone.utc)),
+    ("BEAR_2022", datetime(2022, 1, 1, tzinfo=timezone.utc), datetime(2023, 1, 1, tzinfo=timezone.utc)),
+)
+DIAGNOSTIC_WINDOWS = (*CALENDAR_YEAR_WINDOWS, *REGIME_WINDOWS)
 RESULTS_PATH = Path("results") / "liquidity_sweep_results.csv"
 BINANCE_ENDPOINTS = (
     "https://api.binance.com/api/v3/klines",
@@ -145,25 +151,26 @@ def window_bars(bars: list[Bar], start: datetime, end: datetime) -> list[Bar]:
     return [bar for bar in bars if start <= bar.timestamp < end]
 
 
-def has_required_bear_data(asset: str, bars: list[Bar]) -> tuple[bool, list[str]]:
-    reasons: list[str] = []
+def has_full_window_data(
+    asset: str,
+    bars: list[Bar],
+    label: str,
+    start: datetime,
+    end: datetime,
+) -> tuple[bool, str | None]:
     if not bars:
-        return False, [f"{asset}: no 4H bars returned"]
-    if bars[0].timestamp > REQUIRED_FETCH_START + timedelta_ms(INTERVAL_MS):
-        reasons.append(f"{asset}: first bar {bars[0].timestamp.isoformat()} after warmup start {REQUIRED_FETCH_START.isoformat()}")
-    for label, start, end in BEAR_WINDOWS:
-        subset = window_bars(bars, start, end)
-        expected = int((utc_ms(end) - utc_ms(start)) / INTERVAL_MS)
-        if not subset:
-            reasons.append(f"{asset}: no bars for {label}")
-            continue
-        if subset[0].timestamp > start + timedelta_ms(INTERVAL_MS):
-            reasons.append(f"{asset}: {label} starts late at {subset[0].timestamp.isoformat()}")
-        if subset[-1].timestamp < end - timedelta_ms(INTERVAL_MS):
-            reasons.append(f"{asset}: {label} ends early at {subset[-1].timestamp.isoformat()}")
-        if len(subset) < expected * 0.98:
-            reasons.append(f"{asset}: {label} has {len(subset)} bars, expected about {expected}")
-    return not reasons, reasons
+        return False, f"{asset}: no 4H bars returned"
+    subset = window_bars(bars, start, end)
+    expected = int((utc_ms(end) - utc_ms(start)) / INTERVAL_MS)
+    if not subset:
+        return False, f"{asset}: no bars for {label}"
+    if subset[0].timestamp > start:
+        return False, f"{asset}: {label} starts late at {subset[0].timestamp.isoformat()}"
+    if subset[-1].timestamp < end - timedelta_ms(INTERVAL_MS):
+        return False, f"{asset}: {label} ends early at {subset[-1].timestamp.isoformat()}"
+    if len(subset) < expected:
+        return False, f"{asset}: {label} has {len(subset)} bars, expected {expected}"
+    return True, None
 
 
 def timedelta_ms(value: int):
@@ -353,7 +360,7 @@ def result_row(result: BacktestResult) -> dict[str, str]:
     return {
         "asset": result.asset,
         "regime": result.fee_regime,
-        "train_test": result.split,
+        "window": result.split,
         "start": result.start.isoformat(),
         "end": result.end.isoformat(),
         "trades": str(result.trades),
@@ -376,9 +383,9 @@ def num(value: float | None) -> str:
     return "n/a" if value is None else f"{value:.2f}"
 
 
-def print_table(results: list[BacktestResult]) -> None:
+def print_table(results: list[BacktestResult], title: str = "=== RESULTATEN ===") -> None:
     print("")
-    print("=== RESULTATEN ===")
+    print(title)
     header = (
         f"{'Asset':<8} {'Regime':<11} {'Split':<10} {'Trades':>7} "
         f"{'Win%':>8} {'Avg R':>8} {'Return':>10} {'Sharpe':>8} "
@@ -447,12 +454,11 @@ def print_verdicts(results: list[BacktestResult]) -> None:
         )
 
 
-def run_all_for_asset(asset: str, bars: list[Bar], fee: float, fee_regime: str) -> list[BacktestResult]:
+def run_train_test_for_asset(asset: str, bars: list[Bar], fee: float, fee_regime: str) -> list[BacktestResult]:
     (train_start, train_end), (test_start, test_end) = split_train_test(bars)
     windows = [
         ("train", train_start, train_end),
         ("test", test_start, test_end),
-        *BEAR_WINDOWS,
     ]
     results: list[BacktestResult] = []
     for label, start, end in windows:
@@ -460,6 +466,32 @@ def run_all_for_asset(asset: str, bars: list[Bar], fee: float, fee_regime: str) 
         result.split = label
         results.append(result)
     return results
+
+
+def run_diagnostic_windows_for_asset(
+    asset: str,
+    bars: list[Bar],
+    windows: tuple[tuple[str, datetime, datetime], ...],
+    fee: float,
+    fee_regime: str,
+) -> list[BacktestResult]:
+    results: list[BacktestResult] = []
+    for label, start, end in windows:
+        result = run_strategy(asset, bars, start=start, end=end, fee=fee, fee_regime=fee_regime)
+        result.split = label
+        results.append(result)
+    return results
+
+
+def available_diagnostic_windows(asset: str, bars: list[Bar]) -> tuple[tuple[str, datetime, datetime], ...]:
+    windows: list[tuple[str, datetime, datetime]] = []
+    for label, start, end in DIAGNOSTIC_WINDOWS:
+        ok, reason = has_full_window_data(asset, bars, label, start, end)
+        if not ok:
+            print(f"WINDOW {label} SKIPPED — DATA INSUFFICIENT | {reason}")
+            continue
+        windows.append((label, start, end))
+    return tuple(windows)
 
 
 def main() -> int:
@@ -475,36 +507,31 @@ def main() -> int:
 
     fetch_end = datetime.now(timezone.utc)
     data: dict[str, list[Bar]] = {}
-    insufficiencies: list[str] = []
     for asset, symbol in ASSETS.items():
         try:
             bars = fetch_binance_4h(symbol, REQUIRED_FETCH_START, fetch_end)
         except DataUnavailable as exc:
             bars = []
-            insufficiencies.append(f"{asset}: {exc}")
+            print(f"DATA WARNING | {asset}: {exc}")
         data[asset] = bars
         first = bars[0].timestamp.isoformat() if bars else "n/a"
         last = bars[-1].timestamp.isoformat() if bars else "n/a"
         print(f"Loaded {asset} ({symbol}): bars={len(bars)} first={first} last={last}")
-        ok, reasons = has_required_bear_data(asset, bars)
-        if not ok:
-            insufficiencies.extend(reasons)
-
-    if insufficiencies:
-        print("")
-        print("DATA INSUFFICIENT FOR BEAR WINDOW — TEST ABORTED")
-        print("Geen resultaten geschreven; er wordt niet stilletjes naar dagbars geschakeld.")
-        for reason in insufficiencies:
-            print(f"- {reason}")
-        return 2
 
     results: list[BacktestResult] = []
+    diagnostic_results: list[BacktestResult] = []
     for asset, bars in data.items():
-        results.extend(run_all_for_asset(asset, bars, DEFAULT_MAKER_FEE, "maker"))
-        results.extend(run_all_for_asset(asset, bars, TAKER_FEE, "taker"))
+        if not bars:
+            continue
+        results.extend(run_train_test_for_asset(asset, bars, DEFAULT_MAKER_FEE, "maker"))
+        results.extend(run_train_test_for_asset(asset, bars, TAKER_FEE, "taker"))
+        diagnostic_windows = available_diagnostic_windows(asset, bars)
+        diagnostic_results.extend(run_diagnostic_windows_for_asset(asset, bars, diagnostic_windows, DEFAULT_MAKER_FEE, "maker"))
+        diagnostic_results.extend(run_diagnostic_windows_for_asset(asset, bars, diagnostic_windows, TAKER_FEE, "taker"))
 
     print_table(results)
-    write_results(results)
+    print_table(diagnostic_results, "=== PER-JAAR / REGIME ===")
+    write_results([*results, *diagnostic_results])
     print_verdicts(results)
     return 0
 
