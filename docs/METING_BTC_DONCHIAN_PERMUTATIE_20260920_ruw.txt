@@ -1,0 +1,174 @@
+BTC-EUR: 1440 dagcandles
+gecorrigeerde drempel: 0.002083
+{
+  "label": "VOLLEDIG",
+  "n_bars": 1440,
+  "n_trades": 26,
+  "power_ok": false,
+  "observed": {
+    "mean": 0.03504742195569081,
+    "median": -0.035248048858455505,
+    "hitrate": 0.34615384615384615
+  },
+  "buy_and_hold_total": 2.647697400447863,
+  "n_perm": 10000,
+  "seed": 42,
+  "block": 1,
+  "p_values": {
+    "shuffle": {
+      "mean": 0.23837616238376164,
+      "median": 0.1367863213678632,
+      "hitrate": 0.3360663933606639
+    },
+    "random_entry": {
+      "mean": 0.35056494350564943,
+      "median": 0.999000099990001,
+      "hitrate": 0.9884011598840116
+    }
+  },
+  "null_mean_of_mean": {
+    "shuffle": 0.020915222232786097,
+    "random_entry": 0.027103417727005363
+  },
+  "significant": {
+    "shuffle": {
+      "mean": false,
+      "median": false,
+      "hitrate": false
+    },
+    "random_entry": {
+      "mean": false,
+      "median": false,
+      "hitrate": false
+    }
+  }
+}
+{
+  "label": "DEEL1",
+  "n_bars": 480,
+  "n_trades": 10,
+  "power_ok": false,
+  "observed": {
+    "mean": 0.02655739217365702,
+    "median": -0.04311359567254579,
+    "hitrate": 0.4
+  },
+  "buy_and_hold_total": 0.9238633044494207,
+  "n_perm": 10000,
+  "seed": 42,
+  "block": 1,
+  "p_values": {
+    "shuffle": {
+      "mean": 0.5783421657834217,
+      "median": 0.6172382761723828,
+      "hitrate": 0.5091490850914908
+    },
+    "random_entry": {
+      "mean": 0.6753324667533247,
+      "median": 0.9979002099790021,
+      "hitrate": 0.9411058894110589
+    }
+  },
+  "null_mean_of_mean": {
+    "shuffle": 0.041977386327162934,
+    "random_entry": 0.045697410140191914
+  },
+  "significant": {
+    "shuffle": {
+      "mean": false,
+      "median": false,
+      "hitrate": false
+    },
+    "random_entry": {
+      "mean": false,
+      "median": false,
+      "hitrate": false
+    }
+  }
+}
+{
+  "label": "DEEL2",
+  "n_bars": 480,
+  "n_trades": 8,
+  "power_ok": false,
+  "observed": {
+    "mean": 0.05086654245148749,
+    "median": -0.028878310697192752,
+    "hitrate": 0.25
+  },
+  "buy_and_hold_total": 0.9429246664156942,
+  "n_perm": 10000,
+  "seed": 42,
+  "block": 1,
+  "p_values": {
+    "shuffle": {
+      "mean": 0.28957104289571045,
+      "median": 0.17568243175682433,
+      "hitrate": 0.6642335766423357
+    },
+    "random_entry": {
+      "mean": 0.30196980301969806,
+      "median": 0.9113088691130887,
+      "hitrate": 0.9808019198080192
+    }
+  },
+  "null_mean_of_mean": {
+    "shuffle": 0.033187558301093704,
+    "random_entry": 0.03047546038240207
+  },
+  "significant": {
+    "shuffle": {
+      "mean": false,
+      "median": false,
+      "hitrate": false
+    },
+    "random_entry": {
+      "mean": false,
+      "median": false,
+      "hitrate": false
+    }
+  }
+}
+{
+  "label": "DEEL3",
+  "n_bars": 480,
+  "n_trades": 9,
+  "power_ok": false,
+  "observed": {
+    "mean": -0.02075247976103502,
+    "median": -0.04583210313945478,
+    "hitrate": 0.2222222222222222
+  },
+  "buy_and_hold_total": -0.175730974853145,
+  "n_perm": 10000,
+  "seed": 42,
+  "block": 1,
+  "p_values": {
+    "shuffle": {
+      "mean": 0.6511348865113489,
+      "median": 0.39666033396660333,
+      "hitrate": 0.6207379262073792
+    },
+    "random_entry": {
+      "mean": 0.7073292670732927,
+      "median": 0.9733026697330267,
+      "hitrate": 0.9736026397360263
+    }
+  },
+  "null_mean_of_mean": {
+    "shuffle": -0.005572845438695205,
+    "random_entry": -0.006462306879505666
+  },
+  "significant": {
+    "shuffle": {
+      "mean": false,
+      "median": false,
+      "hitrate": false
+    },
+    "random_entry": {
+      "mean": false,
+      "median": false,
+      "hitrate": false
+    }
+  }
+}
