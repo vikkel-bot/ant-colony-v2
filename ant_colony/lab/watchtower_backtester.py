@@ -273,7 +273,7 @@ def normalize_watchtower_signal(
     linked = tuple(str(x) for x in (raw_payload.get("linked_assets") or []) if x)
 
     return WatchtowerSignal(
-        signal_id=str(raw_payload.get("signal_id") or f"wt-{symbol}-{int(ts.timestamp())}"),
+        signal_id=str(raw_payload.get("signal_id") or raw_payload.get("id") or f"wt-{symbol}-{int(ts.timestamp())}"),
         symbol=symbol,
         direction=direction,
         timestamp=ts,
