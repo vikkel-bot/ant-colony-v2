@@ -9,3 +9,4 @@ python-dotenv>=1.0.0
 yfinance>=0.2.0
 ib_insync>=0.9.70    # primair; event-loop fix in ibkr_adapter.py voor Python 3.12+
 ibapi                # officiële IBKR Python API — fallback als ib_insync problemen geeft
+numpy>=1.26
