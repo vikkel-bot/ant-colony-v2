@@ -96,7 +96,7 @@ def test_fetch_candles_paginates_when_first_batch_hits_bitvavo_limit() -> None:
             })
             return batch1 if end_ms is None else batch2
 
-    candles = _fetch_candles(Adapter(), "BTC-EUR")
+    candles = _fetch_candles(Adapter(), "BTC-EUR", now=datetime(2026, 6, 1, tzinfo=timezone.utc))
 
     assert candles[:len(batch2)] == batch2
     assert candles[len(batch2):] == batch1

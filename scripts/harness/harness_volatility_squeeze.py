@@ -60,14 +60,15 @@ _PARAM_KEYS = {"bb", "kc", "sl", "tp"}
 # Data ophalen
 # ---------------------------------------------------------------------------
 
-def _fetch_candles(adapter: CryptoAdapter, symbol: str, days: int = LOOKBACK_DAYS) -> list:
+def _fetch_candles(adapter: CryptoAdapter, symbol: str, days: int = LOOKBACK_DAYS, now: datetime | None = None) -> list:
     """
     Haal uurlijkse candles op voor symbol.
 
     Bitvavo accepteert maximaal 1440 candles per request; daarom halen we
     desnoods een tweede batch op vóór de oudste candle uit batch 1.
     """
-    cutoff = datetime.now(timezone.utc) - timedelta(days=max(days, 1))
+    reference = now or datetime.now(timezone.utc)
+    cutoff = reference - timedelta(days=max(days, 1))
 
     batch1 = adapter.get_candles(symbol, TIMEFRAME, limit=1440)
     if not batch1:
