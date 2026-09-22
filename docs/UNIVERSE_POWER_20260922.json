@@ -1,0 +1,12 @@
+{
+  "weeks_T": 207,
+  "universe_size_median": 112,
+  "universe_size_min": 43,
+  "sigma_weekly_std": 0.1204,
+  "sigma_weekly_robust_mad": 0.0588,
+  "delta_min_actual_universe": 0.00534,
+  "delta_min_N40_k8": 0.00847,
+  "delta_min_strictest": 0.00847,
+  "power_limit": 0.0075,
+  "verdict": "FAIL"
+}
