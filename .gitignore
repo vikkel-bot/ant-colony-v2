@@ -13,3 +13,4 @@ build/
 .env
 .claude/settings.local.json
 .codex_test_tmp/
+.cache/
