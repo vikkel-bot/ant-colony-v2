@@ -19,6 +19,7 @@ from unittest.mock import MagicMock
 
 from ant_colony.queen.queen import Queen
 from ant_colony.tools.atomic_io import read_text_with_retry
+from ant_colony.tools.atomic_io import read_text_with_retry
 
 
 def _queen(tmp_path: Path) -> Queen:
