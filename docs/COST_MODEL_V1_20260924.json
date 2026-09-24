@@ -1,0 +1,155 @@
+{
+  "version": "COST_MODEL_V1_20260924",
+  "created_from": {
+    "snapshots": 8,
+    "first": "2026-09-22T15:48:57.498020+00:00",
+    "last": "2026-09-24T15:51:06.251812+00:00",
+    "markets": 172
+  },
+  "fee_per_side": 0.0025,
+  "estimator_for_gate": "p75",
+  "reference_notional_eur": 5000,
+  "sizes_eur": [
+    1000,
+    5000,
+    10000,
+    25000
+  ],
+  "turnover_buckets": [
+    {
+      "label": "Q1",
+      "n_markets": 43,
+      "min_turnover": 50489,
+      "max_turnover": 77344,
+      "costs": {
+        "median": {
+          "1000": 0.001376,
+          "5000": 0.002374,
+          "10000": 0.003493,
+          "25000": 0.008023
+        },
+        "p75": {
+          "1000": 0.001507,
+          "5000": 0.002522,
+          "10000": 0.003715,
+          "25000": 0.009202
+        },
+        "p90": {
+          "1000": 0.00165,
+          "5000": 0.002749,
+          "10000": 0.004259,
+          "25000": 0.010062
+        },
+        "max": {
+          "1000": 0.001829,
+          "5000": 0.002899,
+          "10000": 0.004671,
+          "25000": 0.01122
+        }
+      }
+    },
+    {
+      "label": "Q2",
+      "n_markets": 43,
+      "min_turnover": 77938,
+      "max_turnover": 148173,
+      "costs": {
+        "median": {
+          "1000": 0.001323,
+          "5000": 0.001968,
+          "10000": 0.003115,
+          "25000": 0.00742
+        },
+        "p75": {
+          "1000": 0.001433,
+          "5000": 0.002178,
+          "10000": 0.003359,
+          "25000": 0.008073
+        },
+        "p90": {
+          "1000": 0.001604,
+          "5000": 0.00271,
+          "10000": 0.003614,
+          "25000": 0.009247
+        },
+        "max": {
+          "1000": 0.001819,
+          "5000": 0.00285,
+          "10000": 0.003886,
+          "25000": 0.010293
+        }
+      }
+    },
+    {
+      "label": "Q3",
+      "n_markets": 43,
+      "min_turnover": 148557,
+      "max_turnover": 378858,
+      "costs": {
+        "median": {
+          "1000": 0.001012,
+          "5000": 0.001715,
+          "10000": 0.00241,
+          "25000": 0.005836
+        },
+        "p75": {
+          "1000": 0.001148,
+          "5000": 0.001947,
+          "10000": 0.002818,
+          "25000": 0.006833
+        },
+        "p90": {
+          "1000": 0.001346,
+          "5000": 0.002041,
+          "10000": 0.003223,
+          "25000": 0.008221
+        },
+        "max": {
+          "1000": 0.001557,
+          "5000": 0.002242,
+          "10000": 0.00338,
+          "25000": 0.008578
+        }
+      }
+    },
+    {
+      "label": "Q4",
+      "n_markets": 43,
+      "min_turnover": 382736,
+      "max_turnover": null,
+      "costs": {
+        "median": {
+          "1000": 0.000538,
+          "5000": 0.000794,
+          "10000": 0.000963,
+          "25000": 0.00134
+        },
+        "p75": {
+          "1000": 0.000645,
+          "5000": 0.00096,
+          "10000": 0.001079,
+          "25000": 0.001551
+        },
+        "p90": {
+          "1000": 0.000714,
+          "5000": 0.001001,
+          "10000": 0.001139,
+          "25000": 0.001713
+        },
+        "max": {
+          "1000": 0.000759,
+          "5000": 0.001093,
+          "10000": 0.001264,
+          "25000": 0.001831
+        }
+      }
+    }
+  ],
+  "limitations": [
+    "Snapshots meten zichtbare rustende liquiditeit op een moment; bij grote orders kan de werkelijke impact hoger zijn door terugtrekkende quotes en adverse selection.",
+    "Huidige orderboeken; historische orderboeken (2022-2025) zijn niet beschikbaar.",
+    "Tarief 0,25% per kant: geen volumekorting waarvan structureel bereiken nog niet is aangetoond.",
+    "estimator_for_gate = p75 is een VOORLOPIGE policy choice vanwege de kleine steekproef; bij voldoende snapshots wordt vooraf besloten of p75 of p90 de norm wordt, in een NIEUWE versie.",
+    "Dit model bevat geen sizing-regel; order_notional is invoer."
+  ]
+}
