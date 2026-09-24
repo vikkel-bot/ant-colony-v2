@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Volledige geschiedenis is VERPLICHT: verify_research_log vergelijkt
+          # commit-tijden van pre-registraties en resultaten. Met een ondiepe
+          # clone lijken alle bestanden uit een commit te komen en faalt de
+          # verificatie terecht (fail-closed).
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Afhankelijkheden
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Testsuite
+        run: python -m pytest tests -q
+
+      - name: Verificatie toetsregister (fail-closed)
+        run: python scripts/verify_research_log.py

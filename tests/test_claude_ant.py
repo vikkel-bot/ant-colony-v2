@@ -24,6 +24,7 @@ Scenarios:
 from __future__ import annotations
 
 import json
+import time
 import uuid
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -604,7 +605,7 @@ def test_pipeline_not_ready_blocks_api_call(tmp_path: Path) -> None:
     """Als pipeline niet groen is, wordt de API niet aangeroepen."""
     ant = make_ant(tmp_path)
     ant._status = AntStatus.RUNNING
-    ant._last_api_call = 0.0
+    ant._last_api_call = time.monotonic() - 86_400.0
     # Geen research kandidaten → pipeline not ready
     ant._month_cost_eur = 0.0
 
@@ -620,7 +621,7 @@ def test_pipeline_not_ready_logs_wait_message(tmp_path: Path, caplog) -> None:
     import logging
     ant = make_ant(tmp_path)
     ant._status = AntStatus.RUNNING
-    ant._last_api_call = 0.0
+    ant._last_api_call = time.monotonic() - 86_400.0
     ant._month_cost_eur = 0.0
     # Geen research → pipeline not ready
 
@@ -841,7 +842,7 @@ def test_dedup_skips_api_call_on_same_candidates(tmp_path: Path) -> None:
     ant = make_ant(tmp_path)
     write_research_recent(tmp_path, 3)
     ant._status = AntStatus.RUNNING
-    ant._last_api_call = 0.0   # rate limit niet actief
+    ant._last_api_call = time.monotonic() - 86_400.0   # rate limit niet actief
 
     call_count = 0
 
@@ -853,7 +854,7 @@ def test_dedup_skips_api_call_on_same_candidates(tmp_path: Path) -> None:
     ant._tick()
     assert call_count == 1  # eerste tick: API aangeroepen
 
-    ant._last_api_call = 0.0  # reset rate limit
+    ant._last_api_call = time.monotonic() - 86_400.0  # reset rate limit
     ant._tick()
     assert call_count == 1  # tweede tick: zelfde IDs → overgeslagen
 
@@ -863,7 +864,7 @@ def test_dedup_calls_api_on_new_candidates(tmp_path: Path) -> None:
     ant = make_ant(tmp_path)
     write_research_recent(tmp_path, 3)
     ant._status = AntStatus.RUNNING
-    ant._last_api_call = 0.0
+    ant._last_api_call = time.monotonic() - 86_400.0
 
     call_count = 0
 
@@ -877,7 +878,7 @@ def test_dedup_calls_api_on_new_candidates(tmp_path: Path) -> None:
 
     # Voeg nieuwe kandidaten toe → andere IDs
     write_research_recent(tmp_path, 3)
-    ant._last_api_call = 0.0
+    ant._last_api_call = time.monotonic() - 86_400.0
     ant._tick()
     assert call_count == 2  # nieuwe IDs → API opnieuw aangeroepen
 
