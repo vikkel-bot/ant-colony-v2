@@ -47,6 +47,7 @@ from pathlib import Path
 from threading import Event, RLock, Thread
 
 from ant_colony.colony.node_registry import NodeRegistry
+from ant_colony.tools.atomic_io import atomic_write_text, read_text_with_retry
 from ant_colony.colony.scheduler.colony_scheduler import ColonyScheduler, KillLevel
 from ant_colony.lab.promotion_criteria import AssessmentResult, PromotionCriteria
 from ant_colony.queen.allocator import (
@@ -803,7 +804,7 @@ class Queen:
         if path is None or not path.exists():
             return _default_watchtower_state()
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = json.loads(read_text_with_retry(path))
         except (OSError, json.JSONDecodeError):
             logger.warning("Watchtower Queen-state kon niet gelezen worden: %s", path)
             return _default_watchtower_state()
@@ -820,9 +821,9 @@ class Queen:
         try:
             with self._watchtower_write_lock:
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(
+                atomic_write_text(
+                    path,
                     json.dumps(snapshot, ensure_ascii=False, indent=2, default=str),
-                    encoding="utf-8",
                 )
         except OSError:
             logger.exception("Watchtower Queen-state kon niet geschreven worden: %s", path)

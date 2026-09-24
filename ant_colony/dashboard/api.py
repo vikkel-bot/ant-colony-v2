@@ -45,6 +45,7 @@ from pydantic import BaseModel, Field
 from ant_colony.biome.biome_registry import BiomeRegistry
 from ant_colony.colony.scheduler.colony_scheduler import ColonyScheduler
 from ant_colony.queen.queen import Queen
+from ant_colony.tools.atomic_io import read_text_with_retry
 from ant_colony.queen.regime_schema import build_regime_snapshot
 from ant_colony.schemas.mission import Mission
 from ant_colony.strategies import ACTIVE_STRATEGY_TYPES, DISABLED_STRATEGY_TYPES
@@ -4901,7 +4902,7 @@ def _read_queen_watchtower_state(logs_root: Path) -> dict[str, Any] | None:
     if not path.exists():
         return None
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(read_text_with_retry(path))
     except (OSError, json.JSONDecodeError):
         return None
     return data if isinstance(data, dict) else None
