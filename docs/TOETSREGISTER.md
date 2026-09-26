@@ -12,7 +12,7 @@ nooit gewijzigd of verwijderd; alleen toegevoegd.
 
 **Registratiedatum:** 2026-09-26
 **T-nummers:** SIT-1A = T002, SIT-1B = T003
-**Commit-hash van deze regel:** [zie commit 2 — commit 1 is de preregistratie-hash]
+**Commit-hash van deze regel:** fa7eb64ed1bd0f64c893c76f0d758523338b3a19
 **Status:** PREREGISTERED — geen data geopend, geen code geschreven op registratiedatum
 **Categorie:** capital allocation / position sizing. NIET alpha/edge discovery. NIET Sensor 2.
 **Multiple-testingregel (familie):** p-drempel = 0,05 / (6 × aantal toetsen t/m deze toets). SIT-1A: n=1 → 0,0083. SIT-1B: n=2 → 0,0042. Perturbaties, replicaties, transfer- en implementatiechecks tellen niet als toetsen.
