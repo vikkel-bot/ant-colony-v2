@@ -7,6 +7,7 @@ daarom staat hier per regel een repo die hem breekt.
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -161,3 +162,42 @@ def test_allowed_statuses_accepted(tmp_path, status):
             1_000_100)
     f = V.verify(repo, "docs/TOETSREGISTER.md")
     assert not any("niet toegestaan" in v for v in f.violations)
+
+# ---------------------------------------------------------------- uitzonderingen
+
+def _exceptions(repo: Path, shas_en_redenen: list[tuple[str, str]], when: int) -> None:
+    body = {"toelichting": "gedocumenteerde, bewust toegestane schendingen",
+            "uitzonderingen": [{"commit": s, "reden": r} for s, r in shas_en_redenen]}
+    _commit(repo, "docs/REGISTER_EXCEPTIONS.json", json.dumps(body, indent=2), when)
+
+
+def test_unlisted_deletion_still_fails(tmp_path):
+    repo = _clean(tmp_path)
+    _commit(repo, "docs/TOETSREGISTER.md",
+            HEADER + ROW.format(id="T1", prereg="PREREG_T1.md", status="PASS", result="T1_RESULT.md"),
+            1_000_400)
+    f = V.verify(repo, "docs/TOETSREGISTER.md")
+    assert not f.ok and any("append-only" in v for v in f.violations)
+
+
+def test_listed_deletion_is_tolerated_and_reported(tmp_path):
+    repo = _clean(tmp_path)
+    _commit(repo, "docs/TOETSREGISTER.md",
+            HEADER + ROW.format(id="T1", prereg="PREREG_T1.md", status="PENDING", result="-"),
+            1_000_500)
+    sha = subprocess.run(["git", "-C", str(repo), "log", "--format=%H", "-1"],
+                         capture_output=True, text=True).stdout.strip()
+    f = V.verify(repo, "docs/TOETSREGISTER.md")
+    assert not f.ok
+    _exceptions(repo, [(sha, "eenmalig herstel van een verkeerd geplaatste registratie")], 1_000_600)
+    f2 = V.verify(repo, "docs/TOETSREGISTER.md")
+    assert f2.ok, f2.violations
+    assert any("toegestane uitzondering" in c for c in f2.checked)
+
+
+def test_exception_must_name_a_reason(tmp_path):
+    repo = _clean(tmp_path)
+    _commit(repo, "docs/REGISTER_EXCEPTIONS.json",
+            json.dumps({"uitzonderingen": [{"commit": "deadbeef"}]}), 1_000_400)
+    with pytest.raises(KeyError):
+        V.load_exceptions(repo)

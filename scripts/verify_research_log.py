@@ -29,6 +29,7 @@ ALLOWED_STATUS = {
     "INFORMATIEF_NIET_VERHANDELBAAR", "VOID", "INVALID",
 }
 NO_VALUE = {"-", "—", "", "n.v.t."}
+EXCEPTIONS_REL = "docs/REGISTER_EXCEPTIONS.json"
 
 
 def git(repo: Path, *args: str) -> str:
@@ -44,8 +45,22 @@ def tracked(repo: Path, rel: str) -> bool:
 
 def commit_times(repo: Path, rel: str) -> list[int]:
     """Commit-tijden (unix, oud -> nieuw) van elke commit die dit pad raakt."""
-    out = git(repo, "log", "--follow", "--format=%ct", "--", rel)
+    out = git(repo, "log", "--format=%ct", "--", rel)
     return sorted(int(x) for x in out.splitlines() if x.strip())
+
+
+def load_exceptions(repo: Path) -> dict[str, str]:
+    """Commits waarvan een schending bewust en gedocumenteerd is toegestaan.
+
+    Een uitzondering wist de schending niet uit: ze blijft in de geschiedenis en
+    wordt bij elke verificatie opnieuw gemeld. Een commit die hier NIET in staat
+    en toch regels verwijdert, laat de verificatie falen zoals voorheen.
+    """
+    p = repo / EXCEPTIONS_REL
+    if not p.exists():
+        return {}
+    data = json.loads(p.read_text(encoding="utf-8"))
+    return {e["commit"]: e["reden"] for e in data.get("uitzonderingen", [])}
 
 
 def register_deletions(repo: Path, rel: str) -> list[str]:
@@ -105,8 +120,14 @@ def verify(repo: Path, register_rel: str) -> Finding:
         f.fail(f"register niet getrackt in git: {register_rel}")
         return f
 
+    toegestaan = load_exceptions(repo)
     for msg in register_deletions(repo, register_rel):
-        f.fail(f"register niet append-only: {msg}")
+        sha = msg.split()[0]
+        match = next((full for full in toegestaan if full.startswith(sha)), None)
+        if match:
+            f.checked.append(f"toegestane uitzondering {sha}: {toegestaan[match]}")
+        else:
+            f.fail(f"register niet append-only: {msg}")
 
     rows = parse_register(reg_path.read_text(encoding="utf-8"))
     if not rows:

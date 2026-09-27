@@ -1,0 +1,13 @@
+{
+  "toelichting": "Gedocumenteerde, bewust toegestane schendingen van de append-only regel. Een uitzondering wist niets uit: de commit blijft in de geschiedenis en wordt bij elke verificatie opnieuw gemeld.",
+  "uitzonderingen": [
+    {
+      "commit": "fa7eb64ed1bd0f64c893c76f0d758523338b3a19",
+      "reden": "SIT-1A/1B preregistratie werd als volledige tekst in het register geplaatst in plaats van als indexregel met verwijzing. Zie REGISTER_INCIDENT_20260926.md."
+    },
+    {
+      "commit": "4915fb9933775f66120e66b7a939ea7956690f2b",
+      "reden": "Administratieve wijziging van een hashveld in diezelfde inline registratie; schendt append-only. Zie REGISTER_INCIDENT_20260926.md."
+    }
+  ]
+}
