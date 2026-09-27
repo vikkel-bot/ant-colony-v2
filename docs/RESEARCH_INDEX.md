@@ -25,8 +25,8 @@ de laatste regel per id is de huidige status.
 |---|---|---|---|---|---|
 | T001 | CRYPTO_XS_PRICE_MOMENTUM | **PENDING** | - | [PREREG_T001_MOMENTUM21_20260922.md](PREREG_T001_MOMENTUM21_20260922.md) (2026-09-22) | - |
 | T001 | CRYPTO_XS_PRICE_MOMENTUM | **FAIL** | FAIL (S1 niet significant onder N1). | [PREREG_T001_MOMENTUM21_20260922.md](PREREG_T001_MOMENTUM21_20260922.md) (2026-09-22) | [T001_RESULT_20260922.md](T001_RESULT_20260922.md) |
-| T002 | SIZING_CREDIT_INFO | **PENDING** | - | [PREREG_SIT1_20260926.md](PREREG_SIT1_20260926.md) (niet gecommit) | - |
-| T003 | SIZING_CREDIT_INFO | **PENDING** | - | [PREREG_SIT1_20260926.md](PREREG_SIT1_20260926.md) (niet gecommit) | - |
+| T002 | SIZING_CREDIT_INFO | **PENDING** | - | [PREREG_SIT1_20260926.md](PREREG_SIT1_20260926.md) (2026-09-27) | - |
+| T003 | SIZING_CREDIT_INFO | **PENDING** | - | [PREREG_SIT1_20260926.md](PREREG_SIT1_20260926.md) (2026-09-27) | - |
 
 ## Stage-gates
 
@@ -63,7 +63,7 @@ reeds geregistreerde toetsen blijven verwijzen naar de versie die toen gold.
 | [SCREENING_CANDIDATES_20260926.md](SCREENING_CANDIDATES_20260926.md) | Screening kandidaat-sensoren — 26-09-2026 | 2026-09-26 |
 | [SCREENING_TURNOVER_20260924.md](SCREENING_TURNOVER_20260924.md) | Pre-test screening: turnover en minimale bruto edge | 2026-09-26 |
 | [OPEN_EXECUTION_CONFLICT_20260924.md](OPEN_EXECUTION_CONFLICT_20260924.md) | Openstaand architectuurconflict — cross-sectionele research vs paper-keten | 2026-09-24 |
-| [PREREG_SIT1_20260926.md](PREREG_SIT1_20260926.md) | REGISTERREGEL — Familie `SIZING_CREDIT_INFO` | niet gecommit |
+| [PREREG_SIT1_20260926.md](PREREG_SIT1_20260926.md) | REGISTERREGEL — Familie `SIZING_CREDIT_INFO` | 2026-09-27 |
 | [PREREG_T001_MOMENTUM21_20260922.md](PREREG_T001_MOMENTUM21_20260922.md) | Pre-registratie T001 — crypto cross-sectioneel momentum, 3 weken | 2026-09-22 |
 | [PREREG_UNIVERSE_20260922.md](PREREG_UNIVERSE_20260922.md) | Pre-registratie — universum-drempel cross-sectioneel crypto | 2026-09-22 |
 | [PREREG_UNIVERSE_v2_20260922.md](PREREG_UNIVERSE_v2_20260922.md) | Pre-registratie v2 — universum cross-sectioneel crypto | 2026-09-22 |

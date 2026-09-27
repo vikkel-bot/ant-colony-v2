@@ -8,6 +8,10 @@
     {
       "commit": "4915fb9933775f66120e66b7a939ea7956690f2b",
       "reden": "Administratieve wijziging van een hashveld in diezelfde inline registratie; schendt append-only. Zie REGISTER_INCIDENT_20260926.md."
+    },
+    {
+      "commit": "8d731ff1ec1ff2479a848fc7ade6805609cd5ab2",
+      "reden": "Herstelcommit: verplaatst de inline SIT-1-registratie naar PREREG_SIT1_20260926.md en voegt de indexregels T002/T003 toe. Verwijdert daarbij 274 regels uit het register. Zie REGISTER_INCIDENT_20260926.md."
     }
   ]
 }
