@@ -21,7 +21,7 @@ Maatstaf 3 is nog nooit gebruikt: er is nog niets door 1 en 2 gekomen.
 Bron: docs/TOETSREGISTER.md (append-only). Elke regel is een aparte registratie;
 de laatste regel per id is de huidige status.
 
-| id | familie | status | uitkomst | pre-registratie | resultaat |
+| id | familie | status | uitkomst | pre-registratie (datum = eerste commit van het bestand, niet het registratietijdstip) | resultaat |
 |---|---|---|---|---|---|
 | T001 | CRYPTO_XS_PRICE_MOMENTUM | **PENDING** | - | [PREREG_T001_MOMENTUM21_20260922.md](PREREG_T001_MOMENTUM21_20260922.md) (2026-09-22) | - |
 | T001 | CRYPTO_XS_PRICE_MOMENTUM | **FAIL** | FAIL (S1 niet significant onder N1). | [PREREG_T001_MOMENTUM21_20260922.md](PREREG_T001_MOMENTUM21_20260922.md) (2026-09-22) | [T001_RESULT_20260922.md](T001_RESULT_20260922.md) |
@@ -30,7 +30,7 @@ de laatste regel per id is de huidige status.
 
 ## Stage-gates
 
-| document | titel | eerste commit |
+| document | titel | eerste commit van het bestand |
 |---|---|---|
 | [GATE_FASE1_EXIT_KETEN.md](GATE_FASE1_EXIT_KETEN.md) | Gate-bewijs — Fase 1: EXIT_KETEN_VOLLEDIG_CORRECT | 2026-04-16 |
 | [GATE_FASE2_PAPER_LOOP.md](GATE_FASE2_PAPER_LOOP.md) | Gate-bewijs Fase 2 — Paper Loop | 2026-04-16 |
@@ -55,7 +55,7 @@ reeds geregistreerde toetsen blijven verwijzen naar de versie die toen gold.
 
 ## Metingen en rapporten
 
-| document | titel | eerste commit |
+| document | titel | eerste commit van het bestand |
 |---|---|---|
 | [METING_BTC_DONCHIAN_PERMUTATIE_20260920.md](METING_BTC_DONCHIAN_PERMUTATIE_20260920.md) | Meting — BTC-EUR Donchian trendvolgen, dagbasis, permutatietoets | 2026-09-21 |
 | [METING_WATCHTOWER_SENTIMENT_20260920.md](METING_WATCHTOWER_SENTIMENT_20260920.md) | Meting — Watchtower nieuwssentiment, BTC-EUR | 2026-09-20 |

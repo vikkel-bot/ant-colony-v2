@@ -88,7 +88,7 @@ def tests_section() -> str:
     out = ["## Toetsen", "",
            "Bron: docs/TOETSREGISTER.md (append-only). Elke regel is een aparte registratie;",
            "de laatste regel per id is de huidige status.", "",
-           "| id | familie | status | uitkomst | pre-registratie | resultaat |",
+           "| id | familie | status | uitkomst | pre-registratie (datum = eerste commit van het bestand, niet het registratietijdstip) | resultaat |",
            "|---|---|---|---|---|---|"]
     for test_id, family, prereg, status, result in rows:
         res_path = DOCS / result
@@ -100,7 +100,7 @@ def tests_section() -> str:
 
 
 def gates_section() -> str:
-    out = ["## Stage-gates", "", "| document | titel | eerste commit |", "|---|---|---|"]
+    out = ["## Stage-gates", "", "| document | titel | eerste commit van het bestand |", "|---|---|---|"]
     for p in sorted(DOCS.glob("GATE_*.md")):
         out.append(f"| [{p.name}]({p.name}) | {first_heading(p)} | {git_date('docs/' + p.name)} |")
     return "\n".join(out) + "\n"
@@ -122,7 +122,7 @@ def cost_models_section() -> str:
 
 
 def measurements_section() -> str:
-    out = ["## Metingen en rapporten", "", "| document | titel | eerste commit |", "|---|---|---|"]
+    out = ["## Metingen en rapporten", "", "| document | titel | eerste commit van het bestand |", "|---|---|---|"]
     patterns = ("METING_*.md", "COST_CENSUS_*.md", "SCREENING_*.md", "NOISE_*.md", "OPEN_*.md", "REGISTER_INCIDENT_*.md", "PREREG_*.md")
     seen: set[str] = set()
     for pat in patterns:
