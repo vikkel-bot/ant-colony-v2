@@ -1,0 +1,148 @@
+{
+ "methode": {
+  "instrument": "ant_colony.lab.xs_rank_test (spreads, N1, p_values)",
+  "injectie": "+delta op k(t) willekeurige munten, -delta*k/(n-k) op de rest",
+  "sensor": "perfect: selecteert de geinjecteerde deelverzameling (plafond)",
+  "no_trade": "overal False; delisting-afhandeling valt buiten deze meting",
+  "residuen": "docs\\NOISE_STRUCTURE_20260926.json",
+  "seed": 20260928,
+  "draws": 10000
+ },
+ "weken": 156,
+ "munten": 274,
+ "alphas": [
+  0.05,
+  0.0083
+ ],
+ "power": {
+  "0.0000": {
+   "reps": 300,
+   "power": {
+    "alpha_0.05": {
+     "S1_gemiddelde": 0.04,
+     "S2_mediaan": 0.03666666666666667,
+     "S3_fractie_pos": 0.02666666666666667
+    },
+    "alpha_0.0083": {
+     "S1_gemiddelde": 0.0,
+     "S2_mediaan": 0.0033333333333333335,
+     "S3_fractie_pos": 0.006666666666666667
+    }
+   },
+   "p_mediaan": {
+    "S1_gemiddelde": 0.5404959504049596,
+    "S2_mediaan": 0.5295470452954705,
+    "S3_fractie_pos": 0.5810918908109188
+   }
+  },
+  "0.0020": {
+   "reps": 300,
+   "power": {
+    "alpha_0.05": {
+     "S1_gemiddelde": 0.24,
+     "S2_mediaan": 0.27,
+     "S3_fractie_pos": 0.23333333333333334
+    },
+    "alpha_0.0083": {
+     "S1_gemiddelde": 0.056666666666666664,
+     "S2_mediaan": 0.08333333333333333,
+     "S3_fractie_pos": 0.07
+    }
+   },
+   "p_mediaan": {
+    "S1_gemiddelde": 0.20122987701229877,
+    "S2_mediaan": 0.1670832916708329,
+    "S3_fractie_pos": 0.18303169683031695
+   }
+  },
+  "0.0040": {
+   "reps": 300,
+   "power": {
+    "alpha_0.05": {
+     "S1_gemiddelde": 0.6366666666666667,
+     "S2_mediaan": 0.7133333333333334,
+     "S3_fractie_pos": 0.7
+    },
+    "alpha_0.0083": {
+     "S1_gemiddelde": 0.3233333333333333,
+     "S2_mediaan": 0.44666666666666666,
+     "S3_fractie_pos": 0.44
+    }
+   },
+   "p_mediaan": {
+    "S1_gemiddelde": 0.025147485251474852,
+    "S2_mediaan": 0.011698830116988301,
+    "S3_fractie_pos": 0.010748925107489251
+   }
+  },
+  "0.0060": {
+   "reps": 300,
+   "power": {
+    "alpha_0.05": {
+     "S1_gemiddelde": 0.92,
+     "S2_mediaan": 0.9433333333333334,
+     "S3_fractie_pos": 0.96
+    },
+    "alpha_0.0083": {
+     "S1_gemiddelde": 0.68,
+     "S2_mediaan": 0.8233333333333334,
+     "S3_fractie_pos": 0.81
+    }
+   },
+   "p_mediaan": {
+    "S1_gemiddelde": 0.0024497550244975503,
+    "S2_mediaan": 0.0004999500049995,
+    "S3_fractie_pos": 0.0008999100089991
+   }
+  },
+  "0.0080": {
+   "reps": 300,
+   "power": {
+    "alpha_0.05": {
+     "S1_gemiddelde": 1.0,
+     "S2_mediaan": 1.0,
+     "S3_fractie_pos": 1.0
+    },
+    "alpha_0.0083": {
+     "S1_gemiddelde": 0.9566666666666667,
+     "S2_mediaan": 0.9866666666666667,
+     "S3_fractie_pos": 0.99
+    }
+   },
+   "p_mediaan": {
+    "S1_gemiddelde": 9.999000099990002e-05,
+    "S2_mediaan": 9.999000099990002e-05,
+    "S3_fractie_pos": 9.999000099990002e-05
+   }
+  },
+  "0.0100": {
+   "reps": 300,
+   "power": {
+    "alpha_0.05": {
+     "S1_gemiddelde": 1.0,
+     "S2_mediaan": 1.0,
+     "S3_fractie_pos": 1.0
+    },
+    "alpha_0.0083": {
+     "S1_gemiddelde": 1.0,
+     "S2_mediaan": 1.0,
+     "S3_fractie_pos": 1.0
+    }
+   },
+   "p_mediaan": {
+    "S1_gemiddelde": 9.999000099990002e-05,
+    "S2_mediaan": 9.999000099990002e-05,
+    "S3_fractie_pos": 9.999000099990002e-05
+   }
+  }
+ },
+ "niveau_per_munt": {
+  "munten": 155,
+  "min_obs": 30,
+  "std_gemiddelde_per_munt": 0.01429850991982144,
+  "nul_mediaan": 0.01459609333704271,
+  "nul_p95": 0.016875717044321784,
+  "p": 0.6163836163836164,
+  "draws": 1000
+ }
+}
