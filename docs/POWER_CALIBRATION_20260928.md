@@ -30,7 +30,10 @@ S1 = gemiddelde, S2 = mediaan, S3 = fractie positieve weken. alpha 0,0083 = fami
 Lineair geinterpoleerd 80%-punt voor S1: ~0,52%/week bij alpha 0,05; ~0,69%/week bij alpha 0,0083.
 Ter vergelijking, analytisch (alpha onbekend): delta_min 0,534% (Universe v2), ~0,62% (T001-ontwerp).
 
-Bij delta = 0 ligt de detectiekans onder of op de nominale alpha: het instrument is niet anti-conservatief.
+Voor S2: ~0,58%/week (80%) en ~0,69% (90%) bij alpha 0,0083. Voor S1 bij alpha 0,0083, 90%: ~0,76%.
+
+Bij delta = 0 ligt de puntschatting onder of op de nominale alpha. Met 300 herhalingen (95%-bovengrens ~1,2% bij 0/300)
+is dat geen aanwijzing voor anti-conservatisme; het bewijst ook geen conservatisme.
 S2 haalt bij elke delta >= 0,40% ten minste de power van S1, bij beide alpha's.
 
 ## Niveauverschil per munt (meeneemvraag)
@@ -44,7 +47,7 @@ p = 0,62. Er is in dit blok geen meetbaar blijvend niveauverschil tussen munten.
 | voorspelling | uitkomst | |
 |---|---|---|
 | delta 0, S1, a=0.05 in 0,03-0,07 | 0,040 | goed |
-| delta 0, S1, a=0.0083: 1-5 van 300 | 0 | fout, conservatiever dan verwacht |
+| delta 0, S1, a=0.0083: 1-5 van 300 | 0 | fout; minder detecties dan verwacht, binnen de Monte-Carlo-onzekerheid |
 | 80% S1 bij a=0.0083 in 0,60-0,75% | ~0,69% | goed |
 | 80% S1 bij a=0.05 in 0,35-0,45% | ~0,52% | fout, te optimistisch na rookproef R=20 |
 | S2 >= S1 bij a=0.0083 voor delta >= 0,4% | ja | goed |
@@ -56,3 +59,6 @@ Les: een rookproef met R = 20 is een werkingstest, geen basis voor een schatting
 
 Geen keuze van target power, alpha of delta_econ; geen keuze om S2 boven S1 te stellen. Dat zijn
 beleidskeuzes voor de preregistratie van sensor 2 (`docs/RESEARCH_OPEN_ITEMS.md`).
+
+Correctie 28-09-2026 na externe review: conservatisme-claim teruggebracht tot wat 300 herhalingen dragen;
+S2- en 90%-punten toegevoegd (eerder in chat als 0,68 genoemd, juist is 0,69). Metingen ongewijzigd.
