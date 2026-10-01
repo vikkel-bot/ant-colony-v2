@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 ALLOWED_STATUS = {
-    "PENDING", "PASS", "FAIL", "INCONCLUSIVE",
+    "PENDING", "PASS", "DEVELOPMENT_PASS", "FAIL", "INCONCLUSIVE",
     "INFORMATIEF_NIET_VERHANDELBAAR", "VOID", "INVALID",
 }
 NO_VALUE = {"-", "—", "", "n.v.t."}
