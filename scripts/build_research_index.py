@@ -2,7 +2,7 @@
 
 De index wordt nooit met de hand bijgewerkt. Hij wordt gegenereerd uit:
   - docs/TOETSREGISTER.md      (append-only toetsregister)
-  - docs/GATE_*.md             (stage-gates)
+  - docs/GATE_*_JJJJMMDD.md    (onderzoeksgates; ongedateerde fasegates horen niet in deze index)
   - docs/COST_MODEL_*.json     (kostenmodelversies)
   - docs/RESEARCH_OPEN_ITEMS.md (met de hand bijgehouden: open keuzes en parkeerlijst)
   - de git-historie            (datum van eerste commit per document)
@@ -20,7 +20,6 @@ from __future__ import annotations
 import argparse
 import json
 import re
-import subprocess
 import sys
 from pathlib import Path
 
@@ -50,11 +49,15 @@ Maatstaf 3 is nog nooit gebruikt: er is nog niets door 1 en 2 gekomen.
 """
 
 
-def git_date(rel: str) -> str:
-    out = subprocess.run(["git", "-C", str(REPO), "log", "--diff-filter=A", "--format=%cs", "--", rel],
-                         capture_output=True, text=True)
-    lines = [x for x in out.stdout.splitlines() if x.strip()]
-    return lines[-1] if lines else "niet gecommit"
+def name_date(rel: str) -> str:
+    """Datum uit de bestandsnaam (_JJJJMMDD). Fail-closed: zonder geldige datum geen index."""
+    import datetime
+    import re
+    name = Path(rel).name
+    m = re.search(r"_(\d{4})(\d{2})(\d{2})(?=[_.])", name)
+    if not m:
+        raise ValueError(f"geen _JJJJMMDD-datum in bestandsnaam: {name}")
+    return datetime.date(int(m[1]), int(m[2]), int(m[3])).isoformat()
 
 
 def first_heading(path: Path) -> str:
@@ -88,21 +91,21 @@ def tests_section() -> str:
     out = ["## Toetsen", "",
            "Bron: docs/TOETSREGISTER.md (append-only). Elke regel is een aparte registratie;",
            "de laatste regel per id is de huidige status.", "",
-           "| id | familie | status | uitkomst | pre-registratie (datum = eerste commit van het bestand, niet het registratietijdstip) | resultaat |",
+           "| id | familie | status | uitkomst | pre-registratie (datum uit bestandsnaam, niet het registratietijdstip) | resultaat |",
            "|---|---|---|---|---|---|"]
     for test_id, family, prereg, status, result in rows:
         res_path = DOCS / result
         verdict = verdict_of(res_path) if result not in {"-", ""} and res_path.exists() else "-"
         res_cell = f"[{result}]({result})" if result not in {"-", ""} else "-"
         out.append(f"| {test_id} | {family} | **{status}** | {verdict} | "
-                   f"[{prereg}]({prereg}) ({git_date('docs/' + prereg)}) | {res_cell} |")
+                   f"[{prereg}]({prereg}) ({name_date('docs/' + prereg)}) | {res_cell} |")
     return "\n".join(out) + "\n"
 
 
 def gates_section() -> str:
-    out = ["## Stage-gates", "", "| document | titel | eerste commit van het bestand |", "|---|---|---|"]
-    for p in sorted(DOCS.glob("GATE_*.md")):
-        out.append(f"| [{p.name}]({p.name}) | {first_heading(p)} | {git_date('docs/' + p.name)} |")
+    out = ["## Stage-gates", "", "| document | titel | datum (bestandsnaam) |", "|---|---|---|"]
+    for p in sorted(q for q in DOCS.glob("GATE_*.md") if q.stem[-9:-8] == "_" and q.stem[-8:].isdigit()):
+        out.append(f"| [{p.name}]({p.name}) | {first_heading(p)} | {name_date('docs/' + p.name)} |")
     return "\n".join(out) + "\n"
 
 
@@ -122,7 +125,7 @@ def cost_models_section() -> str:
 
 
 def measurements_section() -> str:
-    out = ["## Metingen en rapporten", "", "| document | titel | eerste commit van het bestand |", "|---|---|---|"]
+    out = ["## Metingen en rapporten", "", "| document | titel | datum (bestandsnaam) |", "|---|---|---|"]
     patterns = ("METING_*.md", "COST_CENSUS_*.md", "SCREENING_*.md", "NOISE_*.md", "POWER_*.md", "OPEN_*.md", "REGISTER_INCIDENT_*.md", "PREREG_*.md")
     seen: set[str] = set()
     for pat in patterns:
@@ -130,7 +133,7 @@ def measurements_section() -> str:
             if p.name in seen:
                 continue
             seen.add(p.name)
-            out.append(f"| [{p.name}]({p.name}) | {first_heading(p)} | {git_date('docs/' + p.name)} |")
+            out.append(f"| [{p.name}]({p.name}) | {first_heading(p)} | {name_date('docs/' + p.name)} |")
     return "\n".join(out) + "\n"
 
 

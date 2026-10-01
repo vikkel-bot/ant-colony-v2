@@ -21,26 +21,17 @@ Maatstaf 3 is nog nooit gebruikt: er is nog niets door 1 en 2 gekomen.
 Bron: docs/TOETSREGISTER.md (append-only). Elke regel is een aparte registratie;
 de laatste regel per id is de huidige status.
 
-| id | familie | status | uitkomst | pre-registratie (datum = eerste commit van het bestand, niet het registratietijdstip) | resultaat |
+| id | familie | status | uitkomst | pre-registratie (datum uit bestandsnaam, niet het registratietijdstip) | resultaat |
 |---|---|---|---|---|---|
 | T001 | CRYPTO_XS_PRICE_MOMENTUM | **PENDING** | - | [PREREG_T001_MOMENTUM21_20260922.md](PREREG_T001_MOMENTUM21_20260922.md) (2026-09-22) | - |
 | T001 | CRYPTO_XS_PRICE_MOMENTUM | **FAIL** | FAIL (S1 niet significant onder N1). | [PREREG_T001_MOMENTUM21_20260922.md](PREREG_T001_MOMENTUM21_20260922.md) (2026-09-22) | [T001_RESULT_20260922.md](T001_RESULT_20260922.md) |
-| T002 | SIZING_CREDIT_INFO | **PENDING** | - | [PREREG_SIT1_20260926.md](PREREG_SIT1_20260926.md) (2026-09-27) | - |
-| T003 | SIZING_CREDIT_INFO | **PENDING** | - | [PREREG_SIT1_20260926.md](PREREG_SIT1_20260926.md) (2026-09-27) | - |
+| T002 | SIZING_CREDIT_INFO | **PENDING** | - | [PREREG_SIT1_20260926.md](PREREG_SIT1_20260926.md) (2026-09-26) | - |
+| T003 | SIZING_CREDIT_INFO | **PENDING** | - | [PREREG_SIT1_20260926.md](PREREG_SIT1_20260926.md) (2026-09-26) | - |
 
 ## Stage-gates
 
-| document | titel | eerste commit van het bestand |
+| document | titel | datum (bestandsnaam) |
 |---|---|---|
-| [GATE_FASE1_EXIT_KETEN.md](GATE_FASE1_EXIT_KETEN.md) | Gate-bewijs — Fase 1: EXIT_KETEN_VOLLEDIG_CORRECT | 2026-04-16 |
-| [GATE_FASE2_PAPER_LOOP.md](GATE_FASE2_PAPER_LOOP.md) | Gate-bewijs Fase 2 — Paper Loop | 2026-04-16 |
-| [GATE_FASE3_QUEEN.md](GATE_FASE3_QUEEN.md) | Gate-bewijs Fase 3 — Queen Governance | 2026-04-16 |
-| [GATE_FASE4_STRATEGY_LAB.md](GATE_FASE4_STRATEGY_LAB.md) | Gate-bewijs Fase 4 — Strategy Lab | 2026-04-16 |
-| [GATE_FASE5_MULTI_BIOME.md](GATE_FASE5_MULTI_BIOME.md) | Gate Fase 5 — Multi-Biome Scaffolding | 2026-04-16 |
-| [GATE_FASE6_QUEEN_ALLOCATOR.md](GATE_FASE6_QUEEN_ALLOCATOR.md) | Gate Fase 6 — Queen Allocator Upgrade | 2026-04-16 |
-| [GATE_FASE7_MULTI_NODE_SIM.md](GATE_FASE7_MULTI_NODE_SIM.md) | Gate Fase 7 — Paper-mode multi-node kolonie simulatie | 2026-04-16 |
-| [GATE_FASE8_GUARDED_LIVE_ADAPTERS.md](GATE_FASE8_GUARDED_LIVE_ADAPTERS.md) | Gate Fase 8 — Guarded live adapters | 2026-04-16 |
-| [GATE_FASE9_COLONY_DASHBOARD.md](GATE_FASE9_COLONY_DASHBOARD.md) | Gate Fase 9 — Colony Dashboard | 2026-04-16 |
 | [GATE_UNIVERSE_20260922.md](GATE_UNIVERSE_20260922.md) | Stage-gate UNIVERSE DEFINITION — resultaat 22-09-2026 | 2026-09-22 |
 | [GATE_UNIVERSE_v2_FROZEN_20260922.md](GATE_UNIVERSE_v2_FROZEN_20260922.md) | Stage-gate UNIVERSE DEFINITION — v2 FROZEN (22-09-2026) | 2026-09-22 |
 
@@ -55,18 +46,18 @@ reeds geregistreerde toetsen blijven verwijzen naar de versie die toen gold.
 
 ## Metingen en rapporten
 
-| document | titel | eerste commit van het bestand |
+| document | titel | datum (bestandsnaam) |
 |---|---|---|
-| [METING_BTC_DONCHIAN_PERMUTATIE_20260920.md](METING_BTC_DONCHIAN_PERMUTATIE_20260920.md) | Meting — BTC-EUR Donchian trendvolgen, dagbasis, permutatietoets | 2026-09-21 |
+| [METING_BTC_DONCHIAN_PERMUTATIE_20260920.md](METING_BTC_DONCHIAN_PERMUTATIE_20260920.md) | Meting — BTC-EUR Donchian trendvolgen, dagbasis, permutatietoets | 2026-09-20 |
 | [METING_WATCHTOWER_SENTIMENT_20260920.md](METING_WATCHTOWER_SENTIMENT_20260920.md) | Meting — Watchtower nieuwssentiment, BTC-EUR | 2026-09-20 |
 | [COST_CENSUS_20260924.md](COST_CENSUS_20260924.md) | Kostenmeting Bitvavo — 22 t/m 24 september 2026 | 2026-09-24 |
 | [SCREENING_CANDIDATES_20260926.md](SCREENING_CANDIDATES_20260926.md) | Screening kandidaat-sensoren — 26-09-2026 | 2026-09-26 |
-| [SCREENING_TURNOVER_20260924.md](SCREENING_TURNOVER_20260924.md) | Pre-test screening: turnover en minimale bruto edge | 2026-09-26 |
-| [NOISE_STRUCTURE_20260926.md](NOISE_STRUCTURE_20260926.md) | Ruisstructuur relatieve weekreturns — 26-09-2026 | 2026-09-27 |
+| [SCREENING_TURNOVER_20260924.md](SCREENING_TURNOVER_20260924.md) | Pre-test screening: turnover en minimale bruto edge | 2026-09-24 |
+| [NOISE_STRUCTURE_20260926.md](NOISE_STRUCTURE_20260926.md) | Ruisstructuur relatieve weekreturns — 26-09-2026 | 2026-09-26 |
 | [POWER_CALIBRATION_20260928.md](POWER_CALIBRATION_20260928.md) | Powerkalibratie xs_rank_test op de residuenmatrix (28-09-2026) | 2026-09-28 |
 | [OPEN_EXECUTION_CONFLICT_20260924.md](OPEN_EXECUTION_CONFLICT_20260924.md) | Openstaand architectuurconflict — cross-sectionele research vs paper-keten | 2026-09-24 |
-| [REGISTER_INCIDENT_20260926.md](REGISTER_INCIDENT_20260926.md) | Registerincident — 26-09-2026 | 2026-09-27 |
-| [PREREG_SIT1_20260926.md](PREREG_SIT1_20260926.md) | REGISTERREGEL — Familie `SIZING_CREDIT_INFO` | 2026-09-27 |
+| [REGISTER_INCIDENT_20260926.md](REGISTER_INCIDENT_20260926.md) | Registerincident — 26-09-2026 | 2026-09-26 |
+| [PREREG_SIT1_20260926.md](PREREG_SIT1_20260926.md) | REGISTERREGEL — Familie `SIZING_CREDIT_INFO` | 2026-09-26 |
 | [PREREG_T001_MOMENTUM21_20260922.md](PREREG_T001_MOMENTUM21_20260922.md) | Pre-registratie T001 — crypto cross-sectioneel momentum, 3 weken | 2026-09-22 |
 | [PREREG_UNIVERSE_20260922.md](PREREG_UNIVERSE_20260922.md) | Pre-registratie — universum-drempel cross-sectioneel crypto | 2026-09-22 |
 | [PREREG_UNIVERSE_v2_20260922.md](PREREG_UNIVERSE_v2_20260922.md) | Pre-registratie v2 — universum cross-sectioneel crypto | 2026-09-22 |
