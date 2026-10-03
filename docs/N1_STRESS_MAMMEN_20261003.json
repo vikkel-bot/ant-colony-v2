@@ -1,0 +1,186 @@
+{
+ "ontwerp": "docs/DESIGN_N1_STRESS_20261001.md (97c3b69)",
+ "variant": "mammen",
+ "master_seed": 20261001,
+ "resultaten": {
+  "uniform": {
+   "reps": 1000,
+   "draws": 10000,
+   "alpha_0.05": {
+    "verwerpingen": 51,
+    "fractie": 0.051,
+    "cp95": [
+     0.038205236774648835,
+     0.06651346159493202
+    ],
+    "oordeel": "GEEN_AANWIJZING"
+   },
+   "alpha_0.0083": {
+    "verwerpingen": 8,
+    "fractie": 0.008,
+    "cp95": [
+     0.0034599761653170413,
+     0.015702049176074102
+    ],
+    "oordeel": "GEEN_AANWIJZING",
+    "meer_runs_nodig": false
+   }
+  },
+  "1w_hoog": {
+   "reps": 1000,
+   "draws": 10000,
+   "weken": 155,
+   "aanvulweken": 0,
+   "Q": 0.0013060581725966394,
+   "alpha_0.05": {
+    "verwerpingen": 82,
+    "fractie": 0.082,
+    "cp95": [
+     0.0657458602717797,
+     0.1007628674153101
+    ],
+    "oordeel": "ANTI_CONSERVATIEF"
+   },
+   "alpha_0.0083": {
+    "verwerpingen": 25,
+    "fractie": 0.025,
+    "cp95": [
+     0.016242535696869523,
+     0.0366848230519229
+    ],
+    "oordeel": "ANTI_CONSERVATIEF",
+    "meer_runs_nodig": false
+   }
+  },
+  "1w_laag": {
+   "reps": 1000,
+   "draws": 10000,
+   "weken": 155,
+   "aanvulweken": 0,
+   "Q": 0.0050070498085743745,
+   "alpha_0.05": {
+    "verwerpingen": 53,
+    "fractie": 0.053,
+    "cp95": [
+     0.0399492523599779,
+     0.06875518328996177
+    ],
+    "oordeel": "GEEN_AANWIJZING"
+   },
+   "alpha_0.0083": {
+    "verwerpingen": 7,
+    "fractie": 0.007,
+    "cp95": [
+     0.002818858759609014,
+     0.014369194978917949
+    ],
+    "oordeel": "GEEN_AANWIJZING",
+    "meer_runs_nodig": false
+   }
+  },
+  "4w_hoog": {
+   "reps": 1000,
+   "draws": 10000,
+   "weken": 155,
+   "aanvulweken": 0,
+   "Q": 0.009608014799341943,
+   "alpha_0.05": {
+    "verwerpingen": 121,
+    "fractie": 0.121,
+    "cp95": [
+     0.10142580723068478,
+     0.14283576268156623
+    ],
+    "oordeel": "ANTI_CONSERVATIEF"
+   },
+   "alpha_0.0083": {
+    "verwerpingen": 34,
+    "fractie": 0.034,
+    "cp95": [
+     0.02365864810757458,
+     0.04718943861570579
+    ],
+    "oordeel": "ANTI_CONSERVATIEF",
+    "meer_runs_nodig": false
+   }
+  },
+  "4w_laag": {
+   "reps": 1000,
+   "draws": 10000,
+   "weken": 155,
+   "aanvulweken": 0,
+   "Q": 0.0092501811924352,
+   "alpha_0.05": {
+    "verwerpingen": 37,
+    "fractie": 0.037,
+    "cp95": [
+     0.026182708843712738,
+     0.050641123059924756
+    ],
+    "oordeel": "GEEN_AANWIJZING"
+   },
+   "alpha_0.0083": {
+    "verwerpingen": 1,
+    "fractie": 0.001,
+    "cp95": [
+     2.531748749129401e-05,
+     0.005558924279826757
+    ],
+    "oordeel": "CONSERVATIEF",
+    "meer_runs_nodig": false
+   }
+  },
+  "12w_hoog": {
+   "reps": 1000,
+   "draws": 10000,
+   "weken": 155,
+   "aanvulweken": 0,
+   "Q": 0.006531153879416221,
+   "alpha_0.05": {
+    "verwerpingen": 134,
+    "fractie": 0.134,
+    "cp95": [
+     0.11348831145419885,
+     0.1566928154672988
+    ],
+    "oordeel": "ANTI_CONSERVATIEF"
+   },
+   "alpha_0.0083": {
+    "verwerpingen": 52,
+    "fractie": 0.052,
+    "cp95": [
+     0.03907653494394127,
+     0.06763501405050454
+    ],
+    "oordeel": "ANTI_CONSERVATIEF",
+    "meer_runs_nodig": false
+   }
+  },
+  "12w_laag": {
+   "reps": 1000,
+   "draws": 10000,
+   "weken": 155,
+   "aanvulweken": 0,
+   "Q": 0.004052166158659585,
+   "alpha_0.05": {
+    "verwerpingen": 36,
+    "fractie": 0.036,
+    "cp95": [
+     0.025338914929814105,
+     0.0494929117180119
+    ],
+    "oordeel": "CONSERVATIEF"
+   },
+   "alpha_0.0083": {
+    "verwerpingen": 5,
+    "fractie": 0.005,
+    "cp95": [
+     0.001625419517555478,
+     0.011629470559811835
+    ],
+    "oordeel": "GEEN_AANWIJZING",
+    "meer_runs_nodig": false
+   }
+  }
+ }
+}
