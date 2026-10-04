@@ -1,0 +1,30 @@
+{
+ "ontwerp": "docs/DESIGN_N1_STRESS_20261001.md (97c3b69)",
+ "variant": "rademacher",
+ "master_seed": 20261001,
+ "resultaten": {
+  "uniform": {
+   "reps": 4000,
+   "draws": 10000,
+   "alpha_0.05": {
+    "verwerpingen": 207,
+    "fractie": 0.05175,
+    "cp95": [
+     0.04508968200690301,
+     0.05907427413774351
+    ],
+    "oordeel": "GEEN_AANWIJZING"
+   },
+   "alpha_0.0083": {
+    "verwerpingen": 30,
+    "fractie": 0.0075,
+    "cp95": [
+     0.005065773800127469,
+     0.010689537416458249
+    ],
+    "oordeel": "GEEN_AANWIJZING",
+    "meer_runs_nodig": false
+   }
+  }
+ }
+}
