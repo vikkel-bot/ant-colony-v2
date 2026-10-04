@@ -126,7 +126,7 @@ def cost_models_section() -> str:
 
 def measurements_section() -> str:
     out = ["## Metingen en rapporten", "", "| document | titel | datum (bestandsnaam) |", "|---|---|---|"]
-    patterns = ("METING_*.md", "COST_CENSUS_*.md", "SCREENING_*.md", "NOISE_*.md", "POWER_*.md", "DESIGN_*.md", "OPEN_*.md", "REGISTER_INCIDENT_*.md", "PREREG_*.md")
+    patterns = ("METING_*.md", "COST_CENSUS_*.md", "SCREENING_*.md", "NOISE_*.md", "POWER_*.md", "DESIGN_*.md", "N1_STRESS_*.md", "OPEN_*.md", "REGISTER_INCIDENT_*.md", "PREREG_*.md")
     seen: set[str] = set()
     for pat in patterns:
         for p in sorted(DOCS.glob(pat)):
