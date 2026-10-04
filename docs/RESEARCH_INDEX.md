@@ -55,6 +55,7 @@ reeds geregistreerde toetsen blijven verwijzen naar de versie die toen gold.
 | [SCREENING_TURNOVER_20260924.md](SCREENING_TURNOVER_20260924.md) | Pre-test screening: turnover en minimale bruto edge | 2026-09-24 |
 | [NOISE_STRUCTURE_20260926.md](NOISE_STRUCTURE_20260926.md) | Ruisstructuur relatieve weekreturns — 26-09-2026 | 2026-09-26 |
 | [POWER_CALIBRATION_20260928.md](POWER_CALIBRATION_20260928.md) | Powerkalibratie xs_rank_test op de residuenmatrix (28-09-2026) | 2026-09-28 |
+| [DESIGN_N1_REPAIR_20261004.md](DESIGN_N1_REPAIR_20261004.md) | Ontwerp reparatie N1 — twee kandidaten, blind gekalibreerd (04-10-2026) | 2026-10-04 |
 | [DESIGN_N1_STRESS_20261001.md](DESIGN_N1_STRESS_20261001.md) | Ontwerp N1-stresstest onder niet-uniforme selectie (01-10-2026) | 2026-10-01 |
 | [N1_STRESS_REPORT_20261004.md](N1_STRESS_REPORT_20261004.md) | N1-stresstest onder niet-uniforme selectie — rapport (04-10-2026) | 2026-10-04 |
 | [OPEN_EXECUTION_CONFLICT_20260924.md](OPEN_EXECUTION_CONFLICT_20260924.md) | Openstaand architectuurconflict — cross-sectionele research vs paper-keten | 2026-09-24 |
