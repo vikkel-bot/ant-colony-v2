@@ -1,0 +1,174 @@
+{
+ "ontwerp": "docs/DESIGN_N1_REPAIR_20261004.md (e3a67bf)",
+ "kandidaat": "strat",
+ "variant": "rademacher",
+ "master_seed": 20261004,
+ "resultaten": {
+  "uniform": {
+   "reps": 1000,
+   "draws": 10000,
+   "alpha_0.05": {
+    "verwerpingen": 50,
+    "fractie": 0.05,
+    "cp95": [
+     0.03733539760462569,
+     0.06539048791549151
+    ],
+    "oordeel": "GEEN_AANWIJZING"
+   },
+   "alpha_0.0083": {
+    "verwerpingen": 9,
+    "fractie": 0.009,
+    "cp95": [
+     0.004123395660330124,
+     0.017015783069893965
+    ],
+    "oordeel": "GEEN_AANWIJZING"
+   }
+  },
+  "1w_hoog": {
+   "reps": 1000,
+   "draws": 10000,
+   "weken": 155,
+   "aanvulweken": 0,
+   "alpha_0.05": {
+    "verwerpingen": 70,
+    "fractie": 0.07,
+    "cp95": [
+     0.054971524919117,
+     0.0876162334892831
+    ],
+    "oordeel": "ANTI_CONSERVATIEF"
+   },
+   "alpha_0.0083": {
+    "verwerpingen": 16,
+    "fractie": 0.016,
+    "cp95": [
+     0.009172319269212189,
+     0.02585324908137373
+    ],
+    "oordeel": "ANTI_CONSERVATIEF"
+   }
+  },
+  "1w_laag": {
+   "reps": 1000,
+   "draws": 10000,
+   "weken": 155,
+   "aanvulweken": 0,
+   "alpha_0.05": {
+    "verwerpingen": 41,
+    "fractie": 0.041,
+    "cp95": [
+     0.02958016853400776,
+     0.05521245931529799
+    ],
+    "oordeel": "GEEN_AANWIJZING"
+   },
+   "alpha_0.0083": {
+    "verwerpingen": 8,
+    "fractie": 0.008,
+    "cp95": [
+     0.0034599761653170413,
+     0.015702049176074102
+    ],
+    "oordeel": "GEEN_AANWIJZING"
+   }
+  },
+  "4w_hoog": {
+   "reps": 1000,
+   "draws": 10000,
+   "weken": 155,
+   "aanvulweken": 0,
+   "alpha_0.05": {
+    "verwerpingen": 70,
+    "fractie": 0.07,
+    "cp95": [
+     0.054971524919117,
+     0.0876162334892831
+    ],
+    "oordeel": "ANTI_CONSERVATIEF"
+   },
+   "alpha_0.0083": {
+    "verwerpingen": 12,
+    "fractie": 0.012,
+    "cp95": [
+     0.0062155255595826575,
+     0.02086767959103704
+    ],
+    "oordeel": "GEEN_AANWIJZING"
+   }
+  },
+  "4w_laag": {
+   "reps": 1000,
+   "draws": 10000,
+   "weken": 155,
+   "aanvulweken": 0,
+   "alpha_0.05": {
+    "verwerpingen": 40,
+    "fractie": 0.04,
+    "cp95": [
+     0.028727625285863895,
+     0.05407269681936701
+    ],
+    "oordeel": "GEEN_AANWIJZING"
+   },
+   "alpha_0.0083": {
+    "verwerpingen": 3,
+    "fractie": 0.003,
+    "cp95": [
+     0.0006190999316483582,
+     0.008742023238477708
+    ],
+    "oordeel": "GEEN_AANWIJZING"
+   }
+  },
+  "12w_hoog": {
+   "reps": 1000,
+   "draws": 10000,
+   "weken": 155,
+   "aanvulweken": 0,
+   "alpha_0.05": {
+    "verwerpingen": 36,
+    "fractie": 0.036,
+    "cp95": [
+     0.025338914929814105,
+     0.0494929117180119
+    ],
+    "oordeel": "CONSERVATIEF"
+   },
+   "alpha_0.0083": {
+    "verwerpingen": 4,
+    "fractie": 0.004,
+    "cp95": [
+     0.001090907987722203,
+     0.010209664683928931
+    ],
+    "oordeel": "GEEN_AANWIJZING"
+   }
+  },
+  "12w_laag": {
+   "reps": 1000,
+   "draws": 10000,
+   "weken": 155,
+   "aanvulweken": 0,
+   "alpha_0.05": {
+    "verwerpingen": 47,
+    "fractie": 0.047,
+    "cp95": [
+     0.034735062266763275,
+     0.06201263069330391
+    ],
+    "oordeel": "GEEN_AANWIJZING"
+   },
+   "alpha_0.0083": {
+    "verwerpingen": 6,
+    "fractie": 0.006,
+    "cp95": [
+     0.002204982485141424,
+     0.013013423270974253
+    ],
+    "oordeel": "GEEN_AANWIJZING"
+   }
+  }
+ }
+}
