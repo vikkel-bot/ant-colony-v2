@@ -1,0 +1,80 @@
+{
+ "ontwerp": "docs/DESIGN_N1_REPAIR_20261004.md (e3a67bf)",
+ "kandidaat": "hac",
+ "variant": "rademacher",
+ "master_seed": 20261004,
+ "resultaten": {
+  "4w_laag": {
+   "reps": 4000,
+   "draws": 10000,
+   "weken": 155,
+   "aanvulweken": 0,
+   "alpha_0.05": {
+    "verwerpingen": 213,
+    "fractie": 0.05325,
+    "cp95": [
+     0.04649531722476391,
+     0.060666212384629686
+    ],
+    "oordeel": "GEEN_AANWIJZING"
+   },
+   "alpha_0.0083": {
+    "verwerpingen": 32,
+    "fractie": 0.008,
+    "cp95": [
+     0.005478244460778742,
+     0.011274999645518164
+    ],
+    "oordeel": "GEEN_AANWIJZING"
+   }
+  },
+  "12w_hoog": {
+   "reps": 4000,
+   "draws": 10000,
+   "weken": 155,
+   "aanvulweken": 0,
+   "alpha_0.05": {
+    "verwerpingen": 196,
+    "fractie": 0.049,
+    "cp95": [
+     0.042516902232890175,
+     0.05615153084703026
+    ],
+    "oordeel": "GEEN_AANWIJZING"
+   },
+   "alpha_0.0083": {
+    "verwerpingen": 32,
+    "fractie": 0.008,
+    "cp95": [
+     0.005478244460778742,
+     0.011274999645518164
+    ],
+    "oordeel": "GEEN_AANWIJZING"
+   }
+  },
+  "12w_laag": {
+   "reps": 4000,
+   "draws": 10000,
+   "weken": 155,
+   "aanvulweken": 0,
+   "alpha_0.05": {
+    "verwerpingen": 189,
+    "fractie": 0.04725,
+    "cp95": [
+     0.04088268639680209,
+     0.054288616665554346
+    ],
+    "oordeel": "GEEN_AANWIJZING"
+   },
+   "alpha_0.0083": {
+    "verwerpingen": 43,
+    "fractie": 0.01075,
+    "cp95": [
+     0.007790448826999842,
+     0.014453136623646098
+    ],
+    "oordeel": "GEEN_AANWIJZING"
+   }
+  }
+ }
+}

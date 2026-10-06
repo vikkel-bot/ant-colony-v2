@@ -1,0 +1,102 @@
+{
+ "ontwerp": "docs/DESIGN_N1_REPAIR_20261004.md (e3a67bf)",
+ "kandidaat": "hac",
+ "variant": "rademacher",
+ "master_seed": 20261004,
+ "resultaten": {
+  "uniform": {
+   "reps": 4000,
+   "draws": 10000,
+   "alpha_0.05": {
+    "verwerpingen": 202,
+    "fractie": 0.0505,
+    "cp95": [
+     0.04391954261235392,
+     0.057746443762453664
+    ],
+    "oordeel": "GEEN_AANWIJZING"
+   },
+   "alpha_0.0083": {
+    "verwerpingen": 40,
+    "fractie": 0.01,
+    "cp95": [
+     0.007153487302498554,
+     0.013592504781031842
+    ],
+    "oordeel": "GEEN_AANWIJZING"
+   }
+  },
+  "1w_hoog": {
+   "reps": 4000,
+   "draws": 10000,
+   "weken": 155,
+   "aanvulweken": 0,
+   "alpha_0.05": {
+    "verwerpingen": 205,
+    "fractie": 0.05125,
+    "cp95": [
+     0.0446214903464206,
+     0.05854327697643738
+    ],
+    "oordeel": "GEEN_AANWIJZING"
+   },
+   "alpha_0.0083": {
+    "verwerpingen": 39,
+    "fractie": 0.00975,
+    "cp95": [
+     0.006942131455122291,
+     0.013304695204588976
+    ],
+    "oordeel": "GEEN_AANWIJZING"
+   }
+  },
+  "1w_laag": {
+   "reps": 4000,
+   "draws": 10000,
+   "weken": 155,
+   "aanvulweken": 0,
+   "alpha_0.05": {
+    "verwerpingen": 189,
+    "fractie": 0.04725,
+    "cp95": [
+     0.04088268639680209,
+     0.054288616665554346
+    ],
+    "oordeel": "GEEN_AANWIJZING"
+   },
+   "alpha_0.0083": {
+    "verwerpingen": 23,
+    "fractie": 0.00575,
+    "cp95": [
+     0.003648394668814718,
+     0.008615403619482136
+    ],
+    "oordeel": "GEEN_AANWIJZING"
+   }
+  },
+  "4w_hoog": {
+   "reps": 4000,
+   "draws": 10000,
+   "weken": 155,
+   "aanvulweken": 0,
+   "alpha_0.05": {
+    "verwerpingen": 207,
+    "fractie": 0.05175,
+    "cp95": [
+     0.04508968200690301,
+     0.05907427413774351
+    ],
+    "oordeel": "GEEN_AANWIJZING"
+   },
+   "alpha_0.0083": {
+    "verwerpingen": 30,
+    "fractie": 0.0075,
+    "cp95": [
+     0.005065773800127469,
+     0.010689537416458249
+    ],
+    "oordeel": "GEEN_AANWIJZING"
+   }
+  }
+ }
+}
