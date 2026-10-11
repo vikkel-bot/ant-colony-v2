@@ -59,6 +59,7 @@ reeds geregistreerde toetsen blijven verwijzen naar de versie die toen gold.
 | [DESIGN_N1_REPAIR_POWER_ADDENDUM_20261006.md](DESIGN_N1_REPAIR_POWER_ADDENDUM_20261006.md) | DESIGN — N1-reparatie: addendum powermeting HAC (06-10-2026) | 2026-10-06 |
 | [DESIGN_N1_STRESS_20261001.md](DESIGN_N1_STRESS_20261001.md) | Ontwerp N1-stresstest onder niet-uniforme selectie (01-10-2026) | 2026-10-01 |
 | [N1_STRESS_REPORT_20261004.md](N1_STRESS_REPORT_20261004.md) | N1-stresstest onder niet-uniforme selectie — rapport (04-10-2026) | 2026-10-04 |
+| [N1_REPAIR_REPORT_20261011.md](N1_REPAIR_REPORT_20261011.md) | N1-reparatie — eindrapport HAC-instrument (11-10-2026) | 2026-10-11 |
 | [OPEN_EXECUTION_CONFLICT_20260924.md](OPEN_EXECUTION_CONFLICT_20260924.md) | Openstaand architectuurconflict — cross-sectionele research vs paper-keten | 2026-09-24 |
 | [REGISTER_INCIDENT_20260926.md](REGISTER_INCIDENT_20260926.md) | Registerincident — 26-09-2026 | 2026-09-26 |
 | [PREREG_SIT1_20260926.md](PREREG_SIT1_20260926.md) | REGISTERREGEL — Familie `SIZING_CREDIT_INFO` | 2026-09-26 |
