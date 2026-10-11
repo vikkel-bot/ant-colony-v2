@@ -259,7 +259,7 @@ def run_part_b(m, paths, draws, reps, payload, save):
                        "oordeel": "FAIL" if any(rej) else "PASS",
                        "werkingskarakteristiek": gate_oc(reps, len(keys))}
     save()
-    print(f"GATE {payload['gate']['oordeel']} (compleet={complete})", flush=True)
+    print(f"GATE {payload['gate']['oordeel'] if complete else 'INCOMPLEET (geen oordeel)'} (compleet={complete})", flush=True)
 
 
 def run_part_c(m, paths, draws, gate_payload, dgps, payload, save, reps=REPS_C, reps_ext=REPS_EXT):

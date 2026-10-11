@@ -152,3 +152,10 @@ def test_part_c_smoke():
     P.run_part_c(m, ["4w_hoog"], 20, gate, ["block4"], payload, lambda: None, reps=3, reps_ext=3)
     assert "block4|4w_hoog|MDE" in payload["resultaten"]
     assert "MDE80" in payload["eligibility"]
+
+def test_part_b_incomplete_prints_incompleet(capsys):
+    m = _synthetic()
+    P.run_part_b(m, ["1w_hoog"], 20, 2, {}, lambda: None)
+    out = capsys.readouterr().out
+    assert "GATE INCOMPLEET" in out
+    assert "GATE PASS" not in out
