@@ -144,7 +144,7 @@ Een sensor die netto 1.000 tot 2.000 per jaar zou opleveren, wordt in ongeveer d
 ## 9. Open punten (niet in dit rapport beslist)
 
 1. Beleidsaanvulling punt 1: estimand blijft S1, teststatistiek wordt HAC-t, de powerkalibratie van 28-09 wordt vervangen door de cijfers van sectie 5.
-2. Wat de eligibility-regel doet bij MDE80 > 1,0 %/week: praktisch komt geen prijssensor erdoor. Dit is een programmabeslissing (opties met gevolgen horen in de beleidsaanvulling).
+2. [VERVALLEN — zie CORRECTIE 13-10-2026 hieronder] Wat de eligibility-regel doet bij MDE80 > 1,0 %/week: praktisch komt geen prijssensor erdoor. Dit is een programmabeslissing (opties met gevolgen horen in de beleidsaanvulling).
 3. Literatuurprotocol en routes L / T / X: beleidsaanvulling.
 4. Brokerkeuze (kosten, X-Perps-voorwaarde van OKX Europe) staat geparkeerd tot er een sensor door de holdout komt.
 5. Meer weken data of een ander ontwerp is de enige route naar lagere MDE; dat is geen onderdeel van dit instrument.
@@ -154,3 +154,11 @@ Een sensor die netto 1.000 tot 2.000 per jaar zou opleveren, wordt in ongeveer d
 - Bestanden: docs/N1_REPAIR_POWER_A_20261006.json, docs/N1_REPAIR_POWER_B_20261006.json, docs/N1_REPAIR_POWER_C_20261007.json.
 - Commando's: scripts/n1_repair_power.py --part A / B / C (C met --gate op het B-bestand). Deel C weigert zonder compleet B-bestand met oordeel PASS.
 - Printfix f1475ee wijzigt alleen de uitvoertekst bij een onvolledige Deel-B-run.
+
+## CORRECTIE — 13-10-2026
+
+Oorspronkelijke rapportstaat: commit 3182c89. De tekst van dit rapport is niet herschreven. Sectie 9 punt 2 is behouden en voorzien van de prefix [VERVALLEN — zie CORRECTIE 13-10-2026 hieronder].
+
+N1_REPAIR_REPORT_20261011.md stelt dat bij MDE80 > 1,0 % praktisch geen prijssensor eligible is. Op het moment van dat rapport bestond geen geregistreerde regel die sensor-eligibility afhankelijk maakte van MDE80. De bestaande beleidsregel vereiste uitsluitend rapportage van power bij delta_econ en erkende expliciet dat delta_econ onder de detectiegrens mocht liggen. De betreffende uitspraak was daarom een niet-geregistreerde beleidsinterpretatie en heeft geen normatieve werking.
+
+Controle: een sweep op HEAD 3182c89 (getrackte bestanden en git-historie, letterlijke zoektermen o.a. "geen prijssensor", "prijssensor", "niet eligible", "eligibility-MDE", "MDE80") vond de uitspraak alleen in dit rapport.
