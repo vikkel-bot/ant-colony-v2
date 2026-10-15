@@ -1,0 +1,75 @@
+{
+  "stap": "SIT-1 stap 2 (data ophalen)",
+  "prereg": "docs/PREREG_SIT1_20260926.md",
+  "bestanden": [
+    {
+      "file": "data/sit1/raw/ff_factors_daily.zip",
+      "url": "https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/F-F_Research_Data_Factors_daily_CSV.zip",
+      "downloaded_utc": "2026-10-15T19:54:39Z",
+      "sha256": "2f29e22546069914890a712680a6f81f3680ebc3543b52864484d209ca13a7db",
+      "bytes": 178184,
+      "last_modified": "Fri, 25 Sep 2026 21:55:02 GMT",
+      "vintage_in_file": "This file was created by using the 202608 CRSP database. | The Tbill return is the simple daily rate that, over the number of trading days | compounds to 1-month TBill rate. The 1-month TBill rate data until 202405 are from Ibbotson Associates. Starting from 202406, the 1-month TBill rate is from ICE BofA US 1-Month Treasury Bill Index. | ,Mkt-RF,SMB,HML,RF"
+    },
+    {
+      "file": "data/sit1/raw/ff_factors_monthly.zip",
+      "url": "https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/F-F_Research_Data_Factors_CSV.zip",
+      "downloaded_utc": "2026-10-15T19:54:39Z",
+      "sha256": "593f4fbef03181bc0b22ff6292f217689dd1fb79355049ca905d95b262040a66",
+      "bytes": 13065,
+      "last_modified": "Fri, 25 Sep 2026 21:55:02 GMT",
+      "vintage_in_file": "This file was created using the 202608 CRSP database. | The 1-month TBill rate data until 202405 are from Ibbotson Associates. Starting from 202406, the 1-month TBill rate is from ICE BofA US 1-Month Treasury Bill Index. | The annual TBill return is compounded from the monthly T-bill rates from January to December. | ,Mkt-RF,SMB,HML,RF"
+    },
+    {
+      "file": "data/sit1/raw/ff_dev_ex_us_daily.zip",
+      "url": "https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/Developed_ex_US_3_Factors_Daily_CSV.zip",
+      "downloaded_utc": "2026-10-15T19:54:40Z",
+      "sha256": "f1a4eac34fa560cb559c0f14c8ea590227ad6ddaf806110d5c38cf169a1e406f",
+      "bytes": 63569,
+      "last_modified": "Wed, 23 Sep 2026 19:20:47 GMT",
+      "vintage_in_file": "This file was created using the 202608 Bloomberg database. | Missing data are indicated by -99.99."
+    },
+    {
+      "file": "data/sit1/raw/fred_BAA.csv",
+      "url": "https://fred.stlouisfed.org/graph/fredgraph.csv?id=BAA",
+      "downloaded_utc": "2026-10-15T19:54:40Z",
+      "sha256": "3396297d0b2f8f4e8bb467207286c33c04d97bfe37b25bc5a97da6bafc615e93",
+      "bytes": 20869,
+      "last_modified": "Thu, 01 Oct 2026 15:31:24 GMT"
+    },
+    {
+      "file": "data/sit1/raw/fred_AAA.csv",
+      "url": "https://fred.stlouisfed.org/graph/fredgraph.csv?id=AAA",
+      "downloaded_utc": "2026-10-15T19:54:41Z",
+      "sha256": "15248259177710745867656c413bb2bae549c6485ca3acb7eed348a812f497ac",
+      "bytes": 20790,
+      "last_modified": "Thu, 01 Oct 2026 15:31:25 GMT"
+    },
+    {
+      "file": "data/sit1/raw/alfred_BAA_all_vintages.json",
+      "url": "https://api.stlouisfed.org/fred/series/observations?series_id=BAA",
+      "downloaded_utc": "2026-10-15T19:54:41Z",
+      "sha256": "46f2831139f68d9f0c440266701c0e30e077af6c159a95d56eb3e190a2d2d9b0",
+      "bytes": 136475,
+      "last_modified": ""
+    },
+    {
+      "file": "data/sit1/raw/alfred_AAA_all_vintages.json",
+      "url": "https://api.stlouisfed.org/fred/series/observations?series_id=AAA",
+      "downloaded_utc": "2026-10-15T19:54:42Z",
+      "sha256": "41f352689284fd2edf634888410c5928a8fa52374a5f0f2c7826080afa9c88ce",
+      "bytes": 136502,
+      "last_modified": ""
+    },
+    {
+      "file": "data/sit1/raw/yahoo_SPY_adjusted.csv",
+      "url": "yfinance download SPY auto_adjust=True",
+      "downloaded_utc": "2026-10-15T19:54:47Z",
+      "sha256": "04ed44b1b34a6466674342ff3233bd23d5cd57bdd40297178870adc7748bde38",
+      "bytes": 787293,
+      "last_modified": "",
+      "yfinance_version": "1.3.0"
+    }
+  ],
+  "fouten": []
+}
