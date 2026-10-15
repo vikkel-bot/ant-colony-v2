@@ -1,0 +1,63 @@
+{
+  "stap": "SIT-1 §1 vintage- en publicatiecontrole",
+  "commit": "891f6732c3a1ff83b2f10ebd0470a48af1785de5",
+  "manifest_sha256": "39dc85f0c790d334701f76bae4732ebc43ed33544ab9b79e30256253f9fc6e33",
+  "run_utc": "2026-10-15T20:20:12Z",
+  "vintage": {
+    "n_vintages": 361,
+    "first_vintage": "1996-12-03",
+    "last_vintage": "2026-10-01",
+    "max_dev_cs_bp": 2.0,
+    "max_dev_dcs_bp": 2.0,
+    "worst": [
+      "2009-01-05",
+      "2008-12"
+    ],
+    "months_dcs_dev_over_5bp": [],
+    "action": "geen herberekening nodig"
+  },
+  "publicatie_BAA": {
+    "months_checked": 357,
+    "median_days_after_month_end": 2,
+    "published_after_end_of_next_month": [
+      {
+        "maand": "2016-10",
+        "eerste_publicatie": "2017-03-22"
+      },
+      {
+        "maand": "2016-11",
+        "eerste_publicatie": "2017-03-22"
+      },
+      {
+        "maand": "2016-12",
+        "eerste_publicatie": "2017-03-22"
+      },
+      {
+        "maand": "2017-01",
+        "eerste_publicatie": "2017-03-22"
+      }
+    ]
+  },
+  "publicatie_AAA": {
+    "months_checked": 357,
+    "median_days_after_month_end": 2,
+    "published_after_end_of_next_month": [
+      {
+        "maand": "2016-10",
+        "eerste_publicatie": "2017-03-22"
+      },
+      {
+        "maand": "2016-11",
+        "eerste_publicatie": "2017-03-22"
+      },
+      {
+        "maand": "2016-12",
+        "eerste_publicatie": "2017-03-22"
+      },
+      {
+        "maand": "2017-01",
+        "eerste_publicatie": "2017-03-22"
+      }
+    ]
+  }
+}

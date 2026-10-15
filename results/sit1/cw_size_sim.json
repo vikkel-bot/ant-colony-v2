@@ -1,0 +1,35 @@
+{
+  "stap": "SIT-1 diagnostiek CW-size (synthetisch)",
+  "seed": 20261015,
+  "n_per_dgp": 5000,
+  "dgp": {
+    "AR1": {
+      "alpha_0.0500": {
+        "verwerpingen": 134,
+        "fractie": 0.0268,
+        "nominaal": 0.05,
+        "mc_se": 0.0030822070014844883
+      },
+      "alpha_0.0083": {
+        "verwerpingen": 24,
+        "fractie": 0.0048,
+        "nominaal": 0.008333333333333333,
+        "mc_se": 0.0012856040517117927
+      }
+    },
+    "HAR": {
+      "alpha_0.0500": {
+        "verwerpingen": 116,
+        "fractie": 0.0232,
+        "nominaal": 0.05,
+        "mc_se": 0.0030822070014844883
+      },
+      "alpha_0.0083": {
+        "verwerpingen": 18,
+        "fractie": 0.0036,
+        "nominaal": 0.008333333333333333,
+        "mc_se": 0.0012856040517117927
+      }
+    }
+  }
+}
