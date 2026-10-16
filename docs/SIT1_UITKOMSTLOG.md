@@ -36,8 +36,16 @@ Open punten, vastgelegd vóór de run:
 | Data opgehaald | 2026-10-15 | 1e13ae4 | FF daily/maand CRSP 202608; FF ex-US Bloomberg 202608; FRED BAA/AAA Last-Modified 2026-10-01; ALFRED 361 vintages 1996-12-03 t/m 2026-10-01; SPY yfinance 2026-10-15 | 8 bestanden, SHA256 in data/sit1/MANIFEST.json | - |
 | Code + tests groen | 2026-10-15 | 891f673 | - | 2691 passed (22 nieuw) | - |
 | Vintage-controle credit (§1) | 2026-10-15 | ffcf642 | idem | max afwijking dCS 2,0 bp; geen maand > 5 bp; geen herberekening | - |
+| SIT-1A development | 2026-10-15 | 2e5f61b (run op 8f6c4ab) | idem | FAIL: Delta +0,04 % [-0,38 %, +0,49 %], CW p 0,370, d +0,00107 | relevant effect uitgesloten |
+| Power-herberekening (MDE_CW, MDE_Delta) | 2026-10-15 | 2e5f61b | idem | MDE_CW 0,0030; MDE_Delta 0,62 % | - |
+| SIT-1A LHE | 2026-10-16 | - | - | niet gedraaid (besluit Vik): geen beslissingswaarde na development-FAIL; data t/m 2026-08 | - |
+| SIT-1A eindoordeel | 2026-10-16 | - | - | FAIL (definitief, §3.6) | - |
+| SIT-1B (T003) | 2026-10-16 | - | - | VOID: alleen PASS SIT-1A opent SIT-1B | - |
 
 ## §10 Prospectieve pristine sectie
 
 | maand | vastgelegd op (commit) | y0 | y1 | w_B1 | w_R1 | RV gerealiseerd | dCS gebruikt | delta_t | f_t |
 |---|---|---|---|---|---|---|---|---|---|
+
+Aanvulling 16-10-2026: open punten 1 en 3 vervallen door het definitieve FAIL-eindoordeel (§9);
+de prospectieve sectie wordt niet gebruikt. Open punt 2 is daarmee ook zonder gevolg.
